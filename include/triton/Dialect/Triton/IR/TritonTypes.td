@@ -50,7 +50,7 @@ class TT_PtrOf<list<Type> pointeeTypes> :
                 "ptr", "::mlir::triton::PointerType">;
 
 // Pointer Type in C++ (corresponding to `TT_PtrOf`)
-def TT_PtrType : TritonTypeDef<"Pointer", "ptr"> {
+def TT_PtrType : TritonTypeDef<"Pointer", "ptr", [MemRefElementTypeInterface]> {
     let summary = "Pointer type (`::mlir::triton::PointerType`) in Triton IR type system";
 
     let description = [{
