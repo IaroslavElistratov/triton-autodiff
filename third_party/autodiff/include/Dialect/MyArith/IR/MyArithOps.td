@@ -4,7 +4,8 @@
 include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
-include "triton/Dialect/MyArith/IR/MyArithDialect.td"
+include "autodiff/include/Dialect/MyArith/IR/MyArithDialect.td"
+
 
 // MyArithOps.td
 

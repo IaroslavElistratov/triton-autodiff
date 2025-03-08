@@ -5,10 +5,12 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/MyArith/IR/Dialect.h.inc"
+#include "triton/Dialect/Triton/IR/Dialect.h"   // same as amd
+// question-now: MyArithDialect?
+#include "autodiff/include/Dialect/MyArith/IR/Dialect.h.inc"
 
 #define GET_OP_CLASSES
-#include "triton/Dialect/MyArith/IR/Ops.h.inc"
+// question-now: MyArithOps?
+#include "autodiff/include/Dialect/MyArith/IR/Ops.h.inc"
 
 #endif

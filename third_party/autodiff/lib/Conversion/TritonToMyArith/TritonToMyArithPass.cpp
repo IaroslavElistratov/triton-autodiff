@@ -4,7 +4,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/MyArith/IR/Dialect.h"
+#include "autodiff/include/Dialect/MyArith/IR/Dialect.h"
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
@@ -14,7 +14,7 @@ namespace mlir {
 namespace triton {
 
 #define GEN_PASS_DEF_CONVERTTRITONTOMYARITH
-#include "triton/Conversion/TritonToMyArith/Passes.h.inc"
+#include "autodiff/include/Conversion/TritonToMyArith/Passes.h.inc"
 
 namespace {
 

@@ -207,6 +207,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   # We always build proton dialect
   list(APPEND TRITON_PLUGIN_NAMES "proton")
   add_subdirectory(third_party/proton/dialect)
+  add_subdirectory(third_party/autodiff)
 
   get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
   get_property(triton_plugins GLOBAL PROPERTY TRITON_PLUGINS)
