@@ -343,6 +343,39 @@ struct ConvertTritonToMyArith
       } else if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         printIndent() << "visiting tt.load op\n";
         // traverse parents to find the initial pointer
+
+        /// Create a builder and set insertion point to the given operation, which
+        /// will cause subsequent insertions to go right before it.
+        OpBuilder builder(loadOp);
+
+        Value upstream = grad_map[loadOp.getResult()];
+        Value ptr = loadOp->getOperand(0);
+        // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
+
+        // Create a ValueRange from the operands
+        SmallVector<Value> operands = {ptr, upstream};
+        // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
+        //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
+        // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
+        auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), ptr, upstream,
+                                                    triton::CacheModifier::NONE,
+                                                    triton::EvictionPolicy::NORMAL);
+
+        // mark as visited
+        //   get generic Operation, note returns a pointer
+        Operation* op = newOp.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+
+        // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
+        Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
+        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
+        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
+        // todo: we have already visistd this Operation, fine for my toy example, but keep in mind for the future examples
+        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        loadOp.erase();
+
       } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
         printIndent() << "visiting tt.make_range op\n";
       } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
