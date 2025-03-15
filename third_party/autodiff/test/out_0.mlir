@@ -89,6 +89,7 @@ visiting op: 'tt.func' with 0 operands and 0 results
        - Operand produced by operation 'arith.addf'
       
       visiting op: 'tt.return' with 0 operands and 0 results
+should be Value defined by add op: %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
 visiting arith.addf op
 visiting arith.constant op
 visiting tt.addptr op
@@ -108,7 +109,7 @@ visiting tt.splat op
     %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
     %6 = "tt.splat"(%arg1) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
     %7 = "tt.addptr"(%6, %1) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-    %8 = "tt.load"(%5) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> : (tensor<4xf32>) -> tensor<4xf32>
+    %8 = "tt.load"(%7) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
     "tt.return"() : () -> ()
   }) {noinline = false} : () -> ()
 }) : () -> ()

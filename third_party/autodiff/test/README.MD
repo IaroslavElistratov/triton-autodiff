@@ -45,7 +45,7 @@ tt.load -> atomic add into that location of memory
 tt.make_range -> treat as input constant?
 tt.splat(scalar_arg) -> grad for scalar_arg, sum that range
 tt.addptr -> ?
-tt.store -> ?
+tt.store -> load op loading upstream grad for these vlaues (note requires a different memory location though)
 
 // tt.func
 // tt.return

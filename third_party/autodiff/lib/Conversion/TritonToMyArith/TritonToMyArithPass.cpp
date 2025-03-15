@@ -17,10 +17,6 @@
 #include "llvm/Support/Debug.h"
 
 
-
-
-// #include "autodiff/lib/utils/print.cpp"
-
 namespace mlir {
 namespace triton {
 
@@ -216,6 +212,16 @@ struct ConvertTritonToMyArith
     printOperation(func, true);
 
 
+    // error hapening becuase Value (which is the type I'm trying to put into std::map) does not have move interface (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
+    // std::map<Value, Value> grad_map{};
+    // grad_map["SSD"] = 30;
+    // grad_map.size()
+    // print_map("map: ", grad_map);
+
+     llvm::DenseMap<Value, Value> grad_map{};
+
+
+
     // // Walk all operations opaquely.
     // // todo: I think, you don't need topo sort if you're iterating in post order traversal (visit children before parent)
     // func->walk<WalkOrder::PostOrder>([&](Operation *op) {           // https://mlir.llvm.org/doxygen/classmlir_1_1Operation.html#a59740592240b950b8c8afcf4a2eb4113
@@ -236,6 +242,10 @@ struct ConvertTritonToMyArith
     // for (auto *op : llvm::reverse(forwardSlice)) {
 
 
+      // if (auto is_visited = func->getAttrOfType<IntegerAttr>("autograd_visited")){
+      //   continue;
+      // }
+
       // triton
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
 
@@ -243,16 +253,17 @@ struct ConvertTritonToMyArith
       // if (triton::StoreOp storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
 
 
-
-        // 0th operand is array of pointers, get the size of that array
-        // auto buffer_size = storeOp.getLhs();
-        // question-now: why .getValue works for StoreOp, but not for AddPtrOp
+        // why .getValue works for StoreOp, but not for AddPtrOp
         //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation
         // Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
         // Operation* splatOp = addptrOp->getOperand(1).getDefiningOp();
 
 
-        // extract original ptr
+
+        // todo-now: maybe don't even need to replace original pointer (block arg) with grad pointer -- just allocate the grads outside of the kenrel and, for every arg of the kernel, pass grad of taht arg in that argument
+
+        // // extract original ptr (to the begining of the array which fwd STORE'ed the data in)
+        // note: I believe op.getPtr() retruns Value of one of the arguments to that op (the argument can be at different index, for different ops, depedining which one of the arugments is of type PointerType)
         // Value ptr = storeOp.getPtr();
         // auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
         // Value addptrPrt = addptrOp.getPtr();
@@ -262,7 +273,15 @@ struct ConvertTritonToMyArith
         // auto blockArg = cast<BlockArgument>(operand);
         // llvm::outs() << "blockArg: " << blockArg << "\n";
 
+        // // todo: need to replace the above with a new pointer, need to create a new pointer
 
+        // // todo-high: Instead of traversing manually, use getPointerTypeWithShape getPointerTypeSameShape? 
+        // // Type new_ptr = getPointerTypeSameShape(ptr);
+
+        // int address_space = 1;
+        // //  could not convert ‘blockArg’ from ‘mlir::BlockArgument’ to ‘mlir::Type’
+        // // so try passing not ‘blockArg’ but operand.getPtr()
+        // Type ptrType = getPointerType(operand.getPtr(), address_space);
 
 
 
@@ -272,23 +291,27 @@ struct ConvertTritonToMyArith
         /// will cause subsequent insertions to go right before it.
         OpBuilder builder(storeOp);
 
-        // // figure out which one is the tensor operand,
-        // // we already have the scalar operand as a parameter to this fn
-        // auto tensorOpnd = addFOp.getLhs() == tensorSrc ? addFOp.getRhs() : addFOp.getLhs();
-
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
-        Value ptr = storeOp->getOperand(1);
+        Value ptr = storeOp->getOperand(0);
         auto newOp = builder.create<triton::LoadOp>(storeOp.getLoc(), ptr.getType(), ptr);
 
+        // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
+        llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
+        grad_map[storeOp->getOperand(1)] = newOp.getResult();
         storeOp.erase();
 
-        // todo:
-        // I think I cant't use replace all uses with since i'm terating from the end of the graph, not from the begining
-        // replace the use of the result of "arith::AddFOp" with the
-        // result of "myarith::AddTensorScalarOp"
-        // storeOp->replaceAllUsesWith(newOp);
 
 
+
+        // // mark as visited
+        // newOp.setAttr("autograd_visited", true);
+
+
+
+        // We only have to rewrite load/stores with tensor pointers
+        // if (!triton::isTensorPointerType(ptr.getType())){
+        //   return nullptr;
+        // }
 
         // todo-now:
         //  1) replace that blockArg with another tensor (corresponding to grad of that original argument)
