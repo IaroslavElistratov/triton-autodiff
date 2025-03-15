@@ -926,6 +926,7 @@ void MakeTensorDescOp::build(OpBuilder &builder, OperationState &state,
   return build(builder, state, descTy, base, shape, strides);
 }
 
+// answer-now: FuncOp defined here
 // The following ops, including `call`, `func`, and `return` are copied and
 // modified from
 // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Func/IR/FuncOps.cpp
