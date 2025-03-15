@@ -242,9 +242,11 @@ struct ConvertTritonToMyArith
     // for (auto *op : llvm::reverse(forwardSlice)) {
 
 
-      // if (auto is_visited = func->getAttrOfType<IntegerAttr>("autograd_visited")){
-      //   continue;
-      // }
+      // if (bool is_visited = dyn_cast<bool>(op->getAttr("autogradVisited"))){
+    if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
+        llvm::outs() << "Skipping visited" << "\n";
+        continue;
+      }
 
       // triton
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
@@ -298,15 +300,30 @@ struct ConvertTritonToMyArith
         // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
         llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
         grad_map[storeOp->getOperand(1)] = newOp.getResult();
+
+
+
+
+        // mark as visited
+        //   get generic Operation, note returns a pointer
+        Operation* op = storeOp.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+
+        // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
+        ptr = storeOp.getPtr();
+        auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
+        addptrOp.getOperation()->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        Value addptrPrt = addptrOp.getPtr();
+        auto splatOp = addptrPrt.getDefiningOp<triton::SplatOp>();
+        splatOp.getOperation()->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        Value operand = splatOp->getOperand(0);
+        // Operation *producer = operand.getDefiningOp()
+        auto blockArg = cast<BlockArgument>(operand);
+        llvm::outs() << "blockArg: " << blockArg << "\n";
+
+
+
         storeOp.erase();
-
-
-
-
-        // // mark as visited
-        // newOp.setAttr("autograd_visited", true);
-
-
 
         // We only have to rewrite load/stores with tensor pointers
         // if (!triton::isTensorPointerType(ptr.getType())){
