@@ -90,20 +90,19 @@ visiting op: 'tt.func' with 0 operands and 0 results
       
       visiting op: 'tt.return' with 0 operands and 0 results
 should be Value defined by add op: %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
-blockArg: <block argument> of type '!tt.ptr<f32>' at index: 1
 visiting arith.addf op
 visiting arith.constant op
 Skipping visited
 visiting tt.load op
 visiting tt.addptr op
-visiting tt.make_range op
+Skipping visited
 visiting tt.splat op
 Skipping visited
 "builtin.module"() ({
   "tt.func"() <{arg_attrs = [{tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}], function_type = (!tt.ptr<f32>, !tt.ptr<f32>, i32) -> (), sym_name = "add_kernel", sym_visibility = "public"}> ({
   ^bb0(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: i32):
     %0 = "arith.constant"() <{value = dense<4.200000e+01> : tensor<4xf32>}> : () -> tensor<4xf32>
-    %1 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> : () -> tensor<4xi32>
+    %1 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> {autogradVisited = true} : () -> tensor<4xi32>
     %2 = "tt.splat"(%arg0) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
     %3 = "tt.addptr"(%2, %1) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
     %4 = "tt.load"(%3) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>

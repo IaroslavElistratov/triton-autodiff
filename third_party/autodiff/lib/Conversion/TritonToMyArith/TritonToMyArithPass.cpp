@@ -306,20 +306,19 @@ struct ConvertTritonToMyArith
 
         // mark as visited
         //   get generic Operation, note returns a pointer
-        Operation* op = storeOp.getOperation();
+        Operation* op = newOp.getOperation();
         op->setAttr("autogradVisited", builder.getBoolAttr(true));
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
-        ptr = storeOp.getPtr();
-        auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
-        addptrOp.getOperation()->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        Value addptrPrt = addptrOp.getPtr();
-        auto splatOp = addptrPrt.getDefiningOp<triton::SplatOp>();
-        splatOp.getOperation()->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        Value operand = splatOp->getOperand(0);
-        // Operation *producer = operand.getDefiningOp()
-        auto blockArg = cast<BlockArgument>(operand);
-        llvm::outs() << "blockArg: " << blockArg << "\n";
+        // note: .getDefiningOp wt specifying type, returns a pointer to Operation
+        Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
+        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
+        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
+        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+
+
 
 
 
