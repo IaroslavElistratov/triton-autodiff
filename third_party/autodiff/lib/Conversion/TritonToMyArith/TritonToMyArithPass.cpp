@@ -237,44 +237,58 @@ struct ConvertTritonToMyArith
 
 
       // triton
-      if (auto store_op = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
+      if (auto storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
 
       // The dyn_cast<> operator is a “checking cast” operation. It checks to see if the operand is of the specified type, and if so, returns a pointer to it (this operator does not work with references). If the operand is not of the correct type, a null pointer is returned. Thus, this works very much like the dynamic_cast<> operator in C++, and should be used in the same circumstances. Typically, the dyn_cast<> operator is used in an if statement or some other flow control statement like this -- https://llvm.org/docs/ProgrammersManual.html#dyn_cast
-      // if (triton::StoreOp store_op = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
+      // if (triton::StoreOp storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
 
 
 
         // 0th operand is array of pointers, get the size of that array
-        // auto buffer_size = store_op.getLhs();
-
-        // storeOp.getPtr(), storeOp.getValue(), storeOp.getCache(), storeOp.getEvict(), storeOp.getMask()
-
-
-
-
-        // Find an input or output value of LoadOp or StoreOp to get its layout
-        // Value val =
-        //     op->getNumResults() > 0 ? op->getResult(0) : op->getOperand(0);
-
-
+        // auto buffer_size = storeOp.getLhs();
         // question-now: why .getValue works for StoreOp, but not for AddPtrOp
         //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation
-        // Operation* addptrOp = store_op.getOperand(0).getDefiningOp();
+        // Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
         // Operation* splatOp = addptrOp->getOperand(1).getDefiningOp();
 
 
         // extract original ptr
-        Value ptr = store_op.getPtr();
-        auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
-        Value addptrPrt = addptrOp.getPtr();
-        auto splatOp = addptrPrt.getDefiningOp<triton::SplatOp>();
-        Value operand = splatOp->getOperand(0);
-        // Operation *producer = operand.getDefiningOp()
-        auto blockArg = cast<BlockArgument>(operand);
-        llvm::outs() << "blockArg: " << blockArg << "\n";
+        // Value ptr = storeOp.getPtr();
+        // auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
+        // Value addptrPrt = addptrOp.getPtr();
+        // auto splatOp = addptrPrt.getDefiningOp<triton::SplatOp>();
+        // Value operand = splatOp->getOperand(0);
+        // // Operation *producer = operand.getDefiningOp()
+        // auto blockArg = cast<BlockArgument>(operand);
+        // llvm::outs() << "blockArg: " << blockArg << "\n";
 
 
-        // .getResult(), .output()
+
+
+
+
+
+        /// Create a builder and set insertion point to the given operation, which
+        /// will cause subsequent insertions to go right before it.
+        OpBuilder builder(storeOp);
+
+        // // figure out which one is the tensor operand,
+        // // we already have the scalar operand as a parameter to this fn
+        // auto tensorOpnd = addFOp.getLhs() == tensorSrc ? addFOp.getRhs() : addFOp.getLhs();
+
+        // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
+        Value ptr = storeOp->getOperand(1);
+        auto newOp = builder.create<triton::LoadOp>(storeOp.getLoc(), ptr.getType(), ptr);
+
+        storeOp.erase();
+
+        // todo:
+        // I think I cant't use replace all uses with since i'm terating from the end of the graph, not from the begining
+        // replace the use of the result of "arith::AddFOp" with the
+        // result of "myarith::AddTensorScalarOp"
+        // storeOp->replaceAllUsesWith(newOp);
+
+
 
         // todo-now:
         //  1) replace that blockArg with another tensor (corresponding to grad of that original argument)
@@ -282,25 +296,6 @@ struct ConvertTritonToMyArith
         //    - in each condition check if either "keep" or "delete" attr is set -- if so, continue to loop (but skip the current op)
         //  3) add my manual DCE pass after iterating over all ops, and deletes them if "delete" flag is set on them
 
-
-
-
-        // /// Create a builder and set insertion point to the given operation, which
-        // /// will cause subsequent insertions to go right before it.
-        // OpBuilder builder(store_op);
-
-        // // create AddTensorScalarOp
-        // auto newOp = builder.create<triton::LoadOp>(addFOp.getLoc(), tensorOpnd.getType(), tensorOpnd, scalarSrc);
-
-        // todo-now:
-        // I think I cant't use replace all uses with since i'm terating from the end of the graph, not from the begining
-        // So instead what I'll do
-
-        // // replace the use of the result of "arith::AddFOp" with the result of "myarith::AddTensorScalarOp"
-        // addFOp->replaceAllUsesWith(newOp);
-
-        // comment:
-        // note this does not delete the original op, that op will be automatically removed when the DCE pass runs
 
 
 

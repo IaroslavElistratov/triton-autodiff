@@ -89,7 +89,6 @@ visiting op: 'tt.func' with 0 operands and 0 results
        - Operand produced by operation 'arith.addf'
       
       visiting op: 'tt.return' with 0 operands and 0 results
-blockArg: <block argument> of type '!tt.ptr<f32>' at index: 1
 visiting arith.addf op
 visiting arith.constant op
 visiting tt.addptr op
@@ -98,18 +97,19 @@ visiting tt.addptr op
 visiting tt.make_range op
 visiting tt.splat op
 visiting tt.splat op
-module {
-  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 4 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 4 : i32}, %arg2: i32 {tt.divisibility = 4 : i32}) attributes {noinline = false} {
-    %cst = arith.constant dense<4.200000e+01> : tensor<4xf32>
-    %0 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
-    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %2 = tt.addptr %1, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %3 = tt.load %2 : tensor<4x!tt.ptr<f32>>
-    %4 = arith.addf %3, %cst : tensor<4xf32>
-    %5 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %6 = tt.addptr %5, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    tt.store %6, %4 : tensor<4x!tt.ptr<f32>>
-    tt.return
-  }
-}
+"builtin.module"() ({
+  "tt.func"() <{arg_attrs = [{tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}], function_type = (!tt.ptr<f32>, !tt.ptr<f32>, i32) -> (), sym_name = "add_kernel", sym_visibility = "public"}> ({
+  ^bb0(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: i32):
+    %0 = "arith.constant"() <{value = dense<4.200000e+01> : tensor<4xf32>}> : () -> tensor<4xf32>
+    %1 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> : () -> tensor<4xi32>
+    %2 = "tt.splat"(%arg0) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
+    %3 = "tt.addptr"(%2, %1) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
+    %4 = "tt.load"(%3) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>
+    %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
+    %6 = "tt.splat"(%arg1) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
+    %7 = "tt.addptr"(%6, %1) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
+    %8 = "tt.load"(%5) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> : (tensor<4xf32>) -> tensor<4xf32>
+    "tt.return"() : () -> ()
+  }) {noinline = false} : () -> ()
+}) : () -> ()
 

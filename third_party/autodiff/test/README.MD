@@ -5,11 +5,35 @@ rm -rf python/build && pip install -e python
 
 
 
-<!-- python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir -->
-python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith --view-op-graph third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir 2> third_party/autodiff/test/out_0.dot && dot -Tsvg third_party/autodiff/test/out_0.dot > third_party/autodiff/test/out_0.svg && rm third_party/autodiff/test/out_0.dot
+- # minimal (aka run):
+  python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir 
+
+- # + plot:
+  python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith --view-op-graph third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir 2> third_party/autodiff/test/out_0.dot && dot -Tsvg third_party/autodiff/test/out_0.dot > third_party/autodiff/test/out_0.svg && rm third_party/autodiff/test/out_0.dot
+
+- # dissable checks (useful to see transformed IR even thought it's not valid)
+  python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --no-implicit-module --verify-each=0  --convert-triton-to-myarith third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir
 
 # Canonicalize the output to remove values with no uses
 python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith --canonicalize third_party/autodiff/test/out_0.mlir > third_party/autodiff/test/out_1.mlir
+
+
+
+- original:
+  module {
+    tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 4 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 4 : i32}, %arg2: i32 {tt.divisibility = 4 : i32}) attributes {noinline = false} {
+      %cst = arith.constant dense<4.200000e+01> : tensor<4xf32>
+      %0 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+      %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+      %2 = tt.addptr %1, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+      %3 = tt.load %2 : tensor<4x!tt.ptr<f32>>
+      %4 = arith.addf %3, %cst : tensor<4xf32>
+      %5 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+      %6 = tt.addptr %5, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+      tt.store %6, %4 : tensor<4x!tt.ptr<f32>>
+      tt.return
+    }
+  }
 
 
 
