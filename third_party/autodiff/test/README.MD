@@ -38,7 +38,7 @@ python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-
 
 
 
-arith.constant -> 1.
+arith.constant -> 0.
 arith.addf -> 1 for each input
 
 tt.load -> atomic add into that location of memory

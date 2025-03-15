@@ -321,7 +321,7 @@ struct ConvertTritonToMyArith
 
 
 
-
+        // storeOp.dropAllUse();
         storeOp.erase();
 
         // We only have to rewrite load/stores with tensor pointers
@@ -340,20 +340,47 @@ struct ConvertTritonToMyArith
 
 
 
-      } else if (auto load_op = dyn_cast<triton::LoadOp>(op)){
+      } else if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         printIndent() << "visiting tt.load op\n";
         // traverse parents to find the initial pointer
-      } else if (auto range_op = dyn_cast<triton::MakeRangeOp>(op)){
+      } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
         printIndent() << "visiting tt.make_range op\n";
-      } else if (auto splat_op = dyn_cast<triton::SplatOp>(op)){
+      } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
         printIndent() << "visiting tt.splat op\n";
-      } else if (auto addptr_op = dyn_cast<triton::AddPtrOp>(op)){
+      } else if (auto addptrOp = dyn_cast<triton::AddPtrOp>(op)){
         printIndent() << "visiting tt.addptr op\n";
 
       // arith
-      } else if (auto addf_op = dyn_cast<arith::AddFOp>(op)){
+      } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
         printIndent() << "visiting arith.addf op\n";
-      } else if (auto constant_op = dyn_cast<arith::ConstantOp>(op)){
+
+        Value upstream = grad_map[addfOp.getResult()];
+        if (!upstream){
+          llvm::outs() << "expected grad in the map" << "\n";
+          exit(1);
+        }
+        llvm::outs() << "extracted upstream for addf, from the grad map: " << upstream << "\n";
+
+
+        // float local_grad = 1.;
+
+        // 0-th arg is not a consant, so compute grad wrt it
+        Value lhs = addfOp.getOperand(0);
+        assert(!dyn_cast<arith::ConstantOp>(lhs.getDefiningOp()));
+        // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
+        grad_map[lhs] = upstream;
+
+        // 1st arg is a constant, so grad wrt it is zero
+        Value rhs = addfOp.getOperand(1);
+        Operation* rhs_producer = rhs.getDefiningOp();
+        assert(dyn_cast<arith::ConstantOp>(rhs_producer));
+
+        addfOp.erase();
+        // cleaner to delete right after the assert above, but moving it (delete *after* current op),
+        // so that don't get err: op deleted but still has uses
+        rhs_producer->erase();
+
+      } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         printIndent() << "visiting arith.constant op\n";
       }
 

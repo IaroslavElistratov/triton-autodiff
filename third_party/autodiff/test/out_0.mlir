@@ -91,6 +91,7 @@ visiting op: 'tt.func' with 0 operands and 0 results
       visiting op: 'tt.return' with 0 operands and 0 results
 should be Value defined by add op: %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
 visiting arith.addf op
+extracted upstream for addf, from the grad map: %8 = "tt.load"(%7) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
 visiting arith.constant op
 Skipping visited
 visiting tt.load op
@@ -101,15 +102,13 @@ Skipping visited
 "builtin.module"() ({
   "tt.func"() <{arg_attrs = [{tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}], function_type = (!tt.ptr<f32>, !tt.ptr<f32>, i32) -> (), sym_name = "add_kernel", sym_visibility = "public"}> ({
   ^bb0(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: i32):
-    %0 = "arith.constant"() <{value = dense<4.200000e+01> : tensor<4xf32>}> : () -> tensor<4xf32>
-    %1 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> {autogradVisited = true} : () -> tensor<4xi32>
-    %2 = "tt.splat"(%arg0) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
-    %3 = "tt.addptr"(%2, %1) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-    %4 = "tt.load"(%3) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>
-    %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
-    %6 = "tt.splat"(%arg1) {autogradVisited = true} : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
-    %7 = "tt.addptr"(%6, %1) {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-    %8 = "tt.load"(%7) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
+    %0 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> {autogradVisited = true} : () -> tensor<4xi32>
+    %1 = "tt.splat"(%arg0) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
+    %2 = "tt.addptr"(%1, %0) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
+    %3 = "tt.load"(%2) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>
+    %4 = "tt.splat"(%arg1) {autogradVisited = true} : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
+    %5 = "tt.addptr"(%4, %0) {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
+    %6 = "tt.load"(%5) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
     "tt.return"() : () -> ()
   }) {noinline = false} : () -> ()
 }) : () -> ()
