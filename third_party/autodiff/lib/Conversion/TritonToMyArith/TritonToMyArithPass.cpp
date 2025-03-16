@@ -344,13 +344,14 @@ struct ConvertTritonToMyArith
         printIndent() << "visiting tt.load op\n";
         // traverse parents to find the initial pointer
 
-        /// Create a builder and set insertion point to the given operation, which
-        /// will cause subsequent insertions to go right before it.
-        OpBuilder builder(loadOp);
-
         Value upstream = grad_map[loadOp.getResult()];
         Value ptr = loadOp->getOperand(0);
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
+
+        // Create a builder without setting insertion point at first, then set insertion point
+        // Seems no constructor to specify "InsertionPointAfter" at the time of construction
+        OpBuilder builder(func.getContext());
+        builder.setInsertionPointAfterValue(upstream);
 
         // Create a ValueRange from the operands
         SmallVector<Value> operands = {ptr, upstream};

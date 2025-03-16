@@ -105,10 +105,10 @@ Skipping visited
     %0 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> {autogradVisited = true} : () -> tensor<4xi32>
     %1 = "tt.splat"(%arg0) {autogradVisited = true} : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
     %2 = "tt.addptr"(%1, %0) {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-    "tt.store"(%2, %5) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4x!tt.ptr<f32>>) -> ()
     %3 = "tt.splat"(%arg1) {autogradVisited = true} : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
     %4 = "tt.addptr"(%3, %0) {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
     %5 = "tt.load"(%4) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
+    "tt.store"(%2, %5) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4x!tt.ptr<f32>>) -> ()
     "tt.return"() : () -> ()
   }) {noinline = false} : () -> ()
 }) : () -> ()
