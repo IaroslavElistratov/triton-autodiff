@@ -89,9 +89,9 @@ visiting op: 'tt.func' with 0 operands and 0 results
        - Operand produced by operation 'arith.addf'
       
       visiting op: 'tt.return' with 0 operands and 0 results
-should be Value defined by add op: %5 = "arith.addf"(%4, %0) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
+should be Value defined by add op: %4 = arith.addf %3, %cst : tensor<4xf32>
 visiting arith.addf op
-extracted upstream for addf, from the grad map: %8 = "tt.load"(%7) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
+extracted upstream for addf, from the grad map: %7 = tt.load %6 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>
 visiting arith.constant op
 Skipping visited
 visiting tt.load op
@@ -99,17 +99,16 @@ Skipping visited
 Skipping visited
 Skipping visited
 Skipping visited
-"builtin.module"() ({
-  "tt.func"() <{arg_attrs = [{tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}, {tt.divisibility = 4 : i32}], function_type = (!tt.ptr<f32>, !tt.ptr<f32>, i32) -> (), sym_name = "add_kernel", sym_visibility = "public"}> ({
-  ^bb0(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: i32):
-    %0 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> {autogradVisited = true} : () -> tensor<4xi32>
-    %1 = "tt.splat"(%arg0) {autogradVisited = true} : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
-    %2 = "tt.addptr"(%1, %0) {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-    %3 = "tt.splat"(%arg1) {autogradVisited = true} : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
-    %4 = "tt.addptr"(%3, %0) {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-    %5 = "tt.load"(%4) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 0, 0, 0>}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>) -> tensor<4x!tt.ptr<f32>>
-    "tt.store"(%2, %5) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32}> {autogradVisited = true} : (tensor<4x!tt.ptr<f32>>, tensor<4x!tt.ptr<f32>>) -> ()
-    "tt.return"() : () -> ()
-  }) {noinline = false} : () -> ()
-}) : () -> ()
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 4 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 4 : i32}, %arg2: i32 {tt.divisibility = 4 : i32}) attributes {noinline = false} {
+    %0 = tt.make_range {autogradVisited = true, end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+    %1 = tt.splat %arg0 {autogradVisited = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %2 = tt.addptr %1, %0 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.splat %arg1 {autogradVisited = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %4 = tt.addptr %3, %0 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %5 = tt.load %4 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>
+    tt.store %2, %5 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>
+    tt.return
+  }
+}
 

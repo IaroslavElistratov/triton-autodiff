@@ -295,7 +295,13 @@ struct ConvertTritonToMyArith
 
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
         Value ptr = storeOp->getOperand(0);
-        auto newOp = builder.create<triton::LoadOp>(storeOp.getLoc(), ptr.getType(), ptr);
+        auto newOp = builder.create<triton::LoadOp>(
+            storeOp.getLoc(), 
+            ptr,
+            storeOp.getCache(),  // copy cache modifier
+            storeOp.getEvict(),  // copy eviction policy
+            false  // isVolatile (storeOp doesn't have this, so keep default)
+        );
 
         // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
         llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
