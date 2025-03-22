@@ -97,7 +97,7 @@ struct ConvertTritonToMyArith
     // printOperation(func, true);
 
     // assimung there's upstream grad only wrt to a single variable initially
-    // bool is_first_node 
+    // bool is_first_node
 
 
     // error hapening becuase Value (which is the type I'm trying to put into std::map) does not have move interface (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
@@ -128,13 +128,8 @@ struct ConvertTritonToMyArith
       // triton
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
 
-
         // why .getValue works for StoreOp, but not for AddPtrOp
-        //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation
-        // Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
-        // Operation* splatOp = addptrOp->getOperand(1).getDefiningOp();
-
-
+        //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation (unless use ->)
 
         // todo-now: maybe don't even need to replace original pointer (block arg) with grad pointer -- just allocate the grads outside of the kenrel and, for every arg of the kernel, pass grad of taht arg in that argument
 
@@ -153,7 +148,6 @@ struct ConvertTritonToMyArith
 
         // // todo-high: Instead of traversing manually, use getPointerTypeWithShape getPointerTypeSameShape? 
         // // Type new_ptr = getPointerTypeSameShape(ptr);
-
         // int address_space = 1;
         // //  could not convert 'blockArg' from 'mlir::BlockArgument' to 'mlir::Type'
         // // so try passing not 'blockArg' but operand.getPtr()
@@ -161,8 +155,7 @@ struct ConvertTritonToMyArith
 
 
 
-
-        // because this will effecitvily load the upstream grad, I want to set the insertion point to the begining of the module
+        // because this will effectively load the upstream grad, I want to set the insertion point to the begining of the module
         OpBuilder builder(func.getContext());
         // auto moduleOp = func.getBlock()->getParent()->getParentOfType<ModuleOp>();
 
@@ -174,7 +167,7 @@ struct ConvertTritonToMyArith
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
         Value ptr = storeOp->getOperand(0);
         auto newOp = builder.create<triton::LoadOp>(
-            storeOp.getLoc(), 
+            storeOp.getLoc(),
             ptr,
             storeOp.getCache(),  // copy cache modifier
             storeOp.getEvict(),  // copy eviction policy
@@ -190,11 +183,8 @@ struct ConvertTritonToMyArith
 
 
         // mark as visited
-        //   get generic Operation, note returns a pointer
-        Operation* op = newOp.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        // todo-high: also useful to attach string: grad of what node in the original IR is that
-        op->setAttr("isInserted", builder.getBoolAttr(true)); // for readability, not used in the code
+        newOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        newOp->setAttr("isInserted", builder.getBoolAttr(true)); // for readability, not used in the code
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
         // note: .getDefiningOp wt specifying type, returns a pointer to Operation
@@ -211,9 +201,9 @@ struct ConvertTritonToMyArith
         // i did set the insertion point above, but becuase I'm not cloning the above ops (i'm just keeping them where they are in the graph).
         // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
         // here I move them on top of the fucntion body as well
-        makerangeOp->moveBefore(op);
-        splatOp->moveBefore(op);
-        addptrOp->moveBefore(op);
+        makerangeOp->moveBefore(newOp);
+        splatOp->moveBefore(newOp);
+        addptrOp->moveBefore(newOp);
 
         // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
 
@@ -250,7 +240,7 @@ struct ConvertTritonToMyArith
         Operation* rhs_producer = rhs.getDefiningOp();
         assert(dyn_cast<arith::ConstantOp>(rhs_producer));
 
-      }  else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
+      } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
         printIndent() << "visiting arith.mulf op\n";
 
         Value upstream = grad_map[mulfOp.getResult()];
@@ -261,24 +251,6 @@ struct ConvertTritonToMyArith
 
         Value lhs = mulfOp.getOperand(0);
         Value rhs = mulfOp.getOperand(1);
-
-        // OpBuilder builder(mulfOp);
-
-        // auto OpGradLhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), rhs, upstream);
-        // grad_map[lhs] = OpGradLhs.getResult();
-
-        // auto OpGradRhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), lhs, upstream);
-        // grad_map[rhs] = OpGradRhs.getResult();
-
-        // // mark as visited
-        // Operation* op = OpGradLhs.getOperation();
-        // op->setAttr("autogradVisited", builder.getBoolAttr(true));
-
-        // op = OpGradRhs.getOperation();
-        // op->setAttr("autogradVisited", builder.getBoolAttr(true));
-
-
-
 
 
         // todo-high:
@@ -310,9 +282,8 @@ struct ConvertTritonToMyArith
         // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
         grad_map[rhs] = OpGradRhs.getResult();
 
-        Operation* op = OpGradRhs.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        OpGradRhs->setAttr("autogradVisited", builder.getBoolAttr(true));
+        OpGradRhs->setAttr("isInserted", builder.getBoolAttr(true));
 
         // (3) clone rhs subtree
 
@@ -331,9 +302,8 @@ struct ConvertTritonToMyArith
         grad_map[lhs] = OpGradLhs.getResult();
 
         // mark as visited
-        op = OpGradLhs.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        OpGradLhs->setAttr("autogradVisited", builder.getBoolAttr(true));
+        OpGradLhs->setAttr("isInserted", builder.getBoolAttr(true));
 
 
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
@@ -396,17 +366,14 @@ struct ConvertTritonToMyArith
         grad_map[a] = OpGradLhs.getResult();
 
         // set attributes
-        Operation* op = OpGradLhs.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        OpGradLhs->setAttr("autogradVisited", builder.getBoolAttr(true));
+        OpGradLhs->setAttr("isInserted", builder.getBoolAttr(true));
 
-        op = ones.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        ones->setAttr("autogradVisited", builder.getBoolAttr(true));
+        ones->setAttr("isInserted", builder.getBoolAttr(true));
 
-        op = a_local.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        a_local->setAttr("autogradVisited", builder.getBoolAttr(true));
+        a_local->setAttr("isInserted", builder.getBoolAttr(true));
 
 
 
@@ -424,25 +391,20 @@ struct ConvertTritonToMyArith
         grad_map[b] = OpGradRhs.getResult();
 
         // set attributes
-        op = OpGradRhs.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        OpGradRhs->setAttr("autogradVisited", builder.getBoolAttr(true));
+        OpGradRhs->setAttr("isInserted", builder.getBoolAttr(true));
 
-        op = b_local.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        b_local->setAttr("autogradVisited", builder.getBoolAttr(true));
+        b_local->setAttr("isInserted", builder.getBoolAttr(true));
 
-        op = neg.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        neg->setAttr("autogradVisited", builder.getBoolAttr(true));
+        neg->setAttr("isInserted", builder.getBoolAttr(true));
 
-        op = div.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        div->setAttr("autogradVisited", builder.getBoolAttr(true));
+        div->setAttr("isInserted", builder.getBoolAttr(true));
 
-        op = pow.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        pow->setAttr("autogradVisited", builder.getBoolAttr(true));
+        pow->setAttr("isInserted", builder.getBoolAttr(true));
 
 
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
@@ -505,17 +467,6 @@ struct ConvertTritonToMyArith
         // // Returns the type of the value that the pointer points to
         // Type pointeeType = ptrType.getPointeeType();
 
-        // // Create store with type-checked operands
-        // auto newOp = builder.create<triton::StoreOp>(
-        //     loadOp.getLoc(),
-        //     ptr,
-        //     upstream,
-        //     /*mask=*/Value(), // No mask
-        //     /*boundaryCheck=*/ArrayRef<int32_t>{}, // No boundary check
-        //     triton::CacheModifier::NONE,
-        //     triton::EvictionPolicy::NORMAL
-        // );
-
         // example of creating StoreOp:
         // rewriter.create<triton::StoreOp>(loc, newPointer, newData, newMask,
         //                                 op.getBoundaryCheck(), op.getCache(),
@@ -524,9 +475,8 @@ struct ConvertTritonToMyArith
 
         // mark as visited
         //   get generic Operation, note returns a pointer
-        Operation* op = newOp.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
+        newOp->setAttr("autogradVisited", builder.getBoolAttr(true));
+        newOp->setAttr("isInserted", builder.getBoolAttr(true));
 
 
         // loadOp.getOperation()->getName().getStringRef() -- does not include operands so reesult value
@@ -534,7 +484,7 @@ struct ConvertTritonToMyArith
         std::string opStr;
         llvm::raw_string_ostream os(opStr);
         loadOp->print(os);
-        op->setAttr("gradOf", builder.getStringAttr(opStr));
+        newOp->setAttr("gradOf", builder.getStringAttr(opStr));
 
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
