@@ -19,7 +19,8 @@ def bwd(a, b, upstream, BLOCK_SIZE=4):
     # We need to preallocate the output.
     # a_grad = torch.empty_like(upstream, device=upstream.device)
     # assert upstream.device == DEVICE and a_grad.device == DEVICE
-    grid = (triton.cdiv(upstream.numel(), BLOCK_SIZE), 1, 1)
+    # grid = (triton.cdiv(upstream.numel(), BLOCK_SIZE), 1, 1)
+    grid = (1, 1, 1)
     # The kernel expects 3 arguments: two float pointers and an integer
     # comment: note this is entirely new approach: pass a, b (forward values), and upstream grad at the same time -- without duplciaitng numebr of forward args and passding forwaard args and buffers for bwd at the same time
     _compiled_kernel = bwd_kernel[grid](a, b, upstream) # BLOCK_SIZE
@@ -29,10 +30,16 @@ def bwd(a, b, upstream, BLOCK_SIZE=4):
 np_a = np.array([0.3990, 0.5167, 0.0249, 0.9401])
 np_b = np.array([0.9722, 0.7910, 0.4690, 0.3300])
 
-a = torch.from_numpy(np_a).to(device='cuda:0')
-b = torch.from_numpy(np_b).to(device='cuda:0')
+# answer-now:
+# crucial to convert to float32, because .from_numpy returns float64,
+# but torch.rand returns float32, and because my forward kernel was run
+# on outputs of torch.rand (thus float32), by backward kernel (transformed
+# forward kernel) also hardcodes float32, if I feed float64 here the outputs
+# will be silently incorrect!!
+a = torch.from_numpy(np_a).to(dtype=torch.float32, device='cuda:0')
+b = torch.from_numpy(np_b).to(dtype=torch.float32, device='cuda:0')
 
-upstream = torch.ones(4, device=DEVICE)
+upstream = torch.ones_like(a)
 # comment: grads have been written inplace of the original values
 _compiled_kernel = bwd(a, b, upstream)
 print("grad a: ", a)

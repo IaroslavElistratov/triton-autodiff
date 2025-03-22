@@ -1,0 +1,79 @@
+# my autodiff
+    module {
+      tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+        %0 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+
+        // load upstream
+        %1 = tt.splat %arg2 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+        %2 = tt.addptr %1, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+        %3 = tt.load %2 : tensor<4x!tt.ptr<f32>>
+
+        // load b
+        %8 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+        %9 = tt.addptr %8, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+        %10 = tt.load %9 : tensor<4x!tt.ptr<f32>>
+        // grad x
+        %11 = arith.mulf %10, %3 : tensor<4xf32>
+
+        // load a
+        %12 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+        %13 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+        %14 = tt.addptr %12, %13 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+        %15 = tt.load %14 : tensor<4x!tt.ptr<f32>>
+        // recompute x
+        %cst = arith.constant dense<5.000000e-01> : tensor<4xf32>
+        %16 = arith.addf %15, %cst : tensor<4xf32>
+        // grad b
+        %17 = arith.mulf %16, %3 : tensor<4xf32>
+
+        // store grad b in b
+        %6 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+        %7 = tt.addptr %6, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+        tt.store %7, %17 : tensor<4x!tt.ptr<f32>>
+
+        // store grad x in a (ommiting backpropoing though the first add)
+        %4 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+        %5 = tt.addptr %4, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+        tt.store %5, %11 : tensor<4x!tt.ptr<f32>>
+        tt.return
+      }
+    }
+
+
+
+
+# works -- manual in python
+
+    module {
+      tt.func public @add_kernel(%arg0: !tt.ptr<f64> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f64> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f64> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+        %0 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+
+        // load upstream
+        %1 = tt.splat %arg2 : !tt.ptr<f64> -> tensor<4x!tt.ptr<f64>>
+        %2 = tt.addptr %1, %0 : tensor<4x!tt.ptr<f64>>, tensor<4xi32>
+        %3 = tt.load %2 : tensor<4x!tt.ptr<f64>>
+
+        // load b
+        %7 = tt.splat %arg1 : !tt.ptr<f64> -> tensor<4x!tt.ptr<f64>>
+        %8 = tt.addptr %7, %0 : tensor<4x!tt.ptr<f64>>, tensor<4xi32>
+        %9 = tt.load %8 : tensor<4x!tt.ptr<f64>>
+        // grad x
+        %12 = arith.mulf %9, %3 : tensor<4xf64>
+
+        // load a
+        %4 = tt.splat %arg0 : !tt.ptr<f64> -> tensor<4x!tt.ptr<f64>>
+        %5 = tt.addptr %4, %0 : tensor<4x!tt.ptr<f64>>, tensor<4xi32>
+        %6 = tt.load %5 : tensor<4x!tt.ptr<f64>>
+        // recompute x
+        %cst = arith.constant dense<5.000000e-01> : tensor<4xf64>
+        %10 = arith.addf %6, %cst : tensor<4xf64>
+        // grad b
+        %11 = arith.mulf %10, %3 : tensor<4xf64>
+
+        // store grad b
+        tt.store %8, %11 : tensor<4x!tt.ptr<f64>>
+        // store grad x into a (ommiting computing derivative of add bc local grad is 1 there anyway)
+        tt.store %5, %12 : tensor<4x!tt.ptr<f64>>
+        tt.return
+      }
+    }

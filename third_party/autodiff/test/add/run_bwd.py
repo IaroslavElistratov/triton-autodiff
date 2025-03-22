@@ -32,7 +32,7 @@ def add_bwd(upstream, BLOCK_SIZE=4):
     _compiled_kernel = add_bwd_kernel[grid](a_grad, upstream) # BLOCK_SIZE
     # grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
     return a_grad, _compiled_kernel
-  
+
 upstream = torch.ones(4, device=DEVICE)
 a_grad, _compiled_kernel = add_bwd(upstream)
 print(a_grad)

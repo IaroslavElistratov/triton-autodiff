@@ -372,75 +372,6 @@ struct ConvertTritonToMyArith
         //  3) add my manual DCE pass after iterating over all ops, and deletes them if "delete" flag is set on them
 
 
-      } else if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        printIndent() << "visiting tt.load op\n";
-        // traverse parents to find the initial pointer
-
-        Value upstream = grad_map[loadOp.getResult()];
-        Value ptr = loadOp->getOperand(0);
-        // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
-
-        // Create a builder without setting insertion point at first, then set insertion point
-        // Seems no constructor to specify "InsertionPointAfter" at the time of construction
-        OpBuilder builder(func.getContext());
-        builder.setInsertionPointAfterValue(upstream);
-
-        // Create a ValueRange from the operands
-        SmallVector<Value> operands = {ptr, upstream};
-        // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
-        //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
-        // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
-        auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), ptr, upstream,
-                                                    triton::CacheModifier::NONE,
-                                                    triton::EvictionPolicy::NORMAL);
-
-        // todo-now: note this op does not add anything to the grad_map, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
-
-        // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
-        // ensure the type of upstream matches what ptr points to.
-
-        // // Get the pointee type from the pointer to ensure type compatibility
-        // //  1) ensure the pointer type (ptr) is a valid Triton pointer type
-        // //  2) The value we're storing (upstream) has a type that matches what the pointer points to
-        // auto ptrType = mlir::cast<triton::PointerType>(ptr.getType());
-        // // Returns the type of the value that the pointer points to
-        // Type pointeeType = ptrType.getPointeeType();
-
-        // // Create store with type-checked operands
-        // auto newOp = builder.create<triton::StoreOp>(
-        //     loadOp.getLoc(),
-        //     ptr,
-        //     upstream,
-        //     /*mask=*/Value(), // No mask
-        //     /*boundaryCheck=*/ArrayRef<int32_t>{}, // No boundary check
-        //     triton::CacheModifier::NONE,
-        //     triton::EvictionPolicy::NORMAL
-        // );
-
-        // example of creating StoreOp:
-        // rewriter.create<triton::StoreOp>(loc, newPointer, newData, newMask,
-        //                                 op.getBoundaryCheck(), op.getCache(),
-        //                                 op.getEvict());
-
-
-        // mark as visited
-        //   get generic Operation, note returns a pointer
-        Operation* op = newOp.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
-        op->setAttr("isInserted", builder.getBoolAttr(true));
-
-        // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
-        Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
-        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        addptrOp->setAttr("isOrig", builder.getBoolAttr(true));
-        Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        splatOp->setAttr("isOrig", builder.getBoolAttr(true));
-        Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
-        // todo: we have already visistd this Operation, fine for my toy example, but keep in mind for the future examples
-        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        makerangeOp->setAttr("isOrig", builder.getBoolAttr(true));
-
       } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
         printIndent() << "visiting tt.make_range op\n";
       } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
@@ -560,6 +491,102 @@ struct ConvertTritonToMyArith
 
     } // for loop over ops
 
+    // separate loop for loadop -- because its derivative (storeOp) destroyaes semantics of input args
+    for (Operation *op : llvm::reverse(forwardSlice)) {
+
+      if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
+          llvm::outs() << "Skipping visited" << "\n";
+          continue;
+      }
+
+      if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
+        printIndent() << "visiting tt.load op\n";
+        // traverse parents to find the initial pointer
+
+        Value upstream = grad_map[loadOp.getResult()];
+        Value ptr = loadOp->getOperand(0);
+        // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
+
+        // Create a builder without setting insertion point at first, then set insertion point
+        // Seems no constructor to specify "InsertionPointAfter" at the time of construction
+        OpBuilder builder(func.getContext());
+
+        // .front() gets the first block in that region, which is the entry block
+        Block *entryBlock = &func.getBody().front();
+        // // comment: also changed the insertion point
+        // builder.setInsertionPointToEnd(entryBlock);
+
+        // set insertion point to before the last operation (before ReturnOp)
+        Operation *lastOp = &entryBlock->back();
+        builder.setInsertionPoint(lastOp);
+        // printGradMap(grad_map);
+
+        // Create a ValueRange from the operands
+        SmallVector<Value> operands = {ptr, upstream};
+        // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
+        //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
+        // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
+        auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), ptr, upstream,
+                                                    triton::CacheModifier::NONE,
+                                                    triton::EvictionPolicy::NORMAL);
+
+        // todo-now: note this op does not add anything to the grad_map, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
+        // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
+        // ensure the type of upstream matches what ptr points to.
+
+        // // Get the pointee type from the pointer to ensure type compatibility
+        // //  1) ensure the pointer type (ptr) is a valid Triton pointer type
+        // //  2) The value we're storing (upstream) has a type that matches what the pointer points to
+        // auto ptrType = mlir::cast<triton::PointerType>(ptr.getType());
+        // // Returns the type of the value that the pointer points to
+        // Type pointeeType = ptrType.getPointeeType();
+
+        // // Create store with type-checked operands
+        // auto newOp = builder.create<triton::StoreOp>(
+        //     loadOp.getLoc(),
+        //     ptr,
+        //     upstream,
+        //     /*mask=*/Value(), // No mask
+        //     /*boundaryCheck=*/ArrayRef<int32_t>{}, // No boundary check
+        //     triton::CacheModifier::NONE,
+        //     triton::EvictionPolicy::NORMAL
+        // );
+
+        // example of creating StoreOp:
+        // rewriter.create<triton::StoreOp>(loc, newPointer, newData, newMask,
+        //                                 op.getBoundaryCheck(), op.getCache(),
+        //                                 op.getEvict());
+
+
+        // mark as visited
+        //   get generic Operation, note returns a pointer
+        Operation* op = newOp.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+
+        // loadOp.getOperation()->getName().getStringRef() -- does not include operands so reesult value
+        // Use the operation's built-in printer
+        std::string opStr;
+        llvm::raw_string_ostream os(opStr);
+        loadOp->print(os);
+        op->setAttr("gradOf", builder.getStringAttr(opStr));
+
+
+        // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
+        Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
+        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        addptrOp->setAttr("isOrig", builder.getBoolAttr(true));
+        Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
+        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        splatOp->setAttr("isOrig", builder.getBoolAttr(true));
+        Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
+        // todo: we have already visistd this Operation, fine for my toy example, but keep in mind for the future examples
+        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        makerangeOp->setAttr("isOrig", builder.getBoolAttr(true));
+
+      }
+    } // for loop over loads
 
     // // todo: do the below but for re-writting for each op above
     //   auto src = op->getSrc();
