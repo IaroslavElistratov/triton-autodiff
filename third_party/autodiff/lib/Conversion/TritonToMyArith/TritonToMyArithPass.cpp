@@ -200,6 +200,21 @@ struct ConvertTritonToMyArith
   }
 
 
+  triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value) {
+      auto scalarType = builder.getF32Type();
+      auto scalarValue = builder.create<arith::ConstantOp>(loc, scalarType, builder.getF32FloatAttr(value));
+      auto broadcasted = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+
+      // mark as visited
+      broadcasted->setAttr("autogradVisited", builder.getBoolAttr(true));
+      broadcasted->setAttr("isInserted", builder.getBoolAttr(true));
+
+      scalarValue->setAttr("autogradVisited", builder.getBoolAttr(true));
+      scalarValue->setAttr("isInserted", builder.getBoolAttr(true));
+      return broadcasted;
+  }
+
+
   void cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
     if (mapper.contains(targetOp))
       return; // Operation already cloned
@@ -409,6 +424,10 @@ struct ConvertTritonToMyArith
         printIndent() << "visiting arith.mulf op\n";
 
         Value upstream = grad_map[mulfOp.getResult()];
+        if (!upstream){
+          llvm::outs() << "expected grad in the map" << "\n";
+          exit(1);
+        }
 
         Value lhs = mulfOp.getOperand(0);
         Value rhs = mulfOp.getOperand(1);
@@ -432,8 +451,10 @@ struct ConvertTritonToMyArith
 
 
 
-        // todo-now:
-        // I think I need to check if any of the values inputs to each op I match to (in this case MulOp) are intermideats (not inputs to fwd fn, and not ouputs of the fwd fn)
+        // todo-high:
+        // Don't clone if inputs to an op you matched to are directly inputs to the fn (see issues/1)
+        //    I think I need to check if any of the values inputs to each op I match to (in this case MulOp) are intermideats (not inputs to fwd fn, and not ouputs of the fwd fn)
+        //    need to do cloning only IF the inputs to this op are not inputs to the function (cout this as direct inputs: fn_input->splat->add_ptr) -- in such cases do not duplicate the subgraph -- its ok if you do duplicate but you'll create a redundant copy of (fn_input->splat->add_ptr) -- duplicating subgprah is not really needed bc there were no intermideates computed in fwd in the first place
         // And if so, copy the subtree leading to these nodes
 
         // (1) clone lhs subtree
@@ -485,6 +506,115 @@ struct ConvertTritonToMyArith
         op->setAttr("isInserted", builder.getBoolAttr(true));
 
 
+      } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
+        printIndent() << "visiting arith.divf op\n";
+
+        Value upstream = grad_map[divfOp.getResult()];
+        if (!upstream){
+          llvm::outs() << "expected grad in the map" << "\n";
+          exit(1);
+        }
+
+        Value a = divfOp.getOperand(0);
+        Value b = divfOp.getOperand(1);
+
+
+        OpBuilder builder(func.getContext());
+        IRMapping mapper;
+
+
+        // (1) clone lhs subtree
+
+        Operation *targetOpLhs = a.getDefiningOp();
+        builder.setInsertionPoint(targetOpLhs);
+        cloneSubtree(targetOpLhs, mapper, builder);
+        Value clonedResultLhs = mapper.lookup(targetOpLhs->getResult(0));
+        auto a_cloned = clonedResultLhs; // for brevity
+
+
+        // (2) clone rhs subtree
+
+        mapper.clear();
+        Operation *targetOpRhs = b.getDefiningOp();
+        builder.setInsertionPoint(targetOpRhs);
+        cloneSubtree(targetOpRhs, mapper, builder);
+        Value clonedResultRhs = mapper.lookup(targetOpRhs->getResult(0));
+        auto b_cloned = clonedResultRhs;
+
+
+        // todo-now:
+        // todo-now:
+        // todo-now:
+        //  big problem with my "copy the subgraph to recompute the operands" approach is that there's overlap between recompuated values when matching to each op
+        //  when matching to Z (div), you gonna insert subgraphs that recompute: x, y. But after that (when matching to the next op), Y (mul) you again will copy the subgraph leading to operands of the match op -- which will recompute x AGAIN
+        //   - well, because here (when matching to each op) I'm traversing nodes from the end, I basically need to copy the sugraph (leading to the operands of the last op) once and this will recompute all the intermidate ops; Next when matching to the next ops (further from the end of the graph) all their operands should be already recompuated and you just need to have some kind of mapping (from their %names in the current graph to ?? their names in fwd)
+        //   - even simpler: can I just copy entire forward into my backward once (mark all it as visited) before matching and any of the ops?
+        //
+        // answer-now: before doing any optimizaitons (above), just make the below work
+
+
+
+        // (3) differentiate lhs
+
+        // a local
+        // auto ones = builder.create<arith::ConstantOp>(divfOp->getLoc(), upstream.getType(), builder.getF32FloatAttr(1.0));
+        // this creates a scalar and broadcasts it to a shape specificed by "upstream.getType()"
+        auto ones = createConstantTensor(builder, divfOp->getLoc(), upstream.getType(), 1.0);
+        auto a_local = builder.create<arith::DivFOp>(divfOp->getLoc(), ones.getResult(), b_cloned);
+
+        auto OpGradLhs = builder.create<arith::MulFOp>(divfOp->getLoc(), a_local.getResult(), upstream);
+        grad_map[a] = OpGradLhs.getResult();
+
+        // set attributes
+        Operation* op = OpGradLhs.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        op = ones.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        op = a_local.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+
+
+        // (4) differentiate rhs
+
+        // b local
+
+        // auto two = builder.create<arith::ConstantOp>(divfOp->getLoc(), divfOp.getType(), builder.getF32FloatAttr(2.0));
+        auto pow = builder.create<arith::MulFOp>(divfOp.getLoc(), b_cloned, b_cloned);
+        auto div = builder.create<arith::DivFOp>(divfOp.getLoc(), a_cloned, pow.getResult());
+        auto neg = createConstantTensor(builder, divfOp->getLoc(), div.getType(), -1.0);
+        auto b_local = builder.create<arith::MulFOp>(divfOp.getLoc(), neg.getResult(), div.getResult());
+
+        auto OpGradRhs = builder.create<arith::MulFOp>(divfOp.getLoc(), b_local.getResult(), upstream);
+        grad_map[b] = OpGradRhs.getResult();
+
+        // set attributes
+        op = OpGradRhs.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        op = b_local.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        op = neg.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        op = div.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        op = pow.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         printIndent() << "visiting arith.constant op\n";
       }
@@ -504,6 +634,10 @@ struct ConvertTritonToMyArith
         // traverse parents to find the initial pointer
 
         Value upstream = grad_map[loadOp.getResult()];
+        if (!upstream){
+          llvm::outs() << "expected grad in the map" << "\n";
+          exit(1);
+        }
         Value ptr = loadOp->getOperand(0);
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
 
