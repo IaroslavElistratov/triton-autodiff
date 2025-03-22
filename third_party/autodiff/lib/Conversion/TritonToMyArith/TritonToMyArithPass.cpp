@@ -90,24 +90,18 @@ struct ConvertTritonToMyArith
     mapper.map(targetOp->getResults(), clonedOp->getResults());
   }
 
-  // for now limit with:
-  //  - 1) assume there's only 1 instance of the fn executing (don't worry about computing slices of input/output)
-  //  - 2)
-
 
   // walk the IR backward, rewrite each operation with its corresponding backward function
   void rewriteSplatAddOp(triton::FuncOp func) {
 
-    printOperation(func, true);
+    // printOperation(func, true);
+
+    // assimung there's upstream grad only wrt to a single variable initially
+    // bool is_first_node 
 
 
     // error hapening becuase Value (which is the type I'm trying to put into std::map) does not have move interface (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
-    // std::map<Value, Value> grad_map{};
-    // grad_map["SSD"] = 30;
-    // grad_map.size()
-    // print_map("map: ", grad_map);
-
-     llvm::DenseMap<Value, Value> grad_map{};
+    llvm::DenseMap<Value, Value> grad_map{};
 
 
 
@@ -116,32 +110,23 @@ struct ConvertTritonToMyArith
     // func->walk<WalkOrder::PostOrder>([&](Operation *op) {           // https://mlir.llvm.org/doxygen/classmlir_1_1Operation.html#a59740592240b950b8c8afcf4a2eb4113
 
     // todo-high:
+    // 1. Init grads of the last variable in the fwd ("Grad Outputs") to all ones
+    //   - find out tensor size (get last operation in the function, assume it's a store, grab tensor sizes from there); allocate tensor of ones with that shape
     // I guess the problem is that you don't know the size of input tensors (you only know the size of the slices of these tensors that the current program processes)
     // So, can't allocate grad for each tensor as a single contigious tensor, seems can only allocate grad for each individual slice (probably leads memory fragmentation?)
 
-    // todo-high: 
-    // 1. Init grads of the last variable in the fwd ("Grad Outputs") to all ones
-    //   - find out tensor size (get last operation in the function, assume it's a store, grab tensor sizes from there); allocate tensor of ones with that shape
-
     // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
     SetVector<Operation *> forwardSlice;
-    // todo-high: make sure "func.getOperation()" extract Value of root op in the fn, getForwardSlice expects Value
     getForwardSlice(func.getOperation(), &forwardSlice);
     for (Operation *op : llvm::reverse(forwardSlice)) {
-    // for (auto *op : llvm::reverse(forwardSlice)) {
 
-
-      // if (bool is_visited = dyn_cast<bool>(op->getAttr("autogradVisited"))){
       if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
           llvm::outs() << "Skipping visited" << "\n";
           continue;
       }
 
       // triton
-      if (auto storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
-
-      // The dyn_cast<> operator is a “checking cast” operation. It checks to see if the operand is of the specified type, and if so, returns a pointer to it (this operator does not work with references). If the operand is not of the correct type, a null pointer is returned. Thus, this works very much like the dynamic_cast<> operator in C++, and should be used in the same circumstances. Typically, the dyn_cast<> operator is used in an if statement or some other flow control statement like this -- https://llvm.org/docs/ProgrammersManual.html#dyn_cast
-      // if (triton::StoreOp storeOp = dyn_cast<triton::StoreOp>(op)){         // python signature: tl.store(pointer, value, ...)
+      if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
 
 
         // why .getValue works for StoreOp, but not for AddPtrOp
@@ -157,8 +142,8 @@ struct ConvertTritonToMyArith
         // note: I believe op.getPtr() retruns Value of one of the arguments to that op (the argument can be at different index, for different ops, depedining which one of the arugments is of type PointerType)
         // Value ptr = storeOp.getPtr();
         // auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
-        // Value addptrPrt = addptrOp.getPtr();
-        // auto splatOp = addptrPrt.getDefiningOp<triton::SplatOp>();
+        // Value addptrPtr = addptrOp.getPtr();
+        // auto splatOp = addptrPtr.getDefiningOp<triton::SplatOp>();
         // Value operand = splatOp->getOperand(0);
         // // Operation *producer = operand.getDefiningOp()
         // auto blockArg = cast<BlockArgument>(operand);
@@ -230,18 +215,7 @@ struct ConvertTritonToMyArith
         splatOp->moveBefore(op);
         addptrOp->moveBefore(op);
 
-
-        // We only have to rewrite load/stores with tensor pointers
-        // if (!triton::isTensorPointerType(ptr.getType())){
-        //   return nullptr;
-        // }
-
-        // todo: OLD
-        //  1) replace that blockArg with another tensor (corresponding to grad of that original argument)
-        //  2) mark the subgraph I traversed above as "keep" (add that attirbute on every node of that subgraph)
-        //    - in each condition check if either "keep" or "delete" attr is set -- if so, continue to loop (but skip the current op)
-        //  3) add my manual DCE pass after iterating over all ops, and deletes them if "delete" flag is set on them
-
+        // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
 
       } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
         printIndent() << "visiting tt.make_range op\n";
@@ -323,7 +297,7 @@ struct ConvertTritonToMyArith
         cloneSubtree(targetOpLhs, mapper, builder);
 
         // IRMapping plays a critical role in ensuring that when you clone operations, the operands of the cloned ops refer to the cloned values, not the original ones.
-        // After cloning, you manually map the original results to the clone’s results:
+        // After cloning, you manually map the original results to the clone's results:
         // this extracts from the map wahtever Value in the map (the copied subgraph) is equivalent to targetOpLhs->getResult(0)
         Value clonedResultLhs = mapper.lookup(targetOpLhs->getResult(0));
         // ... use clonedResult in a new operation, if needed
@@ -577,38 +551,6 @@ struct ConvertTritonToMyArith
 
       }
     } // for loop over loads
-
-    // // todo: do the below but for re-writting for each op above
-    //   auto src = op->getSrc();
-    //   auto res = op->getResult();
-
-    //   // iterate over the users of the result of the SplatOp
-    //   for (auto user : res.getUsers()) {
-    //     // for each user, check if the user is the "arith::AddFOp"
-    //     if (auto addOp = dyn_cast<arith::AddFOp>(user)) {
-    //       // we found the pattern we're looking for, so re-write this op
-
-    //       Value tensorSrc = res;
-    //       Value scalarSrc = src;
-
-    //       /// Create a builder and set insertion point to the given operation, which
-    //       /// will cause subsequent insertions to go right before it.
-    //       OpBuilder builder(addFOp);
-
-    //       // figure out which one is the tensor operand,
-    //       // we already have the scalar operand as a parameter to this fn
-    //       auto tensorOpnd = addFOp.getLhs() == tensorSrc ? addFOp.getRhs() : addFOp.getLhs();
-
-    //       // create AddTensorScalarOp
-    //       auto newOp = builder.create<myarith::AddTensorScalarOp>(addFOp.getLoc(), tensorOpnd.getType(), tensorOpnd, scalarSrc);
-
-    //       // replace the use of the result of "arith::AddFOp" with the
-    //       // result of "myarith::AddTensorScalarOp"
-    //       addFOp->replaceAllUsesWith(newOp);
-
-    //     }
-    //   }
-
 
 
     // iterate as above but delete ops that are not marked
