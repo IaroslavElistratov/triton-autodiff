@@ -1,0 +1,27 @@
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %0 = tt.make_range {autogradVisited = true, end = 4 : i32, isOrig = true, start = 0 : i32} : tensor<4xi32>
+    %1 = tt.splat %arg2 {autogradVisited = true, isOrig = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %2 = tt.addptr %1, %0 {autogradVisited = true, isOrig = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.load %2 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+    %4 = tt.splat %arg0 {autogradVisited = true, isOrig = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %5 = tt.addptr %4, %0 {autogradVisited = true, isOrig = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %6 = tt.splat %arg1 {autogradVisited = true, isOrig = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %7 = tt.addptr %6, %0 {autogradVisited = true, isOrig = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %8 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %9 = tt.addptr %8, %0 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %10 = tt.load %9 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %11 = arith.mulf %10, %3 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    tt.store %5, %11 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+    %12 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %13 = tt.make_range {autogradVisited = true, end = 4 : i32, isCloned = true, isOrig = true, start = 0 : i32} : tensor<4xi32>
+    %14 = tt.addptr %12, %13 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %15 = tt.load %14 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<5.000000e-01> : tensor<4xf32>
+    %16 = arith.addf %15, %cst {autogradVisited = true, isCloned = true} : tensor<4xf32>
+    %17 = arith.mulf %16, %3 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    tt.store %7, %17 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+    tt.return
+  }
+}
+

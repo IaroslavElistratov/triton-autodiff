@@ -200,6 +200,24 @@ struct ConvertTritonToMyArith
   }
 
 
+  void cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
+    if (mapper.contains(targetOp))
+      return; // Operation already cloned
+
+    // Recursively clone operand-defining operations
+    for (auto operand : targetOp->getOperands()) {
+      if (auto definingOp = operand.getDefiningOp())
+        cloneSubtree(definingOp, mapper, builder);
+    }
+
+    // Clone the current operation
+    Operation *clonedOp = builder.clone(*targetOp, mapper);
+    // mark as visited
+    clonedOp->setAttr("autogradVisited", builder.getBoolAttr(true));
+    // also setting this additional attribute for readability of printed IRs, this attribute is not checked anywehre in the code
+    clonedOp->setAttr("isCloned", builder.getBoolAttr(true));
+    mapper.map(targetOp->getResults(), clonedOp->getResults());
+  }
 
   // for now limit with:
   //  - 1) assume there's only 1 instance of the fn executing (don't worry about computing slices of input/output)
@@ -243,9 +261,9 @@ struct ConvertTritonToMyArith
 
 
       // if (bool is_visited = dyn_cast<bool>(op->getAttr("autogradVisited"))){
-    if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
-        llvm::outs() << "Skipping visited" << "\n";
-        continue;
+      if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
+          llvm::outs() << "Skipping visited" << "\n";
+          continue;
       }
 
       // triton
@@ -281,17 +299,21 @@ struct ConvertTritonToMyArith
         // // Type new_ptr = getPointerTypeSameShape(ptr);
 
         // int address_space = 1;
-        // //  could not convert ‘blockArg’ from ‘mlir::BlockArgument’ to ‘mlir::Type’
-        // // so try passing not ‘blockArg’ but operand.getPtr()
+        // //  could not convert 'blockArg' from 'mlir::BlockArgument' to 'mlir::Type'
+        // // so try passing not 'blockArg' but operand.getPtr()
         // Type ptrType = getPointerType(operand.getPtr(), address_space);
 
 
 
 
+        // because this will effecitvily load the upstream grad, I want to set the insertion point to the begining of the module
+        OpBuilder builder(func.getContext());
+        // auto moduleOp = func.getBlock()->getParent()->getParentOfType<ModuleOp>();
 
-        /// Create a builder and set insertion point to the given operation, which
-        /// will cause subsequent insertions to go right before it.
-        OpBuilder builder(storeOp);
+        // func.getBody() returns Region, but "setInsertionPointToStart" expects pass Block,
+        // .front() gets the first block in that region, which is the entry block
+        Block *entryBlock = &func.getBody().front();
+        builder.setInsertionPointToStart(entryBlock);
 
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
         Value ptr = storeOp->getOperand(0);
@@ -305,6 +327,7 @@ struct ConvertTritonToMyArith
 
         // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
         llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
+        // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the grad_map
         grad_map[storeOp->getOperand(1)] = newOp.getResult();
 
 
@@ -313,37 +336,40 @@ struct ConvertTritonToMyArith
         // mark as visited
         //   get generic Operation, note returns a pointer
         Operation* op = newOp.getOperation();
-        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        // todo-high: also useful to attach string: grad of what node in the original IR is that
+        op->setAttr("isInserted", builder.getBoolAttr(true)); // for readability, not used in the code
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
         // note: .getDefiningOp wt specifying type, returns a pointer to Operation
         Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
-        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true));
+        addptrOp->setAttr("isOrig", builder.getBoolAttr(true));
         Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true));
+        splatOp->setAttr("isOrig", builder.getBoolAttr(true));
         Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
-        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true));
+        makerangeOp->setAttr("isOrig", builder.getBoolAttr(true));
 
+        // i did set the insertion point above, but becuase I'm not cloning the above ops (i'm just keeping them where they are in the graph).
+        // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
+        // here I move them on top of the fucntion body as well
+        makerangeOp->moveBefore(op);
+        splatOp->moveBefore(op);
+        addptrOp->moveBefore(op);
 
-
-
-        // storeOp.dropAllUse();
-        storeOp.erase();
 
         // We only have to rewrite load/stores with tensor pointers
         // if (!triton::isTensorPointerType(ptr.getType())){
         //   return nullptr;
         // }
 
-        // todo-now:
+        // todo: OLD
         //  1) replace that blockArg with another tensor (corresponding to grad of that original argument)
         //  2) mark the subgraph I traversed above as "keep" (add that attirbute on every node of that subgraph)
         //    - in each condition check if either "keep" or "delete" attr is set -- if so, continue to loop (but skip the current op)
         //  3) add my manual DCE pass after iterating over all ops, and deletes them if "delete" flag is set on them
-
-
-
-
 
 
       } else if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
@@ -368,20 +394,52 @@ struct ConvertTritonToMyArith
                                                     triton::CacheModifier::NONE,
                                                     triton::EvictionPolicy::NORMAL);
 
+        // todo-now: note this op does not add anything to the grad_map, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
+
+        // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
+        // ensure the type of upstream matches what ptr points to.
+
+        // // Get the pointee type from the pointer to ensure type compatibility
+        // //  1) ensure the pointer type (ptr) is a valid Triton pointer type
+        // //  2) The value we're storing (upstream) has a type that matches what the pointer points to
+        // auto ptrType = mlir::cast<triton::PointerType>(ptr.getType());
+        // // Returns the type of the value that the pointer points to
+        // Type pointeeType = ptrType.getPointeeType();
+
+        // // Create store with type-checked operands
+        // auto newOp = builder.create<triton::StoreOp>(
+        //     loadOp.getLoc(),
+        //     ptr,
+        //     upstream,
+        //     /*mask=*/Value(), // No mask
+        //     /*boundaryCheck=*/ArrayRef<int32_t>{}, // No boundary check
+        //     triton::CacheModifier::NONE,
+        //     triton::EvictionPolicy::NORMAL
+        // );
+
+        // example of creating StoreOp:
+        // rewriter.create<triton::StoreOp>(loc, newPointer, newData, newMask,
+        //                                 op.getBoundaryCheck(), op.getCache(),
+        //                                 op.getEvict());
+
+
         // mark as visited
         //   get generic Operation, note returns a pointer
         Operation* op = newOp.getOperation();
         op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
         Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
         addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        addptrOp->setAttr("isOrig", builder.getBoolAttr(true));
         Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
         splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
+        splatOp->setAttr("isOrig", builder.getBoolAttr(true));
         Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
         // todo: we have already visistd this Operation, fine for my toy example, but keep in mind for the future examples
         makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        loadOp.erase();
+        makerangeOp->setAttr("isOrig", builder.getBoolAttr(true));
 
       } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
         printIndent() << "visiting tt.make_range op\n";
@@ -410,23 +468,100 @@ struct ConvertTritonToMyArith
         // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
         grad_map[lhs] = upstream;
 
+        // todo-now: hardcoded for my specific graph
         // 1st arg is a constant, so grad wrt it is zero
         Value rhs = addfOp.getOperand(1);
         Operation* rhs_producer = rhs.getDefiningOp();
         assert(dyn_cast<arith::ConstantOp>(rhs_producer));
 
-        addfOp.erase();
-        // cleaner to delete right after the assert above, but moving it (delete *after* current op),
-        // so that don't get err: op deleted but still has uses
-        rhs_producer->erase();
+      }  else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
+        printIndent() << "visiting arith.mulf op\n";
+
+        Value upstream = grad_map[mulfOp.getResult()];
+
+        Value lhs = mulfOp.getOperand(0);
+        Value rhs = mulfOp.getOperand(1);
+
+        // OpBuilder builder(mulfOp);
+
+        // auto OpGradLhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), rhs, upstream);
+        // grad_map[lhs] = OpGradLhs.getResult();
+
+        // auto OpGradRhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), lhs, upstream);
+        // grad_map[rhs] = OpGradRhs.getResult();
+
+        // // mark as visited
+        // Operation* op = OpGradLhs.getOperation();
+        // op->setAttr("autogradVisited", builder.getBoolAttr(true));
+
+        // op = OpGradRhs.getOperation();
+        // op->setAttr("autogradVisited", builder.getBoolAttr(true));
+
+
+
+
+
+        // todo-now:
+        // I think I need to check if any of the values inputs to each op I match to (in this case MulOp) are intermideats (not inputs to fwd fn, and not ouputs of the fwd fn)
+        // And if so, copy the subtree leading to these nodes
+
+        // (1) clone lhs subtree
+        OpBuilder builder(func.getContext());
+        // essentially, it's just like std::map but just a mlir specific struct
+        IRMapping mapper;
+
+        Operation *targetOpLhs = lhs.getDefiningOp();
+        builder.setInsertionPoint(targetOpLhs);
+        cloneSubtree(targetOpLhs, mapper, builder);
+
+        // IRMapping plays a critical role in ensuring that when you clone operations, the operands of the cloned ops refer to the cloned values, not the original ones.
+        // After cloning, you manually map the original results to the clone’s results:
+        // this extracts from the map wahtever Value in the map (the copied subgraph) is equivalent to targetOpLhs->getResult(0)
+        Value clonedResultLhs = mapper.lookup(targetOpLhs->getResult(0));
+        // ... use clonedResult in a new operation, if needed
+
+
+
+        // (2) differentiate rhs
+
+        auto OpGradRhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedResultLhs, upstream);
+        // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
+        grad_map[rhs] = OpGradRhs.getResult();
+
+        Operation* op = OpGradRhs.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
+        // (3) clone rhs subtree
+
+        // prepare for cloning another separate subgraph
+        mapper.clear();
+
+        Operation *targetOpRhs = rhs.getDefiningOp();
+        builder.setInsertionPoint(targetOpRhs);
+        cloneSubtree(targetOpRhs, mapper, builder);
+        Value clonedResultRhs = mapper.lookup(targetOpRhs->getResult(0));
+
+
+        // (4) differentiate lhs
+
+        auto OpGradLhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedResultRhs, upstream);
+        grad_map[lhs] = OpGradLhs.getResult();
+
+        // mark as visited
+        op = OpGradLhs.getOperation();
+        op->setAttr("autogradVisited", builder.getBoolAttr(true));
+        op->setAttr("isInserted", builder.getBoolAttr(true));
+
 
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         printIndent() << "visiting arith.constant op\n";
       }
 
+    } // for loop over ops
 
-    // // todo-now: do the below but for re-writting for each op above
-    // todo: cast to triton op before acessing these?
+
+    // // todo: do the below but for re-writting for each op above
     //   auto src = op->getSrc();
     //   auto res = op->getResult();
 
@@ -459,12 +594,30 @@ struct ConvertTritonToMyArith
 
 
 
-    };
-    // });
-  }
-};
+    // iterate as above but delete ops that are not marked
+    func->walk<WalkOrder::PostOrder>([&](Operation *op) {
 
-} // namespace
+      auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
+      if (visitedAttr) llvm::outs() << "  Operation is marked as visited: " << *op << "\n";
+      else llvm::outs() << "  Operation is NOT marked as visited: " << *op << "\n";
+
+      // don't delete the fn itself
+      if (!op->getAttrOfType<BoolAttr>("autogradVisited")
+          && !dyn_cast<triton::FuncOp>(op)
+          && !dyn_cast<triton::ReturnOp>(op)) {
+        llvm::outs() << "Deleting unmarked node" << *op << "\n";
+
+        op->dropAllUses();
+        op->erase();
+
+      }
+    }); // lambda function for the walk
+
+  } // RewriteSplatOp function
+
+  }; // ConvertTritonToMyArith stuct
+
+} // private namespace
 } // namespace triton
 } // namespace mlir
 
