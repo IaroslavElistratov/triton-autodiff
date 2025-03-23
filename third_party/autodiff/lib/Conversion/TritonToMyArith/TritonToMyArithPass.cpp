@@ -26,25 +26,11 @@ namespace triton {
 
 namespace {
 
-// TritonToMyArithPass.cpp
+
 struct ConvertTritonToMyArith
     : public impl::ConvertTritonToMyArithBase<ConvertTritonToMyArith> {
 
   using ConvertTritonToMyArithBase::ConvertTritonToMyArithBase;
-
-  // main function
-  void runOnOperation() override {
-    // grab the module (IOW root) op
-    auto mod = getOperation();
-    // walk this recursively structred IR, and call rewriteSplatAddOp
-    // only on "triton::FuncOp" -- which is the function op which encapsulates
-    // our entire program
-
-    // todo-med: since I'm not using recursive funcs in "rewriteSplatAddOp", I'm not traversing body of the fn recursively (only the upper-most level)
-    mod->walk([&](triton::FuncOp func) {
-      rewriteSplatAddOp(func);
-    });
-  }
 
   void markVisited(Operation *op, OpBuilder &builder, bool isInserted = false, bool isOriginal = false) {
     op->setAttr("autogradVisited", builder.getBoolAttr(true));
@@ -106,6 +92,17 @@ struct ConvertTritonToMyArith
 
     // returns a value to avoid manually looking up the clone in the mapper after calling the function
     return clonedOp->getResult(0);
+  }
+
+  // main function
+  void runOnOperation() override {
+    // grab the module (IOW root) op
+    auto mod = getOperation();
+    // walk this recursively structred IR, and call rewriteSplatAddOp only on "triton::FuncOp"
+    // todo-med: since I'm not using recursive funcs in "rewriteSplatAddOp", I'm not traversing body of the fn recursively (only the upper-most level)
+    mod->walk([&](triton::FuncOp func) {
+      rewriteSplatAddOp(func);
+    });
   }
 
   // walk the IR backward, rewrite each operation with its corresponding backward function
