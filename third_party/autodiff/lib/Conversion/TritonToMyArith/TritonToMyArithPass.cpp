@@ -40,15 +40,6 @@ struct ConvertTritonToMyArith
     // only on "triton::FuncOp" -- which is the function op which encapsulates
     // our entire program
 
-    // note:
-    // To traverse, can call my recursive functions (like printOperation, printRegion, printBlock),
-    // but docs: "in many cases, unwrapping the recursive structure of the IR is cumbersome and
-    // you may be interested in using other helpers. [...] The getOps<OpTy>() is useful to iterate
-    // on some Operations immediately listed inside a single block (or a single region), however
-    // it is frequently interesting to traverse the IR in a nested fashion. To this end MLIR exposes
-    // the walk() helper on Operation, Block, and Region. This helper takes a single argument: a callback
-    // method that will be invoked for every operation recursively nested under the provided entity."
-
     // todo-med: since I'm not using recursive funcs in "rewriteSplatAddOp", I'm not traversing body of the fn recursively (only the upper-most level)
     // answer-now: this body in { } is just a lamda function, which specifies that callback, which is called by walk whenerver there's a match 
     mod->walk([&](triton::FuncOp func) {

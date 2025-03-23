@@ -1,4 +1,24 @@
 
+<!-- cmake -G Ninja ../triton -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLLVM_ENABLE_LLD=ON -DLLVM_CCACHE_BUILD=ON -->
+
+
+rm -rf python/build && pip install -e python
+
+
+
+- # minimal (aka run):
+  python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir 
+
+- # + plot:
+  python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith --view-op-graph third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir 2> third_party/autodiff/test/out_0.dot && dot -Tsvg third_party/autodiff/test/out_0.dot > third_party/autodiff/test/out_0.svg && rm third_party/autodiff/test/out_0.dot
+
+- # dissable checks (useful to see transformed IR even thought it's not valid)
+  python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --no-implicit-module --verify-each=0  --convert-triton-to-myarith third_party/autodiff/test/inp.mlir > third_party/autodiff/test/out_0.mlir
+
+# Canonicalize the output to remove values with no uses
+python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-myarith --canonicalize third_party/autodiff/test/out_0.mlir > third_party/autodiff/test/out_1.mlir
+
+
 --------------------------
 
 
