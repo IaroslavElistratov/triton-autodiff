@@ -52,11 +52,8 @@ struct ConvertTritonToMyArith
       auto broadcasted = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
 
       // mark as visited
-      broadcasted->setAttr("autogradVisited", builder.getBoolAttr(true));
-      broadcasted->setAttr("isInserted", builder.getBoolAttr(true));
-
-      scalarValue->setAttr("autogradVisited", builder.getBoolAttr(true));
-      scalarValue->setAttr("isInserted", builder.getBoolAttr(true));
+      markVisited(broadcasted, builder, true);
+      markVisited(scalarValue, builder, true);
       return broadcasted;
   }
 
@@ -74,7 +71,7 @@ struct ConvertTritonToMyArith
     // Clone the current operation
     Operation *clonedOp = builder.clone(*targetOp, mapper);
     // mark as visited
-    clonedOp->setAttr("autogradVisited", builder.getBoolAttr(true));
+    markVisited(clonedOp, builder);
     // also setting this additional attribute for readability of printed IRs, this attribute is not checked anywehre in the code
     clonedOp->setAttr("isCloned", builder.getBoolAttr(true));
     mapper.map(targetOp->getResults(), clonedOp->getResults());
@@ -147,20 +144,16 @@ struct ConvertTritonToMyArith
 
 
         // mark as visited
-        newOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        newOp->setAttr("isInserted", builder.getBoolAttr(true)); // for readability, not used in the code
+        markVisited(newOp, builder, true);
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
         // note: .getDefiningOp wt specifying type, returns a pointer to Operation
         Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
-        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true));
-        addptrOp->setAttr("isOrig", builder.getBoolAttr(true));
+        markVisited(addptrOp, builder, false, true);
         Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true));
-        splatOp->setAttr("isOrig", builder.getBoolAttr(true));
+        markVisited(splatOp, builder, false, true);
         Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
-        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true));
-        makerangeOp->setAttr("isOrig", builder.getBoolAttr(true));
+        markVisited(makerangeOp, builder, false, true);
 
         // i did set the insertion point above, but becuase I'm not cloning the above ops (i'm just keeping them where they are in the graph).
         // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
@@ -240,8 +233,7 @@ struct ConvertTritonToMyArith
         // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
         grad_map[rhs] = OpGradRhs.getResult();
 
-        OpGradRhs->setAttr("autogradVisited", builder.getBoolAttr(true));
-        OpGradRhs->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(OpGradRhs, builder, true);
 
         // (3) clone rhs subtree
 
@@ -260,8 +252,7 @@ struct ConvertTritonToMyArith
         grad_map[lhs] = OpGradLhs.getResult();
 
         // mark as visited
-        OpGradLhs->setAttr("autogradVisited", builder.getBoolAttr(true));
-        OpGradLhs->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(OpGradLhs, builder, true);
 
 
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
@@ -312,14 +303,10 @@ struct ConvertTritonToMyArith
         grad_map[a] = OpGradLhs.getResult();
 
         // set attributes
-        OpGradLhs->setAttr("autogradVisited", builder.getBoolAttr(true));
-        OpGradLhs->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(OpGradLhs, builder, true);
 
-        ones->setAttr("autogradVisited", builder.getBoolAttr(true));
-        ones->setAttr("isInserted", builder.getBoolAttr(true));
-
-        a_local->setAttr("autogradVisited", builder.getBoolAttr(true));
-        a_local->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(ones, builder, true);
+        markVisited(a_local, builder, true);
 
 
 
@@ -337,20 +324,12 @@ struct ConvertTritonToMyArith
         grad_map[b] = OpGradRhs.getResult();
 
         // set attributes
-        OpGradRhs->setAttr("autogradVisited", builder.getBoolAttr(true));
-        OpGradRhs->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(OpGradRhs, builder, true);
 
-        b_local->setAttr("autogradVisited", builder.getBoolAttr(true));
-        b_local->setAttr("isInserted", builder.getBoolAttr(true));
-
-        neg->setAttr("autogradVisited", builder.getBoolAttr(true));
-        neg->setAttr("isInserted", builder.getBoolAttr(true));
-
-        div->setAttr("autogradVisited", builder.getBoolAttr(true));
-        div->setAttr("isInserted", builder.getBoolAttr(true));
-
-        pow->setAttr("autogradVisited", builder.getBoolAttr(true));
-        pow->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(b_local, builder, true);
+        markVisited(neg, builder, true);
+        markVisited(div, builder, true);
+        markVisited(pow, builder, true);
 
 
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
@@ -408,8 +387,7 @@ struct ConvertTritonToMyArith
 
         // mark as visited
         //   get generic Operation, note returns a pointer
-        newOp->setAttr("autogradVisited", builder.getBoolAttr(true));
-        newOp->setAttr("isInserted", builder.getBoolAttr(true));
+        markVisited(newOp, builder, true);
 
 
         // loadOp.getOperation()->getName().getStringRef() -- does not include operands so reesult value
@@ -422,15 +400,12 @@ struct ConvertTritonToMyArith
 
         // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
         Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
-        addptrOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        addptrOp->setAttr("isOrig", builder.getBoolAttr(true));
+        markVisited(addptrOp, builder, false, true);
         Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-        splatOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        splatOp->setAttr("isOrig", builder.getBoolAttr(true));
+        markVisited(splatOp, builder, false, true);
         Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
         // todo: we have already visistd this Operation, fine for my toy example, but keep in mind for the future examples
-        makerangeOp->setAttr("autogradVisited", builder.getBoolAttr(true)); // mark as visited
-        makerangeOp->setAttr("isOrig", builder.getBoolAttr(true));
+        markVisited(makerangeOp, builder, false, true);
 
       }
     } // for loop over loads
@@ -457,7 +432,16 @@ struct ConvertTritonToMyArith
 
   } // RewriteSplatOp function
 
-  }; // ConvertTritonToMyArith stuct
+  // Helper function for consistently marking operations
+  void markVisited(Operation *op, OpBuilder &builder, bool isInserted = false, bool isOriginal = false) {
+    op->setAttr("autogradVisited", builder.getBoolAttr(true));
+    if (isInserted)
+      op->setAttr("isInserted", builder.getBoolAttr(true));
+    if (isOriginal)
+      op->setAttr("isOrig", builder.getBoolAttr(true));
+  }
+
+}; // ConvertTritonToMyArith stuct
 
 } // private namespace
 } // namespace triton
