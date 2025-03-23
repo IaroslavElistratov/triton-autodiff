@@ -41,7 +41,6 @@ struct ConvertTritonToMyArith
     // our entire program
 
     // todo-med: since I'm not using recursive funcs in "rewriteSplatAddOp", I'm not traversing body of the fn recursively (only the upper-most level)
-    // answer-now: this body in { } is just a lamda function, which specifies that callback, which is called by walk whenerver there's a match 
     mod->walk([&](triton::FuncOp func) {
       rewriteSplatAddOp(func);
     });
@@ -101,11 +100,6 @@ struct ConvertTritonToMyArith
     // // todo: I think, you don't need topo sort if you're iterating in post order traversal (visit children before parent)
     // func->walk<WalkOrder::PostOrder>([&](Operation *op) {           // https://mlir.llvm.org/doxygen/classmlir_1_1Operation.html#a59740592240b950b8c8afcf4a2eb4113
 
-    // todo-high:
-    // 1. Init grads of the last variable in the fwd ("Grad Outputs") to all ones
-    //   - find out tensor size (get last operation in the function, assume it's a store, grab tensor sizes from there); allocate tensor of ones with that shape
-    // I guess the problem is that you don't know the size of input tensors (you only know the size of the slices of these tensors that the current program processes)
-    // So, can't allocate grad for each tensor as a single contigious tensor, seems can only allocate grad for each individual slice (probably leads memory fragmentation?)
 
     // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
     SetVector<Operation *> forwardSlice;
@@ -122,28 +116,6 @@ struct ConvertTritonToMyArith
 
         // why .getValue works for StoreOp, but not for AddPtrOp
         //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation (unless use ->)
-
-        // todo-now: maybe don't even need to replace original pointer (block arg) with grad pointer -- just allocate the grads outside of the kenrel and, for every arg of the kernel, pass grad of taht arg in that argument
-
-        // // extract original ptr (to the begining of the array which fwd STORE'ed the data in)
-        // // note: I believe op.getPtr() retruns Value of one of the arguments to that op (the argument
-        // // can be at different index, for different ops, depending which one of the argument is of type PointerType)
-        // Value ptr = storeOp.getPtr();
-        // auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
-        // Value addptrPtr = addptrOp.getPtr();
-        // auto splatOp = addptrPtr.getDefiningOp<triton::SplatOp>();
-        // Value operand = splatOp->getOperand(0);
-        // // Operation *producer = operand.getDefiningOp()
-        // auto blockArg = cast<BlockArgument>(operand);
-        // llvm::outs() << "blockArg: " << blockArg << "\n";
-
-        // // todo: need to replace the above with a new pointer, so need to create a new pointer
-        // // Instead of traversing manually, use getPointerTypeWithShape getPointerTypeSameShape? 
-        // // Type new_ptr = getPointerTypeSameShape(ptr);
-        // int address_space = 1;
-        // //  could not convert 'blockArg' from 'mlir::BlockArgument' to 'mlir::Type'
-        // // so try passing not 'blockArg' but operand.getPtr()
-        // Type ptrType = getPointerType(operand.getPtr(), address_space);
 
 
 
@@ -226,7 +198,7 @@ struct ConvertTritonToMyArith
         // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
         grad_map[lhs] = upstream;
 
-        // todo-now: hardcoded for my specific graph
+        // todo-high: hardcoded for my specific graph
         // 1st arg is a constant, so grad wrt it is zero
         Value rhs = addfOp.getOperand(1);
         Operation* rhs_producer = rhs.getDefiningOp();
@@ -244,12 +216,6 @@ struct ConvertTritonToMyArith
         Value lhs = mulfOp.getOperand(0);
         Value rhs = mulfOp.getOperand(1);
 
-
-        // todo-high:
-        // Don't clone if inputs to an op you matched to are directly inputs to the fn (see issues/1)
-        //    I think I need to check if any of the values inputs to each op I match to (in this case MulOp) are intermideats (not inputs to fwd fn, and not ouputs of the fwd fn)
-        //    need to do cloning only IF the inputs to this op are not inputs to the function (cout this as direct inputs: fn_input->splat->add_ptr) -- in such cases do not duplicate the subgraph -- its ok if you do duplicate but you'll create a redundant copy of (fn_input->splat->add_ptr) -- duplicating subgprah is not really needed bc there were no intermideates computed in fwd in the first place
-        // And if so, copy the subtree leading to these nodes
 
         // (1) clone lhs subtree
         OpBuilder builder(func.getContext());
@@ -332,16 +298,6 @@ struct ConvertTritonToMyArith
         cloneSubtree(targetOpRhs, mapper, builder);
         Value clonedResultRhs = mapper.lookup(targetOpRhs->getResult(0));
         auto b_cloned = clonedResultRhs;
-
-
-        // todo-now:
-        // todo-now:
-        // todo-now:
-        //  big problem with my "copy the subgraph to recompute the operands" approach is that there's overlap between recompuated values when matching to each op
-        //  when matching to Z (div), you gonna insert subgraphs that recompute: x, y. But after that (when matching to the next op), Y (mul) you again will copy the subgraph leading to operands of the match op -- which will recompute x AGAIN
-        //   - well, because here (when matching to each op) I'm traversing nodes from the end, I basically need to copy the sugraph (leading to the operands of the last op) once and this will recompute all the intermidate ops; Next when matching to the next ops (further from the end of the graph) all their operands should be already recompuated and you just need to have some kind of mapping (from their %names in the current graph to ?? their names in fwd)
-        //   - even simpler: can I just copy entire forward into my backward once (mark all it as visited) before matching and any of the ops?
-        //
 
 
         // (3) differentiate lhs
@@ -446,7 +402,7 @@ struct ConvertTritonToMyArith
                                                     triton::CacheModifier::NONE,
                                                     triton::EvictionPolicy::NORMAL);
 
-        // todo-now: note this op does not add anything to the grad_map, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
+        // todo-high: note this op does not add anything to the grad_map, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
         // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
         // ensure the type of upstream matches what ptr points to.
 
