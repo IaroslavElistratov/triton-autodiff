@@ -50,7 +50,7 @@ struct ConvertTritonToMyArith
     // method that will be invoked for every operation recursively nested under the provided entity."
 
     // todo-med: since I'm not using recursive funcs in "rewriteSplatAddOp", I'm not traversing body of the fn recursively (only the upper-most level)
-    // answer-now: oh this body in { } is just a lamda function, which specifies that callback, which is called by walk whenerver there's a match 
+    // answer-now: this body in { } is just a lamda function, which specifies that callback, which is called by walk whenerver there's a match 
     mod->walk([&](triton::FuncOp func) {
       rewriteSplatAddOp(func);
     });
@@ -100,7 +100,8 @@ struct ConvertTritonToMyArith
     // bool is_first_node
 
 
-    // error hapening becuase Value (which is the type I'm trying to put into std::map) does not have move interface (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
+    // error happening because Value (which is the type I'm trying to put into std::map) does not have move interface
+    // (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
     llvm::DenseMap<Value, Value> grad_map{};
 
 
@@ -134,7 +135,8 @@ struct ConvertTritonToMyArith
         // todo-now: maybe don't even need to replace original pointer (block arg) with grad pointer -- just allocate the grads outside of the kenrel and, for every arg of the kernel, pass grad of taht arg in that argument
 
         // // extract original ptr (to the begining of the array which fwd STORE'ed the data in)
-        // note: I believe op.getPtr() retruns Value of one of the arguments to that op (the argument can be at different index, for different ops, depedining which one of the arugments is of type PointerType)
+        // // note: I believe op.getPtr() retruns Value of one of the arguments to that op (the argument
+        // // can be at different index, for different ops, depending which one of the argument is of type PointerType)
         // Value ptr = storeOp.getPtr();
         // auto addptrOp = ptr.getDefiningOp<triton::AddPtrOp>();
         // Value addptrPtr = addptrOp.getPtr();
@@ -144,9 +146,8 @@ struct ConvertTritonToMyArith
         // auto blockArg = cast<BlockArgument>(operand);
         // llvm::outs() << "blockArg: " << blockArg << "\n";
 
-        // // todo: need to replace the above with a new pointer, need to create a new pointer
-
-        // // todo-high: Instead of traversing manually, use getPointerTypeWithShape getPointerTypeSameShape? 
+        // // todo: need to replace the above with a new pointer, so need to create a new pointer
+        // // Instead of traversing manually, use getPointerTypeWithShape getPointerTypeSameShape? 
         // // Type new_ptr = getPointerTypeSameShape(ptr);
         // int address_space = 1;
         // //  could not convert 'blockArg' from 'mlir::BlockArgument' to 'mlir::Type'
@@ -350,8 +351,6 @@ struct ConvertTritonToMyArith
         //   - well, because here (when matching to each op) I'm traversing nodes from the end, I basically need to copy the sugraph (leading to the operands of the last op) once and this will recompute all the intermidate ops; Next when matching to the next ops (further from the end of the graph) all their operands should be already recompuated and you just need to have some kind of mapping (from their %names in the current graph to ?? their names in fwd)
         //   - even simpler: can I just copy entire forward into my backward once (mark all it as visited) before matching and any of the ops?
         //
-        // answer-now: before doing any optimizaitons (above), just make the below work
-
 
 
         // (3) differentiate lhs
@@ -448,7 +447,7 @@ struct ConvertTritonToMyArith
         // printGradMap(grad_map);
 
         // Create a ValueRange from the operands
-        SmallVector<Value> operands = {ptr, upstream};
+        // SmallVector<Value> operands = {ptr, upstream};
         // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
         //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
         // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
@@ -459,19 +458,6 @@ struct ConvertTritonToMyArith
         // todo-now: note this op does not add anything to the grad_map, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
         // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
         // ensure the type of upstream matches what ptr points to.
-
-        // // Get the pointee type from the pointer to ensure type compatibility
-        // //  1) ensure the pointer type (ptr) is a valid Triton pointer type
-        // //  2) The value we're storing (upstream) has a type that matches what the pointer points to
-        // auto ptrType = mlir::cast<triton::PointerType>(ptr.getType());
-        // // Returns the type of the value that the pointer points to
-        // Type pointeeType = ptrType.getPointeeType();
-
-        // example of creating StoreOp:
-        // rewriter.create<triton::StoreOp>(loc, newPointer, newData, newMask,
-        //                                 op.getBoundaryCheck(), op.getCache(),
-        //                                 op.getEvict());
-
 
         // mark as visited
         //   get generic Operation, note returns a pointer
