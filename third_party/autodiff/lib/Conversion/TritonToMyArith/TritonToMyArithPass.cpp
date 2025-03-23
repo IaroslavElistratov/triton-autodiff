@@ -175,13 +175,7 @@ struct ConvertTritonToMyArith
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
         printIndent() << "visiting arith.addf op\n";
 
-        Value upstream = grad_map[addfOp.getResult()];
-        if (!upstream){
-          llvm::outs() << "expected grad in the map" << "\n";
-          exit(1);
-        }
-        llvm::outs() << "extracted upstream for addf, from the grad map: " << upstream << "\n";
-
+        Value upstream = getUpstreamGrad(addfOp.getResult(), grad_map);
 
         // float local_grad = 1.;
 
@@ -200,11 +194,7 @@ struct ConvertTritonToMyArith
       } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
         printIndent() << "visiting arith.mulf op\n";
 
-        Value upstream = grad_map[mulfOp.getResult()];
-        if (!upstream){
-          llvm::outs() << "expected grad in the map" << "\n";
-          exit(1);
-        }
+        Value upstream = getUpstreamGrad(mulfOp.getResult(), grad_map);
 
         Value lhs = mulfOp.getOperand(0);
         Value rhs = mulfOp.getOperand(1);
@@ -258,11 +248,7 @@ struct ConvertTritonToMyArith
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
         printIndent() << "visiting arith.divf op\n";
 
-        Value upstream = grad_map[divfOp.getResult()];
-        if (!upstream){
-          llvm::outs() << "expected grad in the map" << "\n";
-          exit(1);
-        }
+        Value upstream = getUpstreamGrad(divfOp.getResult(), grad_map);
 
         Value a = divfOp.getOperand(0);
         Value b = divfOp.getOperand(1);
@@ -350,11 +336,7 @@ struct ConvertTritonToMyArith
         printIndent() << "visiting tt.load op\n";
         // traverse parents to find the initial pointer
 
-        Value upstream = grad_map[loadOp.getResult()];
-        if (!upstream){
-          llvm::outs() << "expected grad in the map" << "\n";
-          exit(1);
-        }
+        Value upstream = getUpstreamGrad(loadOp.getResult(), grad_map);
         Value ptr = loadOp->getOperand(0);
         // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
 
@@ -432,13 +414,21 @@ struct ConvertTritonToMyArith
 
   } // RewriteSplatOp function
 
-  // Helper function for consistently marking operations
   void markVisited(Operation *op, OpBuilder &builder, bool isInserted = false, bool isOriginal = false) {
     op->setAttr("autogradVisited", builder.getBoolAttr(true));
     if (isInserted)
       op->setAttr("isInserted", builder.getBoolAttr(true));
     if (isOriginal)
       op->setAttr("isOrig", builder.getBoolAttr(true));
+  }
+
+  Value getUpstreamGrad(Value result, const llvm::DenseMap<Value, Value> &gradMap) {
+    auto it = gradMap.find(result);
+    if (it == gradMap.end()) {
+      llvm::outs() << "Expected gradient in the map\n";
+      exit(1);
+    }
+    return it->second;
   }
 
 }; // ConvertTritonToMyArith stuct
