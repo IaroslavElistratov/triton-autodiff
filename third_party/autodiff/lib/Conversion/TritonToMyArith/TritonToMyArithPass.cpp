@@ -57,26 +57,39 @@ struct ConvertTritonToMyArith
       return broadcasted;
   }
 
+  Value cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
+    // Null check
+    if (!targetOp || targetOp->getNumResults() == 0)
+      llvm::report_fatal_error("Cannot clone operation with no results");
 
-  void cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
-    if (mapper.contains(targetOp))
-      return; // Operation already cloned
+    // If we've already cloned this result, return it directly
+    if (mapper.contains(targetOp->getResult(0)))
+      return mapper.lookup(targetOp->getResult(0));
 
-    // Recursively clone operand-defining operations
-    for (auto operand : targetOp->getOperands()) {
-      if (auto definingOp = operand.getDefiningOp())
-        cloneSubtree(definingOp, mapper, builder);
+    // Clone all operations we depend on first
+    for (Value operand : targetOp->getOperands()) {
+      // Skip block arguments and values already in the mapper
+      if (mlir::isa<BlockArgument>(operand) || mapper.contains(operand))
+        continue;
+
+      if (Operation *defOp = operand.getDefiningOp())
+        cloneSubtree(defOp, mapper, builder);
     }
 
-    // Clone the current operation
+    // Now clone this operation
     Operation *clonedOp = builder.clone(*targetOp, mapper);
-    // mark as visited
-    markVisited(clonedOp, builder);
-    // also setting this additional attribute for readability of printed IRs, this attribute is not checked anywehre in the code
     clonedOp->setAttr("isCloned", builder.getBoolAttr(true));
-    mapper.map(targetOp->getResults(), clonedOp->getResults());
-  }
+    markVisited(clonedOp, builder);
 
+    // IRMapping used to ensure when you clone operations, the operands of the cloned
+    // ops refer to the cloned values, not the original ones.
+    // After cloning, manually map the original results to the clone's results:
+    // this extracts from the map whatever Value in the map (the copied subgraph)
+    // is equivalent to targetOp->getResult(0)
+
+    // returns a value to avoid manually looking up the clone in the mapper after calling the function
+    return clonedOp->getResult(0);
+  }
 
   // walk the IR backward, rewrite each operation with its corresponding backward function
   void rewriteSplatAddOp(triton::FuncOp func) {
@@ -207,18 +220,9 @@ struct ConvertTritonToMyArith
 
         Operation *targetOpLhs = lhs.getDefiningOp();
         builder.setInsertionPoint(targetOpLhs);
-        cloneSubtree(targetOpLhs, mapper, builder);
-
-        // IRMapping plays a critical role in ensuring that when you clone operations, the operands of the cloned ops refer to the cloned values, not the original ones.
-        // After cloning, you manually map the original results to the clone's results:
-        // this extracts from the map wahtever Value in the map (the copied subgraph) is equivalent to targetOpLhs->getResult(0)
-        Value clonedResultLhs = mapper.lookup(targetOpLhs->getResult(0));
-        // ... use clonedResult in a new operation, if needed
-
-
+        Value clonedResultLhs = cloneSubtree(targetOpLhs, mapper, builder);
 
         // (2) differentiate rhs
-
         auto OpGradRhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedResultLhs, upstream);
         // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
         grad_map[rhs] = OpGradRhs.getResult();
@@ -226,18 +230,14 @@ struct ConvertTritonToMyArith
         markVisited(OpGradRhs, builder, true);
 
         // (3) clone rhs subtree
-
         // prepare for cloning another separate subgraph
         mapper.clear();
 
         Operation *targetOpRhs = rhs.getDefiningOp();
         builder.setInsertionPoint(targetOpRhs);
-        cloneSubtree(targetOpRhs, mapper, builder);
-        Value clonedResultRhs = mapper.lookup(targetOpRhs->getResult(0));
-
+        Value clonedResultRhs = cloneSubtree(targetOpRhs, mapper, builder);
 
         // (4) differentiate lhs
-
         auto OpGradLhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedResultRhs, upstream);
         grad_map[lhs] = OpGradLhs.getResult();
 
@@ -259,22 +259,15 @@ struct ConvertTritonToMyArith
 
 
         // (1) clone lhs subtree
-
         Operation *targetOpLhs = a.getDefiningOp();
         builder.setInsertionPoint(targetOpLhs);
-        cloneSubtree(targetOpLhs, mapper, builder);
-        Value clonedResultLhs = mapper.lookup(targetOpLhs->getResult(0));
-        auto a_cloned = clonedResultLhs; // for brevity
-
+        Value a_cloned = cloneSubtree(targetOpLhs, mapper, builder);
 
         // (2) clone rhs subtree
-
         mapper.clear();
         Operation *targetOpRhs = b.getDefiningOp();
         builder.setInsertionPoint(targetOpRhs);
-        cloneSubtree(targetOpRhs, mapper, builder);
-        Value clonedResultRhs = mapper.lookup(targetOpRhs->getResult(0));
-        auto b_cloned = clonedResultRhs;
+        Value b_cloned = cloneSubtree(targetOpRhs, mapper, builder);
 
 
         // (3) differentiate lhs
