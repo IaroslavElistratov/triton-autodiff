@@ -1,5 +1,5 @@
-#ifndef TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_H
-#define TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_H
+#ifndef TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_IO_H
+#define TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_IO_H
 
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Region.h"
@@ -30,4 +30,4 @@ llvm::raw_ostream &printIndent();
 } // namespace triton
 } // namespace mlir
 
-#endif // TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_H 
+#endif // TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_IO_H 
