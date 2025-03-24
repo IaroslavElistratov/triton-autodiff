@@ -54,7 +54,31 @@ struct ConvertTritonToAutodiff
     // error happening because Value (which is the type I'm trying to put into std::map) does not have move interface
     // (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
     llvm::DenseMap<Value, Value> gradMap;
+
+    // copy entire forward graph once
+    IRMapping origToCloned;
+    Block *entryBlock = &func.getBody().front();
+    Operation *returnOp = &entryBlock->back();
+    // last op before return op
+    Operation *beforeReturnOp = returnOp->getPrevNode();
+    // because these marked as visited, you will not match
+    // them in your loop below, and thus you will not re-write
+    // them -- so effectively this cloned is your *Forward* graph
+
+    // answer-now: the problem because I didn't set the insertion point :)
     OpBuilder builder(func.getContext());
+    builder.setInsertionPointToStart(entryBlock);
+
+    cloneSubtree(beforeReturnOp, origToCloned, builder);
+    return;
+
+
+    // the above mapping: original nodes -> inserted nodes.
+    // To lookup intermideats in the cloned (aka cloned subgraph),
+    // when iterating over the original subgraph (and re-writting that original subgraph with derivative formualrs)
+    // I think I don't even need to reverse the mapping: can directly use it --
+    // bc I'm iterating over the "original nodes" and want to figure out what "cloned" node does an original node refers to
+
 
     // // Walk all operations opaquely.
     // // todo: I think, you don't need topo sort if you're iterating in post order traversal (visit children before parent)
@@ -87,9 +111,9 @@ struct ConvertTritonToAutodiff
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
         handleAddBackward(addfOp, func, builder, gradMap);
       } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
-        handleMulBackward(mulfOp, func, builder, gradMap);
+        handleMulBackward(mulfOp, func, builder, gradMap, origToCloned);
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
-        handleDivBackward(divfOp, func, builder, gradMap);
+        handleDivBackward(divfOp, func, builder, gradMap, origToCloned);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         printIndent() << "visiting arith.constant op\n";
       }
@@ -254,7 +278,8 @@ struct ConvertTritonToAutodiff
   }
 
   void handleMulBackward(arith::MulFOp mulfOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap){
+                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
+                          IRMapping &origToCloned){
     printIndent() << "visiting arith.mulf op\n";
 
     Value upstream = getUpstreamGrad(mulfOp.getResult(), gradMap);
@@ -265,11 +290,7 @@ struct ConvertTritonToAutodiff
 
     // (1) clone lhs subtree
     // essentially, it's just like std::map but just a mlir specific struct
-    IRMapping mapper;
-
-    Operation *lhsOp = lhs.getDefiningOp();
-    builder.setInsertionPoint(lhsOp);
-    Value clonedLhs = cloneSubtree(lhsOp, mapper, builder);
+    Value clonedLhs = origToCloned.lookup(lhs);
 
     // (2) differentiate rhs
     auto gradRhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedLhs, upstream);
@@ -279,11 +300,7 @@ struct ConvertTritonToAutodiff
 
     // (3) clone rhs subtree
     // prepare for cloning another separate subgraph
-    mapper.clear();
-
-    Operation *rhsOp = rhs.getDefiningOp();
-    builder.setInsertionPoint(rhsOp);
-    Value clonedRhs = cloneSubtree(rhsOp, mapper, builder);
+    Value clonedRhs = origToCloned.lookup(rhs);
 
     // (4) differentiate lhs
     auto gradLhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedRhs, upstream);
@@ -293,7 +310,8 @@ struct ConvertTritonToAutodiff
 
 
   void handleDivBackward(arith::DivFOp divfOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap){
+                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
+                          IRMapping &origToCloned){
     printIndent() << "visiting arith.divf op\n";
 
     Value upstream = getUpstreamGrad(divfOp.getResult(), gradMap);
@@ -301,18 +319,11 @@ struct ConvertTritonToAutodiff
     Value a = divfOp.getOperand(0);
     Value b = divfOp.getOperand(1);
 
-    Operation *aOp = a.getDefiningOp();
-    Operation *bOp = b.getDefiningOp();
-
     // (1) clone lhs subtree
-    IRMapping mapper;
-    builder.setInsertionPoint(aOp);
-    Value aCloned = cloneSubtree(aOp, mapper, builder);
+    Value aCloned = origToCloned.lookup(a);
 
     // (2) clone rhs subtree
-    mapper.clear();
-    builder.setInsertionPoint(bOp);
-    Value bCloned = cloneSubtree(bOp, mapper, builder);
+    Value bCloned = origToCloned.lookup(b);
 
     // (3) differentiate lhs
 

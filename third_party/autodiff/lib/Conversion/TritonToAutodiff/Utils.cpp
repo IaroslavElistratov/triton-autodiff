@@ -58,40 +58,67 @@ namespace triton {
     return tensorValue;
   }
 
-  Value cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
-    // Null check
-    if (!targetOp || targetOp->getNumResults() == 0) {
-      llvm::report_fatal_error("Cannot clone operation with no results");
-      exit(1);
-    }
 
-    // If we've already cloned this result, return it directly
-    if (mapper.contains(targetOp->getResult(0)))
-      return mapper.lookup(targetOp->getResult(0));
+
+  Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
+
+    // Null check
+    if (!targetOp)
+      return nullptr;
+
+    // wt this conditional, same node (e.g. make_range) is duplicated multiple times
+    if (auto *clonedOp = mapper.lookupOrNull(targetOp))
+      return clonedOp;
 
     // Clone all operations we depend on first
     for (Value operand : targetOp->getOperands()) {
+
       // Skip block arguments and values already in the mapper
-      if (mlir::isa<BlockArgument>(operand) || mapper.contains(operand))
+      if (isa<BlockArgument>(operand))
         continue;
 
       if (Operation *defOp = operand.getDefiningOp())
         cloneSubtree(defOp, mapper, builder);
     }
 
+    /* currently the order of cloned ops is different from the original
+      you can see how cloning left children first in original graph
+      below results in this order I'm seeing. The first operand of
+      the store is the pointer (%18) -- so the for loop over operands
+      visits and clones that pointer arg (%18) first.
+
+    %18 = tt.splat %arg2 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %19 = tt.addptr %18, %10 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    tt.store %19, %17 : tensor<4x!tt.ptr<f32>>
+    */
+
+    // todo: set the insertion point so that the order of inserted ops doesn't change?
+    // Save the current insertion point
+    // OpBuilder::InsertionGuard insertGuard(builder);
+    // builder.setInsertionPoint(clonedOperand);
+
+
     // Now clone this operation
+    llvm::outs() << "cloning: " << *targetOp << "\n";
+    // passing the mapper, maps the results of the original operation
+    // to the results of the cloned operation in the IRMapping;
+    // IRMapping used to ensure when I clone operations, the operands of the cloned
+    // ops refer to the cloned values, not the original ones.
     Operation *clonedOp = builder.clone(*targetOp, mapper);
     markVisited(builder, visitedType::Cloned, clonedOp);
 
-    // IRMapping used to ensure when you clone operations, the operands of the cloned
-    // ops refer to the cloned values, not the original ones.
-    // After cloning, manually map the original results to the clone's results:
-    // this extracts from the map whatever Value in the map (the copied subgraph)
-    // is equivalent to targetOp->getResult(0)
+    // if (clonedOp) {
+    //   // Find the corresponding result in the cloned operation
+    //   unsigned resultIdx = targetValue.cast<OpResult>().getResultNumber();
+    //   if (resultIdx < clonedOp->getNumResults())
+    //     return clonedOp->getResult(resultIdx);
+    // }
 
-    // returns a value to avoid manually looking up the clone in the mapper after calling the function
-    return clonedOp->getResult(0);
+    // e.g. tt.store, does not have result
+    // Cloned the operation (above) but don't try to return its (non-existent) result
+    return clonedOp;
   }
+
 
 } // namespace triton
 } // namespace mlir

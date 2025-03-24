@@ -58,7 +58,7 @@ namespace triton {
 
   triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value);
 
-  Value cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
+  Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
 
 
 } // namespace triton
