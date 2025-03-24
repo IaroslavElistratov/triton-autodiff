@@ -1,12 +1,12 @@
-#ifndef TRITON_CONVERSION_TRITON_TO_MYARITH_PASSES
-#define TRITON_CONVERSION_TRITON_TO_MYARITH_PASSES
+#ifndef TRITON_CONVERSION_TRITON_TO_AUTODIFF_PASSES
+#define TRITON_CONVERSION_TRITON_TO_AUTODIFF_PASSES
 
 include "mlir/Pass/PassBase.td"
 
 // Passes.td
-def ConvertTritonToMyArith: Pass<"convert-triton-to-myarith", "mlir::ModuleOp"> {
-    let summary = "Convert Triton to MyArith";
-    let dependentDialects = ["mlir::triton::myarith::MyArithDialect"];
+def ConvertTritonToAutodiff: Pass<"convert-triton-to-autodiff", "mlir::ModuleOp"> {
+    let summary = "Convert Triton to Autodiff";
+    let dependentDialects = ["mlir::triton::autodiff::AutodiffDialect"];
 }
 
 #endif

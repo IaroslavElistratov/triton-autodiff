@@ -8,9 +8,9 @@
 #include "llvm/ADT/SetVector.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "autodiff/include/Dialect/MyArith/IR/Dialect.h"
-#include "autodiff/include/Conversion/TritonToMyArith/Utils.h"
-#include "autodiff/include/Conversion/TritonToMyArith/UtilsIO.h"
+#include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 

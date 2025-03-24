@@ -1,8 +1,8 @@
-add_triton_library(MyArithIR
+add_triton_library(AutodiffIR
   Dialect.cpp
 
   DEPENDS
-  MyArithTableGen
+  AutodiffTableGen
 
   LINK_LIBS PUBLIC
   MLIRIR

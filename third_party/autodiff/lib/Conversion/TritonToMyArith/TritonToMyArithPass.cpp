@@ -1,4 +1,4 @@
-//#include "triton/Conversion/TritonToMyArith/TritonToMyArithPass.h"
+//#include "triton/Conversion/TritonToAutodiff/TritonToAutodiffPass.h"
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -10,9 +10,9 @@
 #include "llvm/ADT/SetVector.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "autodiff/include/Dialect/MyArith/IR/Dialect.h"
-#include "autodiff/include/Conversion/TritonToMyArith/Utils.h"
-#include "autodiff/include/Conversion/TritonToMyArith/UtilsIO.h"
+#include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
@@ -22,15 +22,15 @@
 namespace mlir {
 namespace triton {
 
-#define GEN_PASS_DEF_CONVERTTRITONTOMYARITH
-#include "autodiff/include/Conversion/TritonToMyArith/Passes.h.inc"
+#define GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF
+#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h.inc"
 
 namespace {
 
-struct ConvertTritonToMyArith
-    : public impl::ConvertTritonToMyArithBase<ConvertTritonToMyArith> {
+struct ConvertTritonToAutodiff
+    : public impl::ConvertTritonToAutodiffBase<ConvertTritonToAutodiff> {
 
-  using ConvertTritonToMyArithBase::ConvertTritonToMyArithBase;
+  using ConvertTritonToAutodiffBase::ConvertTritonToAutodiffBase;
 
   // main function
   void runOnOperation() override {
@@ -341,7 +341,7 @@ struct ConvertTritonToMyArith
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
 
-}; // ConvertTritonToMyArith stuct
+}; // ConvertTritonToAutodiff stuct
 
 } // private namespace
 } // namespace triton

@@ -1,5 +1,5 @@
-#ifndef TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_H
-#define TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_H
+#ifndef TRITON_CONVERSION_TRITON_TO_AUTODIFF_UTILS_H
+#define TRITON_CONVERSION_TRITON_TO_AUTODIFF_UTILS_H
 
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Region.h"
@@ -64,4 +64,4 @@ namespace triton {
 } // namespace triton
 } // namespace mlir
 
-#endif // TRITON_CONVERSION_TRITON_TO_MYARITH_UTILS_H 
+#endif // TRITON_CONVERSION_TRITON_TO_AUTODIFF_UTILS_H 

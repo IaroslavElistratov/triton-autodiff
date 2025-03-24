@@ -1,3 +1,3 @@
 set(LLVM_TARGET_DEFINITIONS Passes.td)
-mlir_tablegen(Passes.h.inc -gen-pass-decls --name TritonToMyArith)
-add_public_tablegen_target(TritonToMyArithPassIncGen)
+mlir_tablegen(Passes.h.inc -gen-pass-decls --name TritonToAutodiff)
+add_public_tablegen_target(TritonToAutodiffPassIncGen)

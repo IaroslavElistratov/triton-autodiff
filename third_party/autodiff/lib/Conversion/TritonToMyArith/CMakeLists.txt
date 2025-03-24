@@ -1,15 +1,15 @@
-add_triton_library(TritonToMyArith
-    TritonToMyArithPass.cpp
+add_triton_library(TritonToAutodiff
+    TritonToAutodiffPass.cpp
     Utils.cpp
     UtilsIO.cpp
 
     DEPENDS
-    TritonToMyArithPassIncGen
+    TritonToAutodiffPassIncGen
 
     LINK_LIBS PUBLIC
     MLIRIR
     MLIRPass
     MLIRTransforms
     TritonIR
-    MyArithIR
+    AutodiffIR
 )

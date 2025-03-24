@@ -7,8 +7,8 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
-#include "third_party/autodiff/include/Dialect/MyArith/IR/Dialect.h"
-#include "third_party/autodiff/include/Conversion/TritonToMyArith/Passes.h"
+#include "third_party/autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "third_party/autodiff/include/Conversion/TritonToAutodiff/Passes.h"
 
 // Below headers will allow registration to ROCm passes
 #include "TritonAMDGPUToLLVM/Passes.h"
@@ -71,14 +71,14 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerTritonAMDGPUInsertInstructionSchedHints();
   mlir::triton::registerTritonAMDGPULowerInstructionSchedHints();
 
-  // MyArith passes
-  mlir::triton::registerConvertTritonToMyArithPass();
+  // Autodiff passes
+  mlir::triton::registerConvertTritonToAutodiffPass();
 
   // TODO: register Triton & TritonGPU passes
   registry
       .insert<mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
               mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
-              mlir::triton::myarith::MyArithDialect,
+              mlir::triton::autodiff::AutodiffDialect,
               mlir::triton::gpu::TritonGPUDialect, mlir::math::MathDialect,
               mlir::arith::ArithDialect, mlir::scf::SCFDialect,
               mlir::gpu::GPUDialect, mlir::LLVM::LLVMDialect,

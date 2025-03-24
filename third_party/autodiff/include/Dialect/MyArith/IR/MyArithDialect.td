@@ -1,14 +1,14 @@
-#ifndef TRITON_DIALECT_MYARITH_IR_MYARITHDIALECT_TD
-#define TRITON_DIALECT_MYARITH_IR_MYARITHDIALECT_TD
+#ifndef TRITON_DIALECT_AUTODIFF_IR_AUTODIFFDIALECT_TD
+#define TRITON_DIALECT_AUTODIFF_IR_AUTODIFFDIALECT_TD
 
-// myarith dialect inherits MLIR builtin dialect
+// autodiff dialect inherits MLIR builtin dialect
 include "mlir/IR/OpBase.td"
 
-// MyArithDialect.td
-def MyArith_Dialect : Dialect {
-  let name = "myarith";
+// AutodiffDialect.td
+def Autodiff_Dialect : Dialect {
+  let name = "autodiff";
 
-  let cppNamespace = "mlir::triton::myarith";
+  let cppNamespace = "mlir::triton::autodiff";
 
   let description = [{ My Arith Dialect. }];
 }
