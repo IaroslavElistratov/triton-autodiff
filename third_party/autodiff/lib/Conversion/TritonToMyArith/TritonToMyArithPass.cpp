@@ -33,11 +33,13 @@ struct ConvertTritonToMyArith
   using ConvertTritonToMyArithBase::ConvertTritonToMyArithBase;
 
   void markVisited(Operation *op, OpBuilder &builder, bool isInserted = false, bool isOriginal = false) {
-    op->setAttr("autogradVisited", builder.getBoolAttr(true));
+    NamedAttrList attrs;
+    attrs.append("autogradVisited", builder.getBoolAttr(true));
     if (isInserted)
-      op->setAttr("isInserted", builder.getBoolAttr(true));
+      attrs.append("isInserted", builder.getBoolAttr(true));
     if (isOriginal)
-      op->setAttr("isOrig", builder.getBoolAttr(true));
+      attrs.append("isOrig", builder.getBoolAttr(true));
+    op->setAttrs(attrs);
   }
 
   Value getUpstreamGrad(Value result, const llvm::DenseMap<Value, Value> &gradMap) {
@@ -50,20 +52,20 @@ struct ConvertTritonToMyArith
   }
 
   triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value) {
-      auto scalarType = builder.getF32Type();
-      auto scalarValue = builder.create<arith::ConstantOp>(loc, scalarType, builder.getF32FloatAttr(value));
-      auto broadcasted = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
-
-      // mark as visited
-      markVisited(broadcasted, builder, true);
-      markVisited(scalarValue, builder, true);
-      return broadcasted;
+    auto scalarType = builder.getF32Type();
+    auto scalarValue = builder.create<arith::ConstantOp>(loc, scalarType, builder.getF32FloatAttr(value));
+    auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+    markVisited(scalarValue, builder, /*isInserted=*/true);
+    markVisited(tensorValue, builder, /*isInserted=*/true);
+    return tensorValue;
   }
 
   Value cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
     // Null check
-    if (!targetOp || targetOp->getNumResults() == 0)
+    if (!targetOp || targetOp->getNumResults() == 0) {
       llvm::report_fatal_error("Cannot clone operation with no results");
+      exit(1);
+    }
 
     // If we've already cloned this result, return it directly
     if (mapper.contains(targetOp->getResult(0)))
@@ -116,8 +118,6 @@ struct ConvertTritonToMyArith
     // error happening because Value (which is the type I'm trying to put into std::map) does not have move interface
     // (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
     llvm::DenseMap<Value, Value> gradMap;
-
-
     OpBuilder builder(func.getContext());
 
     // // Walk all operations opaquely.
@@ -128,24 +128,26 @@ struct ConvertTritonToMyArith
     // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
     SetVector<Operation *> forwardSlice;
     getForwardSlice(func.getOperation(), &forwardSlice);
+
+    // First pass: handle all operations except LoadOp
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
-      if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
+      if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
           llvm::outs() << "Skipping visited" << "\n";
           continue;
       }
 
-      // triton
+      // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
         handleStoreBackward(storeOp, func, builder, gradMap);
-      } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
-        printIndent() << "visiting tt.make_range op\n";
-      } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
-        printIndent() << "visiting tt.splat op\n";
-      } else if (auto addptrOp = dyn_cast<triton::AddPtrOp>(op)){
-        printIndent() << "visiting tt.addptr op\n";
+      // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
+      //   printIndent() << "visiting tt.make_range op\n";
+      // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
+      //   printIndent() << "visiting tt.splat op\n";
+      // } else if (auto addptrOp = dyn_cast<triton::AddPtrOp>(op)){
+      //   printIndent() << "visiting tt.addptr op\n";
 
-      // arith
+      // arith ops
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
         handleAddBackward(addfOp, func, builder, gradMap);
       } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
@@ -157,10 +159,11 @@ struct ConvertTritonToMyArith
       }
     } // for loop over ops
 
-    // separate loop for loadop -- because its derivative (storeOp) destroyaes semantics of input args
+    // Second pass: handle LoadOp operations
+    // because its derivative (storeOp) destroyaes semantics of input args
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
-      if (auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited")) {
+      if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
           llvm::outs() << "Skipping visited" << "\n";
           continue;
       }
@@ -171,7 +174,7 @@ struct ConvertTritonToMyArith
     } // for loop over loads
 
 
-    // iterate as above but delete ops that are not marked
+    // Final pass: remove unmarked operations
     func->walk<WalkOrder::PostOrder>([&](Operation *op) {
 
       auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
@@ -179,11 +182,9 @@ struct ConvertTritonToMyArith
       else llvm::outs() << "  Operation is NOT marked as visited: " << *op << "\n";
 
       // don't delete the fn itself
-      if (!op->getAttrOfType<BoolAttr>("autogradVisited")
-          && !dyn_cast<triton::FuncOp>(op)
-          && !dyn_cast<triton::ReturnOp>(op)) {
+      if (!op->getAttrOfType<BoolAttr>("autogradVisited") &&
+          !isa<triton::FuncOp, triton::ReturnOp>(op)) {
         llvm::outs() << "Deleting unmarked node" << *op << "\n";
-
         op->dropAllUses();
         op->erase();
 
@@ -209,7 +210,7 @@ struct ConvertTritonToMyArith
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
     Value ptr = storeOp->getOperand(0);
-    auto newOp = builder.create<triton::LoadOp>(
+    auto load = builder.create<triton::LoadOp>(
         storeOp.getLoc(),
         ptr,
         storeOp.getCache(),  // copy cache modifier
@@ -220,26 +221,24 @@ struct ConvertTritonToMyArith
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
     llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
     // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the gradMap
-    gradMap[storeOp->getOperand(1)] = newOp.getResult();
+    gradMap[storeOp->getOperand(1)] = load.getResult();
 
     // mark as visited
-    markVisited(newOp, builder, true);
+    markVisited(load, builder, /*isInserted=*/true);
 
     // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
     // note: .getDefiningOp wt specifying type, returns a pointer to Operation
     Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
-    markVisited(addptrOp, builder, false, true);
     Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-    markVisited(splatOp, builder, false, true);
-    Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
-    markVisited(makerangeOp, builder, false, true);
+    Operation* rangeOp = addptrOp->getOperand(1).getDefiningOp();
 
-    // i did set the insertion point above, but becuase I'm not cloning the above ops (i'm just keeping them where they are in the graph).
-    // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
-    // here I move them on top of the fucntion body as well
-    makerangeOp->moveBefore(newOp);
-    splatOp->moveBefore(newOp);
-    addptrOp->moveBefore(newOp);
+    for (auto *op : {rangeOp, splatOp, addptrOp}) {
+      markVisited(op, builder, /*isInserted=*/false, /*isOriginal=*/true);
+      // i did set the insertion point above, but becuase I'm not cloning the above ops (i'm just keeping them where they are in the graph).
+      // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
+      // here I move them on top of the fucntion body as well
+      op->moveBefore(load);
+    }
 
     // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
   }
@@ -256,50 +255,46 @@ struct ConvertTritonToMyArith
     // Create a builder without setting insertion point at first, then set insertion point
     // Seems no constructor to specify "InsertionPointAfter" at the time of construction
 
-    // .front() gets the first block in that region, which is the entry block
-    Block *entryBlock = &func.getBody().front();
-    // // comment: also changed the insertion point
-    // builder.setInsertionPointToEnd(entryBlock);
-
     // set insertion point to before the last operation (before ReturnOp)
+    // .front() gets the first block in that region
+    Block *entryBlock = &func.getBody().front();
     Operation *lastOp = &entryBlock->back();
     builder.setInsertionPoint(lastOp);
-    // printGradMap(gradMap);
 
-    // Create a ValueRange from the operands
-    // SmallVector<Value> operands = {ptr, upstream};
     // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
     //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
     // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
-    auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), ptr, upstream,
-                                                triton::CacheModifier::NONE,
-                                                triton::EvictionPolicy::NORMAL);
+    auto store = builder.create<triton::StoreOp>(
+      loadOp.getLoc(),
+      ptr,
+      upstream,
+      triton::CacheModifier::NONE,
+      triton::EvictionPolicy::NORMAL);
 
     // todo-high: note this op does not add anything to the gradMap, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
 
-    // mark as visited
-    //   get generic Operation, note returns a pointer
-    markVisited(newOp, builder, true);
+    markVisited(store, builder, /*isInserted=*/true);
 
-
-    // loadOp.getOperation()->getName().getStringRef() -- does not include operands so reesult value
+    // Record original operation for debugging
+    // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
     // Use the operation's built-in printer
     std::string opStr;
     llvm::raw_string_ostream os(opStr);
     loadOp->print(os);
-    newOp->setAttr("gradOf", builder.getStringAttr(opStr));
+    store->setAttr("gradOf", builder.getStringAttr(opStr));
 
-
-    // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
+    // preserve the pointer calculations (which were leading to the original store), so mark it as keep
     Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
-    markVisited(addptrOp, builder, false, true);
     Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-    markVisited(splatOp, builder, false, true);
-    Operation* makerangeOp = addptrOp->getOperand(1).getDefiningOp();
-    // todo: we have already visistd this Operation, fine for my toy example, but keep in mind for the future examples
-    markVisited(makerangeOp, builder, false, true);
+    // todo: we have already visited this Operation (fine for my toy example)
+    Operation* rangeOp = addptrOp->getOperand(1).getDefiningOp();
+
+    for (auto *op : {addptrOp, splatOp, rangeOp}) {
+      markVisited(op, builder, /*isInserted=*/false, /*isOriginal=*/true);
+    }
+
   }
 
   void handleAddBackward(arith::AddFOp addfOp, triton::FuncOp func,
@@ -337,31 +332,28 @@ struct ConvertTritonToMyArith
     // essentially, it's just like std::map but just a mlir specific struct
     IRMapping mapper;
 
-    Operation *targetOpLhs = lhs.getDefiningOp();
-    builder.setInsertionPoint(targetOpLhs);
-    Value clonedResultLhs = cloneSubtree(targetOpLhs, mapper, builder);
+    Operation *lhsOp = lhs.getDefiningOp();
+    builder.setInsertionPoint(lhsOp);
+    Value clonedLhs = cloneSubtree(lhsOp, mapper, builder);
 
     // (2) differentiate rhs
-    auto OpGradRhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedResultLhs, upstream);
+    auto gradRhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedLhs, upstream);
     // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
-    gradMap[rhs] = OpGradRhs.getResult();
-
-    markVisited(OpGradRhs, builder, true);
+    gradMap[rhs] = gradRhsOp.getResult();
+    markVisited(gradRhsOp, builder, /*isInserted=*/true);
 
     // (3) clone rhs subtree
     // prepare for cloning another separate subgraph
     mapper.clear();
 
-    Operation *targetOpRhs = rhs.getDefiningOp();
-    builder.setInsertionPoint(targetOpRhs);
-    Value clonedResultRhs = cloneSubtree(targetOpRhs, mapper, builder);
+    Operation *rhsOp = rhs.getDefiningOp();
+    builder.setInsertionPoint(rhsOp);
+    Value clonedRhs = cloneSubtree(rhsOp, mapper, builder);
 
     // (4) differentiate lhs
-    auto OpGradLhs = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedResultRhs, upstream);
-    gradMap[lhs] = OpGradLhs.getResult();
-
-    // mark as visited
-    markVisited(OpGradLhs, builder, true);
+    auto gradLhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedRhs, upstream);
+    gradMap[lhs] = gradLhsOp.getResult();
+    markVisited(gradLhsOp, builder, /*isInserted=*/true);
   }
 
 
@@ -374,18 +366,18 @@ struct ConvertTritonToMyArith
     Value a = divfOp.getOperand(0);
     Value b = divfOp.getOperand(1);
 
-    IRMapping mapper;
+    Operation *aOp = a.getDefiningOp();
+    Operation *bOp = b.getDefiningOp();
 
     // (1) clone lhs subtree
-    Operation *targetOpLhs = a.getDefiningOp();
-    builder.setInsertionPoint(targetOpLhs);
-    Value a_cloned = cloneSubtree(targetOpLhs, mapper, builder);
+    IRMapping mapper;
+    builder.setInsertionPoint(aOp);
+    Value aCloned = cloneSubtree(aOp, mapper, builder);
 
     // (2) clone rhs subtree
     mapper.clear();
-    Operation *targetOpRhs = b.getDefiningOp();
-    builder.setInsertionPoint(targetOpRhs);
-    Value b_cloned = cloneSubtree(targetOpRhs, mapper, builder);
+    builder.setInsertionPoint(bOp);
+    Value bCloned = cloneSubtree(bOp, mapper, builder);
 
     // (3) differentiate lhs
 
@@ -393,37 +385,30 @@ struct ConvertTritonToMyArith
     // auto ones = builder.create<arith::ConstantOp>(divfOp->getLoc(), upstream.getType(), builder.getF32FloatAttr(1.0));
     // this creates a scalar and broadcasts it to a shape specificed by "upstream.getType()"
     auto ones = createConstantTensor(builder, divfOp->getLoc(), upstream.getType(), 1.0);
-    auto a_local = builder.create<arith::DivFOp>(divfOp->getLoc(), ones.getResult(), b_cloned);
-
-    auto OpGradLhs = builder.create<arith::MulFOp>(divfOp->getLoc(), a_local.getResult(), upstream);
-    gradMap[a] = OpGradLhs.getResult();
+    auto aLocal = builder.create<arith::DivFOp>(divfOp->getLoc(), ones.getResult(), bCloned);
+    auto aDownstream = builder.create<arith::MulFOp>(divfOp->getLoc(), aLocal.getResult(), upstream);
+    gradMap[a] = aDownstream.getResult();
 
     // set attributes
-    markVisited(OpGradLhs, builder, true);
-
-    markVisited(ones, builder, true);
-    markVisited(a_local, builder, true);
+    markVisited(aDownstream, builder, /*isInserted=*/true);
+    markVisited(ones, builder, /*isInserted=*/true);
+    markVisited(aLocal, builder, /*isInserted=*/true);
 
     // (4) differentiate rhs
 
     // b local
 
     // auto two = builder.create<arith::ConstantOp>(divfOp->getLoc(), divfOp.getType(), builder.getF32FloatAttr(2.0));
-    auto pow = builder.create<arith::MulFOp>(divfOp.getLoc(), b_cloned, b_cloned);
-    auto div = builder.create<arith::DivFOp>(divfOp.getLoc(), a_cloned, pow.getResult());
+    auto pow = builder.create<arith::MulFOp>(divfOp.getLoc(), bCloned, bCloned);
+    auto div = builder.create<arith::DivFOp>(divfOp.getLoc(), aCloned, pow.getResult());
     auto neg = createConstantTensor(builder, divfOp->getLoc(), div.getType(), -1.0);
-    auto b_local = builder.create<arith::MulFOp>(divfOp.getLoc(), neg.getResult(), div.getResult());
+    auto bLocal = builder.create<arith::MulFOp>(divfOp.getLoc(), neg.getResult(), div.getResult());
+    auto bDownstream = builder.create<arith::MulFOp>(divfOp.getLoc(), bLocal.getResult(), upstream);
+    gradMap[b] = bDownstream.getResult();
 
-    auto OpGradRhs = builder.create<arith::MulFOp>(divfOp.getLoc(), b_local.getResult(), upstream);
-    gradMap[b] = OpGradRhs.getResult();
-
-    // set attributes
-    markVisited(OpGradRhs, builder, true);
-
-    markVisited(b_local, builder, true);
-    markVisited(neg, builder, true);
-    markVisited(div, builder, true);
-    markVisited(pow, builder, true);
+    for (auto *op : {bDownstream, bLocal, neg, div, pow}) {
+      markVisited(op, builder, /*isInserted=*/true);
+    }
 
   }
 
