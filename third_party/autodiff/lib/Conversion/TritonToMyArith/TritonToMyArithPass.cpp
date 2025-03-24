@@ -26,20 +26,73 @@ namespace triton {
 
 namespace {
 
+// Helper for compile-time errors with template-dependent context
+template <typename T>
+struct dependent_false : std::false_type {};
+
+// Check for getOperation method
+template <typename T, typename = void>
+struct has_getOperation : std::false_type {};
+
+template <typename T>
+struct has_getOperation<T, std::void_t<decltype(std::declval<T>().getOperation())>> : std::true_type {};
+
+// Check for getDefiningOp method
+template <typename T, typename = void>
+struct has_getDefiningOp : std::false_type {};
+
+template <typename T>
+struct has_getDefiningOp<T, std::void_t<decltype(std::declval<T>().getDefiningOp())>> : std::true_type {};
+
+// Get Operation* from any relevant type
+template <typename T>
+Operation* getOperationPtr(T& op) {
+  if constexpr (std::is_pointer_v<T>)
+    return op;  // Already Operation*
+  else if constexpr (has_getOperation<T>::value)
+    return op.getOperation();  // Operation-specific class
+  else if constexpr (has_getDefiningOp<T>::value)
+    return op.getDefiningOp();  // Value type
+  else
+    // compile time check
+    // use dependent_false<T> (instead of just false) bc in templates, static_assert with a direct false
+    // would always fail, even for valid cases. Making it dependent on T delays evaluation until the
+    // specific template is instantiated
+    static_assert(dependent_false<T>::value,
+      "Type must be Operation*, have getOperation(), or have getDefiningOp()");
+}
 
 struct ConvertTritonToMyArith
     : public impl::ConvertTritonToMyArithBase<ConvertTritonToMyArith> {
 
   using ConvertTritonToMyArithBase::ConvertTritonToMyArithBase;
 
-  void markVisited(Operation *op, OpBuilder &builder, bool isInserted = false, bool isOriginal = false) {
+  enum visitedType { Original = 0, Inserted = 1, Cloned = 2 };
+
+  void markVisited(OpBuilder &builder, visitedType mode, Operation *op) {
+    if (!op) {
+      llvm::outs() << "markVisited received null operation pointer\n";
+      exit(1);
+    }
+
     NamedAttrList attrs;
     attrs.append("autogradVisited", builder.getBoolAttr(true));
-    if (isInserted)
-      attrs.append("isInserted", builder.getBoolAttr(true));
-    if (isOriginal)
+    if (mode == visitedType::Original)
       attrs.append("isOrig", builder.getBoolAttr(true));
+    else if (mode == visitedType::Inserted)
+      attrs.append("isInserted", builder.getBoolAttr(true));
+    else if (mode == visitedType::Cloned)
+      attrs.append("isCloned", builder.getBoolAttr(true));
+    else {
+      llvm::outs() << "markVisited invalid visitedType value\n";
+      exit(1);
+    }
     op->setAttrs(attrs);
+  }
+
+  template <typename... Ops>
+  void markAllVisited(OpBuilder &builder, visitedType mode, Ops... ops) {
+    (markVisited(builder, mode, getOperationPtr(ops)), ...);
   }
 
   Value getUpstreamGrad(Value result, const llvm::DenseMap<Value, Value> &gradMap) {
@@ -55,8 +108,8 @@ struct ConvertTritonToMyArith
     auto scalarType = builder.getF32Type();
     auto scalarValue = builder.create<arith::ConstantOp>(loc, scalarType, builder.getF32FloatAttr(value));
     auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
-    markVisited(scalarValue, builder, /*isInserted=*/true);
-    markVisited(tensorValue, builder, /*isInserted=*/true);
+    markVisited(builder, visitedType::Inserted, scalarValue);
+    markVisited(builder, visitedType::Inserted, tensorValue);
     return tensorValue;
   }
 
@@ -83,8 +136,7 @@ struct ConvertTritonToMyArith
 
     // Now clone this operation
     Operation *clonedOp = builder.clone(*targetOp, mapper);
-    clonedOp->setAttr("isCloned", builder.getBoolAttr(true));
-    markVisited(clonedOp, builder);
+    markVisited(builder, visitedType::Cloned, clonedOp);
 
     // IRMapping used to ensure when you clone operations, the operands of the cloned
     // ops refer to the cloned values, not the original ones.
@@ -224,7 +276,7 @@ struct ConvertTritonToMyArith
     gradMap[storeOp->getOperand(1)] = load.getResult();
 
     // mark as visited
-    markVisited(load, builder, /*isInserted=*/true);
+    markVisited(builder, visitedType::Inserted, load);
 
     // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
     // note: .getDefiningOp wt specifying type, returns a pointer to Operation
@@ -232,11 +284,12 @@ struct ConvertTritonToMyArith
     Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
     Operation* rangeOp = addptrOp->getOperand(1).getDefiningOp();
 
-    for (auto *op : {rangeOp, splatOp, addptrOp}) {
-      markVisited(op, builder, /*isInserted=*/false, /*isOriginal=*/true);
-      // i did set the insertion point above, but becuase I'm not cloning the above ops (i'm just keeping them where they are in the graph).
-      // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
-      // here I move them on top of the fucntion body as well
+    markAllVisited(builder, visitedType::Original, rangeOp, splatOp, addptrOp);
+
+    // i did set the insertion point above, but bc I'm not cloning the above ops (i'm just keeping them where they are in the graph).
+    // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
+    // here I move them on top of the fn body as well
+    for (Operation *op : {rangeOp, splatOp, addptrOp}) {
       op->moveBefore(load);
     }
 
@@ -275,7 +328,7 @@ struct ConvertTritonToMyArith
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
 
-    markVisited(store, builder, /*isInserted=*/true);
+    markVisited(builder, visitedType::Inserted, store);
 
     // Record original operation for debugging
     // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
@@ -291,9 +344,7 @@ struct ConvertTritonToMyArith
     // todo: we have already visited this Operation (fine for my toy example)
     Operation* rangeOp = addptrOp->getOperand(1).getDefiningOp();
 
-    for (auto *op : {addptrOp, splatOp, rangeOp}) {
-      markVisited(op, builder, /*isInserted=*/false, /*isOriginal=*/true);
-    }
+    markAllVisited(builder, visitedType::Original, addptrOp, splatOp, rangeOp);
 
   }
 
@@ -340,7 +391,7 @@ struct ConvertTritonToMyArith
     auto gradRhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedLhs, upstream);
     // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
     gradMap[rhs] = gradRhsOp.getResult();
-    markVisited(gradRhsOp, builder, /*isInserted=*/true);
+    markVisited(builder, visitedType::Inserted, gradRhsOp);
 
     // (3) clone rhs subtree
     // prepare for cloning another separate subgraph
@@ -353,7 +404,7 @@ struct ConvertTritonToMyArith
     // (4) differentiate lhs
     auto gradLhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedRhs, upstream);
     gradMap[lhs] = gradLhsOp.getResult();
-    markVisited(gradLhsOp, builder, /*isInserted=*/true);
+    markVisited(builder, visitedType::Inserted, gradLhsOp);
   }
 
 
@@ -389,10 +440,7 @@ struct ConvertTritonToMyArith
     auto aDownstream = builder.create<arith::MulFOp>(divfOp->getLoc(), aLocal.getResult(), upstream);
     gradMap[a] = aDownstream.getResult();
 
-    // set attributes
-    markVisited(aDownstream, builder, /*isInserted=*/true);
-    markVisited(ones, builder, /*isInserted=*/true);
-    markVisited(aLocal, builder, /*isInserted=*/true);
+    markAllVisited(builder, visitedType::Inserted, aDownstream, ones, aLocal);
 
     // (4) differentiate rhs
 
@@ -406,10 +454,7 @@ struct ConvertTritonToMyArith
     auto bDownstream = builder.create<arith::MulFOp>(divfOp.getLoc(), bLocal.getResult(), upstream);
     gradMap[b] = bDownstream.getResult();
 
-    for (auto *op : {bDownstream, bLocal, neg, div, pow}) {
-      markVisited(op, builder, /*isInserted=*/true);
-    }
-
+    markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
 
 }; // ConvertTritonToMyArith stuct
