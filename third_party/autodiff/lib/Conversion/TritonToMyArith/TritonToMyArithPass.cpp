@@ -12,6 +12,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "autodiff/include/Dialect/MyArith/IR/Dialect.h"
 #include "autodiff/include/Conversion/TritonToMyArith/Utils.h"
+#include "autodiff/include/Conversion/TritonToMyArith/UtilsIO.h"
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
