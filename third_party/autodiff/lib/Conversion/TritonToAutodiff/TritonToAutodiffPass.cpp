@@ -96,7 +96,7 @@ struct ConvertTritonToAutodiff
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
       if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
-          llvm::outs() << "Skipping visited" << "\n";
+          if (DEBUG_PRINTS) llvm::outs() << "Skipping visited" << "\n";
           continue;
       }
 
@@ -104,11 +104,11 @@ struct ConvertTritonToAutodiff
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
         handleStoreBackward(storeOp, func, builder, gradMap, origToCloned, lastFwdOp);
       // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
-      //   printIndent() << "visiting tt.make_range op\n";
+      //   if (DEBUG_PRINTS) printIndent() << "visiting tt.make_range op\n";
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
-      //   printIndent() << "visiting tt.splat op\n";
+      //   if (DEBUG_PRINTS) printIndent() << "visiting tt.splat op\n";
       // } else if (auto addptrOp = dyn_cast<triton::AddPtrOp>(op)){
-      //   printIndent() << "visiting tt.addptr op\n";
+      //   if (DEBUG_PRINTS) printIndent() << "visiting tt.addptr op\n";
 
       // arith ops
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
@@ -118,7 +118,7 @@ struct ConvertTritonToAutodiff
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
         handleDivBackward(divfOp, func, builder, gradMap, origToCloned);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
-        printIndent() << "visiting arith.constant op\n";
+        if (DEBUG_PRINTS) printIndent() << "visiting arith.constant op\n";
       }
     } // for loop over ops
 
@@ -135,7 +135,7 @@ struct ConvertTritonToAutodiff
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
       if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
-          llvm::outs() << "Skipping visited" << "\n";
+          if (DEBUG_PRINTS) llvm::outs() << "Skipping visited" << "\n";
           continue;
       }
 
@@ -148,13 +148,15 @@ struct ConvertTritonToAutodiff
     func->walk<WalkOrder::PostOrder>([&](Operation *op) {
 
       auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
-      if (visitedAttr) llvm::outs() << "  Operation is marked as visited: " << *op << "\n";
-      else llvm::outs() << "  Operation is NOT marked as visited: " << *op << "\n";
+      if (DEBUG_PRINTS) {
+        if (visitedAttr) llvm::outs() << "  Operation is marked as visited: " << *op << "\n";
+        else llvm::outs() << "  Operation is NOT marked as visited: " << *op << "\n";
+      }
 
       // don't delete the fn itself
       if (!op->getAttrOfType<BoolAttr>("autogradVisited") &&
           !isa<triton::FuncOp, triton::ReturnOp>(op)) {
-        llvm::outs() << "Deleting unmarked node" << *op << "\n";
+        if (DEBUG_PRINTS) llvm::outs() << "Deleting unmarked node" << *op << "\n";
         op->dropAllUses();
         op->erase();
 
@@ -185,7 +187,7 @@ struct ConvertTritonToAutodiff
     );
 
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
-    llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
+    if (DEBUG_PRINTS) llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
     // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the gradMap
     gradMap[storeOp->getOperand(1)] = load.getResult();
 
@@ -198,7 +200,7 @@ struct ConvertTritonToAutodiff
   void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func,
                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
                           IRMapping &origToCloned){
-    printIndent() << "visiting tt.load op\n";
+    if (DEBUG_PRINTS) printIndent() << "visiting tt.load op\n";
     // traverse parents to find the initial pointer
 
     Value upstream = getUpstreamGrad(loadOp.getResult(), gradMap);
@@ -257,7 +259,7 @@ struct ConvertTritonToAutodiff
 
   void handleAddBackward(arith::AddFOp addfOp, triton::FuncOp func,
                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap){
-    printIndent() << "visiting arith.addf op\n";
+    if (DEBUG_PRINTS) printIndent() << "visiting arith.addf op\n";
 
     Value upstream = getUpstreamGrad(addfOp.getResult(), gradMap);
 
@@ -279,7 +281,7 @@ struct ConvertTritonToAutodiff
   void handleMulBackward(arith::MulFOp mulfOp, triton::FuncOp func,
                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
                           IRMapping &origToCloned){
-    printIndent() << "visiting arith.mulf op\n";
+    if (DEBUG_PRINTS) printIndent() << "visiting arith.mulf op\n";
 
     builder.setInsertionPoint(mulfOp);
 
@@ -313,7 +315,7 @@ struct ConvertTritonToAutodiff
   void handleDivBackward(arith::DivFOp divfOp, triton::FuncOp func,
                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
                           IRMapping &origToCloned){
-    printIndent() << "visiting arith.divf op\n";
+    if (DEBUG_PRINTS) printIndent() << "visiting arith.divf op\n";
 
     builder.setInsertionPoint(divfOp);
 

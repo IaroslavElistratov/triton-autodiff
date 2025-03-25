@@ -13,4 +13,6 @@
 // question-now: AutodiffOps?
 #include "autodiff/include/Dialect/Autodiff/IR/Ops.h.inc"
 
+#define DEBUG_PRINTS 0
+
 #endif

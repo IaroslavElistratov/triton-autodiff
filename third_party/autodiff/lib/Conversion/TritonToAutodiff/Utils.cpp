@@ -99,7 +99,7 @@ namespace triton {
 
 
     // Now clone this operation
-    llvm::outs() << "cloning: " << *targetOp << "\n";
+    if (DEBUG_PRINTS) llvm::outs() << "cloning: " << *targetOp << "\n";
     // passing the mapper, maps the results of the original operation
     // to the results of the cloned operation in the IRMapping;
     // IRMapping used to ensure when I clone operations, the operands of the cloned
