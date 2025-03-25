@@ -11,7 +11,7 @@ from triton.backends.compiler import GPUTarget
 target = GPUTarget("cuda", arch=89, warp_size=32)
 
 # Compile the IR
-bwd_kernel = compile("third_party/autodiff/test/out.ttir", target=target)
+bwd_kernel = compile("./out.ttir", target=target)
 
 # The IRSource class handles parsing the IR file and setting up the compilation pipeline
 # The rest of the compilation process (from IR to PTX to cubin) remains the same as the normal workflow
@@ -58,3 +58,15 @@ torch_output.backward(torch.ones_like(torch_output))
 
 print("torch grad a: ", torch_a.grad)
 print("torch grad b: ", torch_b.grad)
+print()
+
+
+if torch.allclose(a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
+
+if torch.allclose(b, torch_b.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")

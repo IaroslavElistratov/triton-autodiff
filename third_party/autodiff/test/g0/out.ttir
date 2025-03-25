@@ -1,13 +1,31 @@
 module {
   tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
-    %0 = tt.make_range {autogradVisited = true, end = 4 : i32, start = 0 : i32} : tensor<4xi32>
-    %1 = tt.splat %arg0 {autogradVisited = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %2 = tt.addptr %1, %0 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %3 = tt.splat %arg1 {autogradVisited = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %4 = tt.addptr %3, %0 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %5 = tt.load %4 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>
-    tt.store %2, %5 {autogradVisited = true} : tensor<4x!tt.ptr<f32>>
+    %1 = tt.make_range {autogradVisited = true, end = 4 : i32, isCloned = true, start = 0 : i32} : tensor<4xi32>
+
+    // NOTE: this %2 was used in store(%2, %5) -- but bc
+    //  I'm currently deleting that store (as to not overwrite
+    //  the upstream), this %2 is not used in fwd
+    %0 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %2 = tt.addptr %0, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+
+    %3 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %4 = tt.addptr %3, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %5 = tt.load %4 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+
+    // TODO: this recomputes output of fwd, but as explained above, I'm
+    //  removing STORE of this output, in this case this interlineate
+    //  is not used by any other operation -- so I should probably remove it
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<4.200000e+01> : tensor<4xf32>
+    %6 = arith.addf %5, %cst {autogradVisited = true, isCloned = true} : tensor<4xf32>
+
+    ////////////
+    // backward
+    ////////////
+
+    // load upstream
+    %7 = tt.load %2 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+    // store upstream into grad of a (because derivative of add is one, skipping multiplication of local by upstream here)
+    tt.store %4, %7 {autogradVisited = true, gradOf = "%11 = tt.load %10 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
     tt.return
   }
 }
-
