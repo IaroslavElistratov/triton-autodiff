@@ -57,6 +57,8 @@ struct ConvertTritonToAutodiff
 
     // copy entire forward graph once
     IRMapping origToCloned;
+    // func.getBody() returns Region, but "setInsertionPointToStart" expects pass Block,
+    // .front() gets the first block in that region, which is the entry block
     Block *entryBlock = &func.getBody().front();
     Operation *returnOp = &entryBlock->back();
     // last op before return op
@@ -69,8 +71,14 @@ struct ConvertTritonToAutodiff
     OpBuilder builder(func.getContext());
     builder.setInsertionPointToStart(entryBlock);
 
-    cloneSubtree(beforeReturnOp, origToCloned, builder);
-    return;
+
+    // todo-now:
+    //  in the stub I'm using output variable to pass the upstream grad
+    //  but now when copying entire fwd graph, and the fwd graph actually
+    //  writes output into that variable -- thus overwriting my upstream grad
+    Operation *lastFwdOp = cloneSubtree(beforeReturnOp, origToCloned, builder);
+    // let the ops inserted during rewriting backward be inserted after the forward ops
+    builder.setInsertionPointAfter(lastFwdOp);
 
 
     // the above mapping: original nodes -> inserted nodes.
@@ -99,7 +107,7 @@ struct ConvertTritonToAutodiff
 
       // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        handleStoreBackward(storeOp, func, builder, gradMap);
+        handleStoreBackward(storeOp, func, builder, gradMap, lastFwdOp);
       // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
       //   printIndent() << "visiting tt.make_range op\n";
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
@@ -133,7 +141,6 @@ struct ConvertTritonToAutodiff
       }
     } // for loop over loads
 
-
     // Final pass: remove unmarked operations
     func->walk<WalkOrder::PostOrder>([&](Operation *op) {
 
@@ -156,17 +163,13 @@ struct ConvertTritonToAutodiff
 
 
   void handleStoreBackward(triton::StoreOp storeOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap){
+                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
+                          Operation *lastFwdOp){
     // why .getValue works for StoreOp, but not for AddPtrOp
     //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation (unless use ->)
 
-    // because this will effectively load the upstream grad, I want to set the insertion point to the begining of the module
-    // auto moduleOp = func.getBlock()->getParent()->getParentOfType<ModuleOp>();
-
-    // func.getBody() returns Region, but "setInsertionPointToStart" expects pass Block,
-    // .front() gets the first block in that region, which is the entry block
-    Block *entryBlock = &func.getBody().front();
-    builder.setInsertionPointToStart(entryBlock);
+    // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
+    builder.setInsertionPointAfter(lastFwdOp);
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
     Value ptr = storeOp->getOperand(0);
@@ -282,6 +285,8 @@ struct ConvertTritonToAutodiff
                           IRMapping &origToCloned){
     printIndent() << "visiting arith.mulf op\n";
 
+    builder.setInsertionPoint(mulfOp);
+
     Value upstream = getUpstreamGrad(mulfOp.getResult(), gradMap);
 
     Value lhs = mulfOp.getOperand(0);
@@ -313,6 +318,8 @@ struct ConvertTritonToAutodiff
                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
                           IRMapping &origToCloned){
     printIndent() << "visiting arith.divf op\n";
+
+    builder.setInsertionPoint(divfOp);
 
     Value upstream = getUpstreamGrad(divfOp.getResult(), gradMap);
 
