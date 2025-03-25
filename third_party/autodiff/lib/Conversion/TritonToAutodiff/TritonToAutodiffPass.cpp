@@ -283,9 +283,9 @@ struct ConvertTritonToAutodiff
                           IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.mulf op\n";
 
-    builder.setInsertionPoint(mulfOp);
-
     Value upstream = getUpstreamGrad(mulfOp.getResult(), gradMap);
+    // insert operations after the gradient value, they depend on, is defined
+    builder.setInsertionPointAfter(upstream.getDefiningOp());
 
     Value lhs = mulfOp.getOperand(0);
     Value rhs = mulfOp.getOperand(1);
@@ -317,9 +317,9 @@ struct ConvertTritonToAutodiff
                           IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.divf op\n";
 
-    builder.setInsertionPoint(divfOp);
-
     Value upstream = getUpstreamGrad(divfOp.getResult(), gradMap);
+    // insert operations after the gradient value, they depend on, is defined
+    builder.setInsertionPointAfter(upstream.getDefiningOp());
 
     Value a = divfOp.getOperand(0);
     Value b = divfOp.getOperand(1);

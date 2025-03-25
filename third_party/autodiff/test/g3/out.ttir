@@ -1,0 +1,55 @@
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %0 = tt.splat %arg3 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %1 = tt.make_range {autogradVisited = true, end = 4 : i32, isCloned = true, start = 0 : i32} : tensor<4xi32>
+    %2 = tt.addptr %0, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %4 = tt.addptr %3, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %5 = tt.load %4 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<5.000000e-01> : tensor<4xf32>
+    %6 = arith.addf %5, %cst {autogradVisited = true, isCloned = true} : tensor<4xf32>
+    %7 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %8 = tt.addptr %7, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %9 = tt.load %8 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %10 = arith.mulf %6, %9 {autogradVisited = true, isCloned = true} : tensor<4xf32>
+    %11 = tt.splat %arg2 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %12 = tt.addptr %11, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %13 = tt.load %12 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %14 = arith.divf %10, %13 {autogradVisited = true, isCloned = true} : tensor<4xf32>
+
+    // todo-now: why it loads 2 instead of 3?
+    %15 = tt.load %2 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+
+    // [first operand of div]
+    // ones
+    %cst_0 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32
+    %16 = tt.splat %cst_0 {autogradVisited = true, isInserted = true} : f32 -> tensor<4xf32>
+    // y local
+    %17 = arith.divf %16, %13 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // y downstream (local * upstream)
+    %18 = arith.mulf %17, %15 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    // b grad (x * y_grad)
+    %19 = arith.mulf %6, %18 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // x grad (b * y_grad)
+    %20 = arith.mulf %9, %18 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    // [second operand of div]
+    // pow
+    %21 = arith.mulf %13, %13 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // div
+    %22 = arith.divf %10, %21 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // neg
+    %cst_1 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32
+    %23 = tt.splat %cst_1 {autogradVisited = true, isInserted = true} : f32 -> tensor<4xf32>
+    // c local
+    %24 = arith.mulf %23, %22 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // c downstream (local * upstream)
+    %25 = arith.mulf %24, %15 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    tt.store %12, %25 {autogradVisited = true, gradOf = "%25 = tt.load %24 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+    tt.store %8, %19 {autogradVisited = true, gradOf = "%22 = tt.load %21 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+    tt.store %4, %20 {autogradVisited = true, gradOf = "%19 = tt.load %18 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+    tt.return
+  }
+}
