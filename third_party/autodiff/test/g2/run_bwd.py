@@ -11,7 +11,7 @@ from triton.backends.compiler import GPUTarget
 target = GPUTarget("cuda", arch=89, warp_size=32)
 
 # Compile the IR
-bwd_kernel = compile("/home/iaro/Desktop/my_triton_autodiff/working_files/triton/third_party/autodiff/test/out.ttir", target=target)
+bwd_kernel = compile("out.ttir", target=target)
 
 # The IRSource class handles parsing the IR file and setting up the compilation pipeline
 # The rest of the compilation process (from IR to PTX to cubin) remains the same as the normal workflow
