@@ -107,7 +107,7 @@ struct ConvertTritonToAutodiff
 
       // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        handleStoreBackward(storeOp, func, builder, gradMap, lastFwdOp);
+        handleStoreBackward(storeOp, func, builder, gradMap, origToCloned, lastFwdOp);
       // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
       //   printIndent() << "visiting tt.make_range op\n";
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
@@ -137,7 +137,7 @@ struct ConvertTritonToAutodiff
       }
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, func, builder, gradMap);
+        handleLoadBackward(loadOp, func, builder, gradMap, origToCloned);
       }
     } // for loop over loads
 
@@ -164,7 +164,7 @@ struct ConvertTritonToAutodiff
 
   void handleStoreBackward(triton::StoreOp storeOp, triton::FuncOp func,
                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          Operation *lastFwdOp){
+                          IRMapping &origToCloned, Operation *lastFwdOp){
     // why .getValue works for StoreOp, but not for AddPtrOp
     //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation (unless use ->)
 
@@ -172,7 +172,7 @@ struct ConvertTritonToAutodiff
     builder.setInsertionPointAfter(lastFwdOp);
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
-    Value ptr = storeOp->getOperand(0);
+    Value ptr = origToCloned.lookup(storeOp->getOperand(0));
     auto load = builder.create<triton::LoadOp>(
         storeOp.getLoc(),
         ptr,
@@ -189,31 +189,32 @@ struct ConvertTritonToAutodiff
     // mark as visited
     markVisited(builder, visitedType::Inserted, load);
 
-    // I want to preserve the of pointer calculations which was leading to the original store, so mark it as keep
-    // note: .getDefiningOp wt specifying type, returns a pointer to Operation
-    Operation* addptrOp = storeOp.getOperand(0).getDefiningOp();
-    Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-    Operation* rangeOp = addptrOp->getOperand(1).getDefiningOp();
-
-    markAllVisited(builder, visitedType::Original, rangeOp, splatOp, addptrOp);
-
-    // i did set the insertion point above, but bc I'm not cloning the above ops (i'm just keeping them where they are in the graph).
-    // the insertion point only effects the node that I add to the graph (does not effect already existing nodes)
-    // here I move them on top of the fn body as well
-    for (Operation *op : {rangeOp, splatOp, addptrOp}) {
-      op->moveBefore(load);
-    }
-
     // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
   }
 
   void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap){
+                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
+                          IRMapping &origToCloned){
     printIndent() << "visiting tt.load op\n";
     // traverse parents to find the initial pointer
 
     Value upstream = getUpstreamGrad(loadOp.getResult(), gradMap);
-    Value ptr = loadOp->getOperand(0);
+    // question-now:
+    //  here and everywhere where you use lookup to get clonedOp (i.e. op from the fwd graph),
+    //  explicitly mark subgraph leading to original op (that you use in the lookup) for deletion?
+    //  So that you don't match to them in my first loop.
+    //  IOW: Basically you're iterating over the bwd graph, and matching to ops, and re-writing these
+    //  ops with bwd formulas, and when you need some intermidiate for a bwd formula you use that
+    //  intermidiate from fwd (by doing "opFromFwd = origToCloned.lookup(opFromBwd)")
+    //  but there is still subgraph of nodes leading to "opFromBwd" -- you don't use opFromBwd,
+    //  and subsequently all the nodes that produced that node.
+    //  Because you don't set isAutogradVisited attribute on these nodes, they subsequently get
+    //  deleted by my 3rd loop. But you're first loop may match to these nodes again
+    //  (you just processed them here and thus you don't want 1st loop to match to them again).
+    //  At the moment this works fine because these nodes leading to opFromBwd are typically
+    //  splat, make_range, etc -- and bc you're first loop done't match to these nodes this kind of
+    //  works -- but it would be more robust and future proof to explicitly mark them for deletion
+    Value ptr = origToCloned.lookup(loadOp->getOperand(0));
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
 
     // Create a builder without setting insertion point at first, then set insertion point
@@ -248,14 +249,6 @@ struct ConvertTritonToAutodiff
     llvm::raw_string_ostream os(opStr);
     loadOp->print(os);
     store->setAttr("gradOf", builder.getStringAttr(opStr));
-
-    // preserve the pointer calculations (which were leading to the original store), so mark it as keep
-    Operation* addptrOp = loadOp.getOperand(0).getDefiningOp();
-    Operation* splatOp = addptrOp->getOperand(0).getDefiningOp();
-    // todo: we have already visited this Operation (fine for my toy example)
-    Operation* rangeOp = addptrOp->getOperand(1).getDefiningOp();
-
-    markAllVisited(builder, visitedType::Original, addptrOp, splatOp, rangeOp);
 
   }
 
