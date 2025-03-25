@@ -17,11 +17,6 @@ module {
 
     %9 = arith.divf %5, %8 {autogradVisited = true, isCloned = true} : tensor<4xf32>
 
-    // write into c ptr
-    // todo: this overwrite upstream
-    tt.store %2, %9 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
-
-
     // *******************
     // **** backward *****
     // *******************

@@ -71,11 +71,6 @@ struct ConvertTritonToAutodiff
     OpBuilder builder(func.getContext());
     builder.setInsertionPointToStart(entryBlock);
 
-
-    // todo-now:
-    //  in the stub I'm using output variable to pass the upstream grad
-    //  but now when copying entire fwd graph, and the fwd graph actually
-    //  writes output into that variable -- thus overwriting my upstream grad
     Operation *lastFwdOp = cloneSubtree(beforeReturnOp, origToCloned, builder);
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder.setInsertionPointAfter(lastFwdOp);
@@ -126,6 +121,14 @@ struct ConvertTritonToAutodiff
         printIndent() << "visiting arith.constant op\n";
       }
     } // for loop over ops
+
+    // todo-now:
+    //  in the stub I'm using output variable to pass the upstream grad
+    //  but now when copying entire fwd graph, and the fwd graph actually
+    //  writes output into that variable -- thus overwriting my upstream grad
+    //
+    // don't overwrite upstream with the fwd output
+    lastFwdOp->erase();
 
     // Second pass: handle LoadOp operations
     // because its derivative (storeOp) destroyaes semantics of input args
