@@ -17,7 +17,7 @@ module {
     %8 = tt.addptr %7, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
     %9 = tt.load %8 : tensor<4x!tt.ptr<f32>>
 
-    // x = a * 0.5
+    // x = a + 0.5
     %cst = arith.constant dense<5.000000e-01> : tensor<4xf32>
     %10 = arith.addf %3, %cst : tensor<4xf32>
 
