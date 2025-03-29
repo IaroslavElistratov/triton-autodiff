@@ -102,7 +102,7 @@ struct ConvertTritonToAutodiff
 
       // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        handleStoreBackward(storeOp, func, builder, gradMap, origToCloned, lastFwdOp);
+        handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastFwdOp);
       // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
       //   if (DEBUG_PRINTS) printIndent() << "visiting tt.make_range op\n";
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
@@ -112,25 +112,25 @@ struct ConvertTritonToAutodiff
 
       // arith ops
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
-        handleAddBackward(addfOp, func, builder, gradMap);
+        handleAddBackward(addfOp, builder, gradMap);
       } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
-        handleMulBackward(mulfOp, func, builder, gradMap, origToCloned);
+        handleMulBackward(mulfOp, builder, gradMap, origToCloned);
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
-        handleDivBackward(divfOp, func, builder, gradMap, origToCloned);
+        handleDivBackward(divfOp, builder, gradMap, origToCloned);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         if (DEBUG_PRINTS) printIndent() << "visiting arith.constant op\n";
 
       // math ops
       } else if (auto cosOp = dyn_cast<math::CosOp>(op)){
-        handleCosBackward(cosOp, func, builder, gradMap, origToCloned);
+        handleCosBackward(cosOp, builder, gradMap, origToCloned);
       } else if (auto sinOp = dyn_cast<math::SinOp>(op)){
-        handleSinBackward(sinOp, func, builder, gradMap, origToCloned);
+        handleSinBackward(sinOp, builder, gradMap, origToCloned);
       } else if (auto sqrtOp = dyn_cast<math::SqrtOp>(op)){
-        handleSqrtBackward(sqrtOp, func, builder, gradMap, origToCloned);
+        handleSqrtBackward(sqrtOp, builder, gradMap, origToCloned);
       } else if (auto logOp = dyn_cast<math::LogOp>(op)){
-        handleLogBackward(logOp, func, builder, gradMap, origToCloned);
+        handleLogBackward(logOp, builder, gradMap, origToCloned);
       } else if (auto expOp = dyn_cast<math::ExpOp>(op)){
-        handleExpBackward(expOp, func, builder, gradMap, origToCloned);
+        handleExpBackward(expOp, builder, gradMap, origToCloned);
       }
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
@@ -156,7 +156,7 @@ struct ConvertTritonToAutodiff
       }
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, func, builder, gradMap, origToCloned);
+        handleLoadBackward(loadOp, builder, gradMap, origToCloned, func);
       }
     } // for loop over loads
 
@@ -183,9 +183,9 @@ struct ConvertTritonToAutodiff
 
 
 
-  void handleStoreBackward(triton::StoreOp storeOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned, Operation *lastFwdOp){
+  void handleStoreBackward(triton::StoreOp storeOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
+                          Operation *lastFwdOp){
     // why .getValue works for StoreOp, but not for AddPtrOp
     //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation (unless use ->)
 
@@ -213,9 +213,9 @@ struct ConvertTritonToAutodiff
     // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
   }
 
-  void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned){
+  void handleLoadBackward(triton::LoadOp loadOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
+                          triton::FuncOp func){
     if (DEBUG_PRINTS) printIndent() << "visiting tt.load op\n";
     // traverse parents to find the initial pointer
 
@@ -273,8 +273,8 @@ struct ConvertTritonToAutodiff
 
   }
 
-  void handleAddBackward(arith::AddFOp addfOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap){
+  void handleAddBackward(arith::AddFOp addfOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.addf op\n";
 
     Value upstream = getUpstreamGrad(addfOp.getResult(), gradMap);
@@ -294,9 +294,8 @@ struct ConvertTritonToAutodiff
     assert(dyn_cast<arith::ConstantOp>(rhs_producer));
   }
 
-  void handleMulBackward(arith::MulFOp mulfOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned){
+  void handleMulBackward(arith::MulFOp mulfOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.mulf op\n";
 
     Value upstream = getUpstreamGrad(mulfOp.getResult(), gradMap);
@@ -328,9 +327,8 @@ struct ConvertTritonToAutodiff
   }
 
 
-  void handleDivBackward(arith::DivFOp divfOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned){
+  void handleDivBackward(arith::DivFOp divfOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.divf op\n";
 
     Value upstream = getUpstreamGrad(divfOp.getResult(), gradMap);
@@ -373,9 +371,8 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
 
-  void handleCosBackward(math::CosOp cosOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned) {
+  void handleCosBackward(math::CosOp cosOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.cos op\n";
 
     Value upstream = getUpstreamGrad(cosOp.getResult(), gradMap);
@@ -399,9 +396,8 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, xDownstream, negSin, negOne, sinOp);
   }
 
-  void handleSinBackward(math::SinOp sinOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned) {
+  void handleSinBackward(math::SinOp sinOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.sin op\n";
 
     Value upstream = getUpstreamGrad(sinOp.getResult(), gradMap);
@@ -420,9 +416,8 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, xDownstream, cosOp);
   }
 
-  void handleSqrtBackward(math::SqrtOp sqrtOp, triton::FuncOp func,
-                           OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                           IRMapping &origToCloned) {
+  void handleSqrtBackward(math::SqrtOp sqrtOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.sqrt op\n";
 
     Value upstream = getUpstreamGrad(sqrtOp.getResult(), gradMap);
@@ -447,9 +442,8 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one, twoSqrtX, two);
   }
 
-  void handleLogBackward(math::LogOp logOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned) {
+  void handleLogBackward(math::LogOp logOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.log op\n";
 
     Value upstream = getUpstreamGrad(logOp.getResult(), gradMap);
@@ -469,9 +463,8 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one);
   }
 
-  void handleExpBackward(math::ExpOp expOp, triton::FuncOp func,
-                          OpBuilder &builder, llvm::DenseMap<Value, Value> &gradMap,
-                          IRMapping &origToCloned) {
+  void handleExpBackward(math::ExpOp expOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.exp op\n";
 
     Value upstream = getUpstreamGrad(expOp.getResult(), gradMap);
