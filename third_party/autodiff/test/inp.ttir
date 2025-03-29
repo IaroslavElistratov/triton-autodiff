@@ -1,0 +1,27 @@
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<5.000000e-01> : tensor<4xf32>
+    %0 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %2 = tt.addptr %1, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.load %2 : tensor<4x!tt.ptr<f32>>
+    %4 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %5 = tt.addptr %4, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %6 = tt.load %5 : tensor<4x!tt.ptr<f32>>
+    %7 = tt.splat %arg2 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %8 = tt.addptr %7, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %9 = tt.load %8 : tensor<4x!tt.ptr<f32>>
+    %10 = arith.addf %3, %cst : tensor<4xf32>
+    %11 = arith.mulf %10, %6 : tensor<4xf32>
+    %12 = arith.divf %11, %9 : tensor<4xf32>
+    %13 = math.cos %12 : tensor<4xf32>
+    %14 = math.sin %13 : tensor<4xf32>
+    %15 = math.sqrt %14 : tensor<4xf32>
+    %16 = math.log %15 : tensor<4xf32>
+    %17 = math.exp %16 : tensor<4xf32>
+    %18 = tt.splat %arg3 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %19 = tt.addptr %18, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    tt.store %19, %17 : tensor<4x!tt.ptr<f32>>
+    tt.return
+  }
+}
