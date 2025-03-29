@@ -205,7 +205,7 @@ struct ConvertTritonToAutodiff
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
     if (DEBUG_PRINTS) llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
     // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the gradMap
-    gradMap[storeOp->getOperand(1)] = load.getResult();
+    gradMap[storeOp->getOperand(1)] = load;
 
     // mark as visited
     markVisited(builder, visitedType::Inserted, load);
@@ -219,7 +219,7 @@ struct ConvertTritonToAutodiff
     if (DEBUG_PRINTS) printIndent() << "visiting tt.load op\n";
     // traverse parents to find the initial pointer
 
-    Value upstream = getUpstreamGrad(loadOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(loadOp, gradMap);
     // question-now:
     //  here and everywhere where you use lookup to get clonedOp (i.e. op from the fwd graph),
     //  explicitly mark subgraph leading to original op (that you use in the lookup) for deletion?
@@ -277,7 +277,7 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.addf op\n";
 
-    Value upstream = getUpstreamGrad(addfOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(addfOp, gradMap);
 
     // float local_grad = 1.;
 
@@ -298,7 +298,7 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.mulf op\n";
 
-    Value upstream = getUpstreamGrad(mulfOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(mulfOp, gradMap);
     // insert operations after the gradient value, they depend on, is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
@@ -313,7 +313,7 @@ struct ConvertTritonToAutodiff
     // (2) differentiate rhs
     auto gradRhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedLhs, upstream);
     // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
-    gradMap[rhs] = gradRhsOp.getResult();
+    gradMap[rhs] = gradRhsOp;
     markVisited(builder, visitedType::Inserted, gradRhsOp);
 
     // (3) clone rhs subtree
@@ -322,7 +322,7 @@ struct ConvertTritonToAutodiff
 
     // (4) differentiate lhs
     auto gradLhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedRhs, upstream);
-    gradMap[lhs] = gradLhsOp.getResult();
+    gradMap[lhs] = gradLhsOp;
     markVisited(builder, visitedType::Inserted, gradLhsOp);
   }
 
@@ -331,7 +331,7 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.divf op\n";
 
-    Value upstream = getUpstreamGrad(divfOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(divfOp, gradMap);
     // insert operations after the gradient value, they depend on, is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
@@ -350,9 +350,9 @@ struct ConvertTritonToAutodiff
     // auto ones = builder.create<arith::ConstantOp>(divfOp->getLoc(), upstream.getType(), builder.getF32FloatAttr(1.0));
     // this creates a scalar and broadcasts it to a shape specificed by "upstream.getType()"
     auto ones = createConstantTensor(builder, divfOp->getLoc(), upstream.getType(), 1.0);
-    auto aLocal = builder.create<arith::DivFOp>(divfOp->getLoc(), ones.getResult(), bCloned);
-    auto aDownstream = builder.create<arith::MulFOp>(divfOp->getLoc(), aLocal.getResult(), upstream);
-    gradMap[a] = aDownstream.getResult();
+    auto aLocal = builder.create<arith::DivFOp>(divfOp->getLoc(), ones, bCloned);
+    auto aDownstream = builder.create<arith::MulFOp>(divfOp->getLoc(), aLocal, upstream);
+    gradMap[a] = aDownstream;
 
     markAllVisited(builder, visitedType::Inserted, aDownstream, ones, aLocal);
 
@@ -362,11 +362,11 @@ struct ConvertTritonToAutodiff
 
     // auto two = builder.create<arith::ConstantOp>(divfOp->getLoc(), divfOp.getType(), builder.getF32FloatAttr(2.0));
     auto pow = builder.create<arith::MulFOp>(divfOp.getLoc(), bCloned, bCloned);
-    auto div = builder.create<arith::DivFOp>(divfOp.getLoc(), aCloned, pow.getResult());
+    auto div = builder.create<arith::DivFOp>(divfOp.getLoc(), aCloned, pow);
     auto neg = createConstantTensor(builder, divfOp->getLoc(), div.getType(), -1.0);
-    auto bLocal = builder.create<arith::MulFOp>(divfOp.getLoc(), neg.getResult(), div.getResult());
-    auto bDownstream = builder.create<arith::MulFOp>(divfOp.getLoc(), bLocal.getResult(), upstream);
-    gradMap[b] = bDownstream.getResult();
+    auto bLocal = builder.create<arith::MulFOp>(divfOp.getLoc(), neg, div);
+    auto bDownstream = builder.create<arith::MulFOp>(divfOp.getLoc(), bLocal, upstream);
+    gradMap[b] = bDownstream;
 
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
@@ -375,7 +375,7 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.cos op\n";
 
-    Value upstream = getUpstreamGrad(cosOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(cosOp, gradMap);
     // insert operations after the gradient value they depend on is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
@@ -385,13 +385,13 @@ struct ConvertTritonToAutodiff
     // derivative of cos(x) is -sin(x)
     auto sinOp = builder.create<math::SinOp>(cosOp.getLoc(), xCloned);
     auto negOne = createConstantTensor(builder, cosOp->getLoc(), upstream.getType(), -1.0);
-    auto negSin = builder.create<arith::MulFOp>(cosOp.getLoc(), negOne.getResult(), sinOp.getResult());
-    auto xDownstream = builder.create<arith::MulFOp>(cosOp.getLoc(), negSin.getResult(), upstream);
+    auto negSin = builder.create<arith::MulFOp>(cosOp.getLoc(), negOne, sinOp);
+    auto xDownstream = builder.create<arith::MulFOp>(cosOp.getLoc(), negSin, upstream);
 
     // answer-now:
     //  gardMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
     //  to values in backward graph which I've already re-written
-    gradMap[x] = xDownstream.getResult();
+    gradMap[x] = xDownstream;
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, negSin, negOne, sinOp);
   }
@@ -400,7 +400,7 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.sin op\n";
 
-    Value upstream = getUpstreamGrad(sinOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(sinOp, gradMap);
     // insert operations after the gradient value they depend on is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
@@ -409,9 +409,9 @@ struct ConvertTritonToAutodiff
 
     // derivative of sin(x) is cos(x)
     auto cosOp = builder.create<math::CosOp>(sinOp.getLoc(), xCloned);
-    auto xDownstream = builder.create<arith::MulFOp>(sinOp.getLoc(), cosOp.getResult(), upstream);
+    auto xDownstream = builder.create<arith::MulFOp>(sinOp.getLoc(), cosOp, upstream);
 
-    gradMap[x] = xDownstream.getResult();
+    gradMap[x] = xDownstream;
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, cosOp);
   }
@@ -420,24 +420,24 @@ struct ConvertTritonToAutodiff
                           llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.sqrt op\n";
 
-    Value upstream = getUpstreamGrad(sqrtOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(sqrtOp, gradMap);
     // insert operations after the gradient value they depend on is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
     Value x = sqrtOp.getOperand();
-    Value sqrtResult = sqrtOp.getResult();
+    Value sqrtResult = sqrtOp;
 
     // Value xCloned = origToCloned.lookup(x);
     Value sqrtResultCloned = origToCloned.lookup(sqrtResult);
 
     // derivative of sqrt(x) is 1/(2*sqrt(x))
     auto two = createConstantTensor(builder, sqrtOp->getLoc(), upstream.getType(), 2.0);
-    auto twoSqrtX = builder.create<arith::MulFOp>(sqrtOp.getLoc(), sqrtResultCloned, two.getResult());
+    auto twoSqrtX = builder.create<arith::MulFOp>(sqrtOp.getLoc(), sqrtResultCloned, two);
     auto one = createConstantTensor(builder, sqrtOp->getLoc(), upstream.getType(), 1.0);
-    auto localGrad = builder.create<arith::DivFOp>(sqrtOp.getLoc(), one.getResult(), twoSqrtX.getResult());
-    auto xDownstream = builder.create<arith::MulFOp>(sqrtOp.getLoc(), localGrad.getResult(), upstream);
+    auto localGrad = builder.create<arith::DivFOp>(sqrtOp.getLoc(), one, twoSqrtX);
+    auto xDownstream = builder.create<arith::MulFOp>(sqrtOp.getLoc(), localGrad, upstream);
 
-    gradMap[x] = xDownstream.getResult();
+    gradMap[x] = xDownstream;
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one, twoSqrtX, two);
   }
@@ -446,7 +446,7 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.log op\n";
 
-    Value upstream = getUpstreamGrad(logOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(logOp, gradMap);
     // insert operations after the gradient value they depend on is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
@@ -455,10 +455,10 @@ struct ConvertTritonToAutodiff
 
     // derivative of log(x) is 1/x
     auto one = createConstantTensor(builder, logOp->getLoc(), upstream.getType(), 1.0);
-    auto localGrad = builder.create<arith::DivFOp>(logOp.getLoc(), one.getResult(), xCloned);
-    auto xDownstream = builder.create<arith::MulFOp>(logOp.getLoc(), localGrad.getResult(), upstream);
+    auto localGrad = builder.create<arith::DivFOp>(logOp.getLoc(), one, xCloned);
+    auto xDownstream = builder.create<arith::MulFOp>(logOp.getLoc(), localGrad, upstream);
 
-    gradMap[x] = xDownstream.getResult();
+    gradMap[x] = xDownstream;
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one);
   }
@@ -467,19 +467,19 @@ struct ConvertTritonToAutodiff
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
     if (DEBUG_PRINTS) printIndent() << "visiting math.exp op\n";
 
-    Value upstream = getUpstreamGrad(expOp.getResult(), gradMap);
+    Value upstream = getUpstreamGrad(expOp, gradMap);
     // insert operations after the gradient value they depend on is defined
     builder.setInsertionPointAfter(upstream.getDefiningOp());
 
     Value x = expOp.getOperand();
-    Value expResult = expOp.getResult();
+    Value expResult = expOp;
     Value expResultCloned = origToCloned.lookup(expResult);
 
     // derivative of exp(x) is exp(x) itself
     // We already have exp(x) from the forward pass, so use it directly
     auto xDownstream = builder.create<arith::MulFOp>(expOp.getLoc(), expResultCloned, upstream);
 
-    gradMap[x] = xDownstream.getResult();
+    gradMap[x] = xDownstream;
 
     markAllVisited(builder, visitedType::Inserted, xDownstream);
   }
