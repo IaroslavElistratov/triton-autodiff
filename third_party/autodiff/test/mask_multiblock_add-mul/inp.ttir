@@ -1,0 +1,42 @@
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+
+    // block_start = pid * BLOCK_SIZE
+    %c4_i32 = arith.constant 4 : i32
+    %0 = tt.get_program_id x : i32
+    %1 = arith.muli %0, %c4_i32 : i32
+
+    // offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    %2 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+    %3 = tt.splat %1 : i32 -> tensor<4xi32>
+    %4 = arith.addi %3, %2 : tensor<4xi32>
+
+    // mask calculation
+    %cst_0 = arith.constant dense<10> : tensor<4xi32>
+    %5 = arith.cmpi slt, %4, %cst_0 : tensor<4xi32>
+
+    // load a (masked)
+    %6 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %7 = tt.addptr %6, %4 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %8 = tt.load %7, %5 : tensor<4x!tt.ptr<f32>>
+
+    // load b (masked)
+    %9 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %10 = tt.addptr %9, %4 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %11 = tt.load %10, %5 : tensor<4x!tt.ptr<f32>>
+
+    // x = a + 0.5
+    %cst = arith.constant dense<5.000000e-01> : tensor<4xf32>
+    %12 = arith.addf %8, %cst : tensor<4xf32>
+    // y = x * b
+    %13 = arith.mulf %12, %11 : tensor<4xf32>
+
+    // store out (masked)
+    %14 = tt.splat %arg2 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %15 = tt.addptr %14, %4 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    tt.store %15, %13, %5 : tensor<4x!tt.ptr<f32>>
+
+    tt.return
+  }
+}
+

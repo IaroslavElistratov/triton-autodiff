@@ -194,9 +194,25 @@ struct ConvertTritonToAutodiff
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
     Value ptr = origToCloned.lookup(storeOp->getOperand(0));
+
+    // remember the semantics:
+    // you're iterating over the backward graph (that you're
+    // re-writing at the same time), here you matched to StoreOp,
+    // StoreOp.getMask() simply returns ssa Value of one of the
+    // operands of that op (bc you're iterating over the
+    // backward graph, thus that mask Value will come from
+    // some node in the backward graph).
+    // Because I want to re-use intermideats from the fwd graph instead,
+    // here find the same mask Value but from the forward graph
+    Value mask = storeOp.getMask();
+    // some StoreOps don't have the mask value, in which case
+    // mask above is a <<NULL VALUE>>
+    Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
+
     auto load = builder.create<triton::LoadOp>(
         storeOp.getLoc(),
         ptr,
+        maskCloned,
         storeOp.getCache(),  // copy cache modifier
         storeOp.getEvict(),  // copy eviction policy
         false  // isVolatile (storeOp doesn't have this, so keep default)
@@ -250,10 +266,13 @@ struct ConvertTritonToAutodiff
     // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
     //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
     // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
+    Value mask = loadOp.getMask();
+    Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
     auto store = builder.create<triton::StoreOp>(
       loadOp.getLoc(),
       ptr,
       upstream,
+      maskCloned,
       triton::CacheModifier::NONE,
       triton::EvictionPolicy::NORMAL);
 
