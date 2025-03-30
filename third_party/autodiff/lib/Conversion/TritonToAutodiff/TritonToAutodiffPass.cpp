@@ -322,7 +322,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(mulfOp, gradMap);
     // insert operations after the gradient value, they depend on, is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value lhs = mulfOp.getOperand(0);
     Value rhs = mulfOp.getOperand(1);
@@ -355,7 +355,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(divfOp, gradMap);
     // insert operations after the gradient value, they depend on, is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value a = divfOp.getOperand(0);
     Value b = divfOp.getOperand(1);
@@ -399,7 +399,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(cosOp, gradMap);
     // insert operations after the gradient value they depend on is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value x = cosOp.getOperand();
     Value xCloned = origToCloned.lookup(x);
@@ -424,7 +424,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(sinOp, gradMap);
     // insert operations after the gradient value they depend on is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value x = sinOp.getOperand();
     Value xCloned = origToCloned.lookup(x);
@@ -444,7 +444,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(sqrtOp, gradMap);
     // insert operations after the gradient value they depend on is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value x = sqrtOp.getOperand();
     Value sqrtResult = sqrtOp;
@@ -470,7 +470,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(logOp, gradMap);
     // insert operations after the gradient value they depend on is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value x = logOp.getOperand();
     Value xCloned = origToCloned.lookup(x);
@@ -491,7 +491,7 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(expOp, gradMap);
     // insert operations after the gradient value they depend on is defined
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     Value x = expOp.getOperand();
     Value expResult = expOp;
@@ -511,7 +511,7 @@ struct ConvertTritonToAutodiff
     if (DEBUG_PRINTS) printIndent() << "visiting tt.dot op\n";
 
     Value upstream = getUpstreamGrad(mmOp, gradMap);
-    builder.setInsertionPointAfter(upstream.getDefiningOp());
+    builder.setInsertionPointAfterValue(upstream);
 
     // Extract matrix multiplication operands
     Value a = mmOp.getA();
