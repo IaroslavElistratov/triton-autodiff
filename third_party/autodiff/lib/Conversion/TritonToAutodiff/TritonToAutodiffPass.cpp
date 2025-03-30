@@ -103,6 +103,9 @@ struct ConvertTritonToAutodiff
       // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
         handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastFwdOp);
+      } else if (auto mmOp = dyn_cast<triton::DotOp>(op)){
+        handleMatmulBackward(mmOp, builder, gradMap, origToCloned);
+
       // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
       //   if (DEBUG_PRINTS) printIndent() << "visiting tt.make_range op\n";
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
@@ -501,6 +504,68 @@ struct ConvertTritonToAutodiff
     gradMap[x] = xDownstream;
 
     markAllVisited(builder, visitedType::Inserted, xDownstream);
+  }
+
+  void handleMatmulBackward(triton::DotOp mmOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+    if (DEBUG_PRINTS) printIndent() << "visiting tt.dot op\n";
+
+    Value upstream = getUpstreamGrad(mmOp, gradMap);
+    builder.setInsertionPointAfter(upstream.getDefiningOp());
+
+    // Extract matrix multiplication operands
+    Value a = mmOp.getA();
+    Value b = mmOp.getB();
+    Value c = mmOp.getC();  // Accumulator
+
+    // Get cloned operands from forward graph
+    Value aCloned = origToCloned.lookup(a);
+    Value bCloned = origToCloned.lookup(b);
+
+    // For matmul C = A * B + acc
+    // dA = dC * B^T
+    // dB = A^T * dC
+
+    std::vector<int32_t> transOrder = {1, 0};
+    auto bTrans = builder.create<triton::TransOp>(
+        mmOp.getLoc(),
+        bCloned.getType(),
+        bCloned,
+        builder.getDenseI32ArrayAttr(transOrder));
+
+    // Compute gradient for A: dA = dC * B^T
+    auto gradA = builder.create<triton::DotOp>(
+        mmOp.getLoc(),
+        a.getType(),                  // Result type should match A's type
+        upstream,                     // dC
+        bTrans,                       // B^T
+        createConstantTensor(builder, mmOp.getLoc(), a.getType(), 0.0), // zero accumulator
+        mmOp.getInputPrecision(),
+        mmOp.getMaxNumImpreciseAcc());
+
+    gradMap[a] = gradA;
+
+
+    auto aTrans = builder.create<triton::TransOp>(
+        mmOp.getLoc(),
+        aCloned.getType(),
+        aCloned,
+        builder.getDenseI32ArrayAttr(transOrder));
+
+    // Compute gradient for B: dB = A^T * dC
+    auto gradB = builder.create<triton::DotOp>(
+        mmOp.getLoc(),
+        b.getType(),                  // Result type should match B's type
+        aTrans,                       // A^T
+        upstream,                     // dC
+        createConstantTensor(builder, mmOp.getLoc(), b.getType(), 0.0), // zero accumulator
+        mmOp.getInputPrecision(),
+        mmOp.getMaxNumImpreciseAcc());
+
+    gradMap[b] = gradB;
+
+
+    markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);
   }
 
 }; // ConvertTritonToAutodiff stuct

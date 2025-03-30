@@ -1,0 +1,58 @@
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %0 = tt.splat %arg2 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %1 = tt.make_range {autogradVisited = true, end = 16 : i32, isCloned = true, start = 0 : i32} : tensor<16xi32>
+    %2 = tt.expand_dims %1 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi32> -> tensor<16x1xi32>
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<16> : tensor<16x1xi32>
+    %3 = arith.muli %2, %cst {autogradVisited = true, isCloned = true} : tensor<16x1xi32>
+    %4 = tt.broadcast %3 {autogradVisited = true, isCloned = true} : tensor<16x1xi32> -> tensor<16x16xi32>
+    %5 = tt.expand_dims %1 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi32> -> tensor<1x16xi32>
+    %6 = tt.broadcast %5 {autogradVisited = true, isCloned = true} : tensor<1x16xi32> -> tensor<16x16xi32>
+    %7 = arith.addi %4, %6 {autogradVisited = true, isCloned = true} : tensor<16x16xi32>
+    %8 = tt.addptr %0, %7 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
+    %9 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %10 = tt.addptr %9, %7 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
+    %11 = tt.load %10 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f32>>
+    %12 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %13 = tt.addptr %12, %7 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
+    %14 = tt.load %13 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f32>>
+    %cst_0 = arith.constant {autogradVisited = true, isCloned = true} dense<0.000000e+00> : tensor<16x16xf32>
+
+    // a @ b
+    %15 = tt.dot %11, %14, %cst_0, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> * tensor<16x16xf32> -> tensor<16x16xf32>
+
+    //////////////
+    // backward //
+    //////////////
+
+    // load upstream
+    %16 = tt.load %8 {autogradVisited = true, isInserted = true} : tensor<16x16x!tt.ptr<f32>>
+
+    // *** a grad ***
+    // b.T
+    %17 = tt.trans %14 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf32> -> tensor<16x16xf32>
+    // init accum buffer to single constant
+    %cst_1 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32
+    // splat accum buffer into shape of mm output
+    %18 = tt.splat %cst_1 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
+    // a grad = upstream @ b.T
+    %19 = tt.dot %16, %17, %18, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> * tensor<16x16xf32> -> tensor<16x16xf32>
+
+    // *** b grad ***
+    // a.T
+    %20 = tt.trans %11 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf32> -> tensor<16x16xf32>
+    // init accum buffer to single constant
+    %cst_2 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32
+    // splat accum buffer into shape of mm output
+    %21 = tt.splat %cst_2 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
+    // b grad = a.T @ upstream
+    %22 = tt.dot %20, %16, %21, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> * tensor<16x16xf32> -> tensor<16x16xf32>
+
+    // store b grad into b ptr
+    tt.store %13, %22 {autogradVisited = true, gradOf = "%35 = tt.load %34 : tensor<16x16x!tt.ptr<f32>>", isInserted = true} : tensor<16x16x!tt.ptr<f32>>
+    // store a grad into a ptr
+    tt.store %10, %19 {autogradVisited = true, gradOf = "%32 = tt.load %31 : tensor<16x16x!tt.ptr<f32>>", isInserted = true} : tensor<16x16x!tt.ptr<f32>>
+    tt.return
+  }
+}
+

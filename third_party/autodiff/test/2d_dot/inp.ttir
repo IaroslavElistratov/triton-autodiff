@@ -1,0 +1,37 @@
+module {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<0.000000e+00> : tensor<16x16xf32>
+
+
+    // offsets = tl.arange(0, 16)
+    %0 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
+
+    // offsets_2d = (16 * offsets[:, None]) + offsets[None, :]
+    %1 = tt.expand_dims %0 {axis = 1 : i32} : tensor<16xi32> -> tensor<16x1xi32>
+    %cst_0 = arith.constant dense<16> : tensor<16x1xi32>
+    %2 = arith.muli %1, %cst_0 : tensor<16x1xi32>
+    %3 = tt.expand_dims %0 {axis = 0 : i32} : tensor<16xi32> -> tensor<1x16xi32>
+    %4 = tt.broadcast %2 : tensor<16x1xi32> -> tensor<16x16xi32>
+    %5 = tt.broadcast %3 : tensor<1x16xi32> -> tensor<16x16xi32>
+    %6 = arith.addi %4, %5 : tensor<16x16xi32>
+
+    // load a
+    %7 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %8 = tt.addptr %7, %6 : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
+    %9 = tt.load %8 : tensor<16x16x!tt.ptr<f32>>
+
+    // load b
+    %10 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %11 = tt.addptr %10, %6 : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
+    %12 = tt.load %11 : tensor<16x16x!tt.ptr<f32>>
+
+    %13 = tt.dot %9, %12, %cst, inputPrecision = tf32 : tensor<16x16xf32> * tensor<16x16xf32> -> tensor<16x16xf32>
+
+    // store out
+    %14 = tt.splat %arg2 : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %15 = tt.addptr %14, %6 : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
+    tt.store %15, %13 : tensor<16x16x!tt.ptr<f32>>
+
+    tt.return
+  }
+}
