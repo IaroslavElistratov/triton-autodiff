@@ -1,0 +1,39 @@
+module {
+  tt.func public @kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %0 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %1 = tt.make_range {autogradVisited = true, end = 4 : i32, isCloned = true, start = 0 : i32} : tensor<4xi32>
+    %2 = tt.addptr %0, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %4 = tt.addptr %3, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %5 = tt.load %4 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<5.000000e-01> : tensor<4xf32>
+    %6 = arith.addf %5, %cst {autogradVisited = true, isCloned = true} : tensor<4xf32>
+    %7 = arith.mulf %5, %6 {autogradVisited = true, isCloned = true} : tensor<4xf32>
+
+    ////////////////
+    /// backward ///
+    ////////////////
+
+    // load upstream
+    %8 = tt.load %2 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+
+    // [backprop though MUL]
+    // x grad: a * upstream
+    %9 = arith.mulf %5, %8 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // a grad: x * upstream
+    %10 = arith.mulf %6, %8 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    // [backprop though ADD]
+    // multiplication by 1 is omitted
+    // grad a: grad x * 1 = grad x
+
+    // NOTE: accumulate the two grads wrt A
+    %11 = arith.addf %10, %9 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    // store a grad
+    tt.store %4, %11 {autogradVisited = true, gradOf = "%15 = tt.load %14 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+
+    tt.return
+  }
+}
+

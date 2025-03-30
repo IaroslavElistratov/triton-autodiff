@@ -1,0 +1,26 @@
+module {
+  tt.func public @kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+
+    %0 = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>
+
+    // load a
+    %1 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %2 = tt.addptr %1, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.load %2 : tensor<4x!tt.ptr<f32>>
+
+    // x = a + 0.5
+    %cst = arith.constant dense<5.000000e-01> : tensor<4xf32>
+    %4 = arith.addf %3, %cst : tensor<4xf32>
+
+    // NOTE: same a is used again
+    // y = a * x
+    %5 = arith.mulf %3, %4 : tensor<4xf32>
+
+    // store out
+    %6 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %7 = tt.addptr %6, %0 : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    tt.store %7, %5 : tensor<4x!tt.ptr<f32>>
+
+    tt.return
+  }
+}

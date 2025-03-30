@@ -224,7 +224,7 @@ struct ConvertTritonToAutodiff
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
     if (DEBUG_PRINTS) llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
     // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the gradMap
-    gradMap[storeOp->getOperand(1)] = load;
+    maybeAccumulateGrad(storeOp->getOperand(1), load, gradMap, builder);
 
     // mark as visited
     markVisited(builder, visitedType::Inserted, load);
@@ -307,7 +307,7 @@ struct ConvertTritonToAutodiff
     Value lhs = addfOp.getOperand(0);
     assert(!dyn_cast<arith::ConstantOp>(lhs.getDefiningOp()));
     // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
-    gradMap[lhs] = upstream;
+    maybeAccumulateGrad(lhs, upstream, gradMap, builder);
 
     // todo-high: hardcoded for my specific graph
     // 1st arg is a constant, so grad wrt it is zero
@@ -335,7 +335,7 @@ struct ConvertTritonToAutodiff
     // (2) differentiate rhs
     auto gradRhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedLhs, upstream);
     // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
-    gradMap[rhs] = gradRhsOp;
+    maybeAccumulateGrad(rhs, gradRhsOp, gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradRhsOp);
 
     // (3) clone rhs subtree
@@ -344,7 +344,7 @@ struct ConvertTritonToAutodiff
 
     // (4) differentiate lhs
     auto gradLhsOp = builder.create<arith::MulFOp>(mulfOp.getLoc(), clonedRhs, upstream);
-    gradMap[lhs] = gradLhsOp;
+    maybeAccumulateGrad(lhs, gradLhsOp, gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradLhsOp);
   }
 
@@ -374,7 +374,7 @@ struct ConvertTritonToAutodiff
     auto ones = createConstantTensor(builder, divfOp->getLoc(), upstream.getType(), 1.0);
     auto aLocal = builder.create<arith::DivFOp>(divfOp->getLoc(), ones, bCloned);
     auto aDownstream = builder.create<arith::MulFOp>(divfOp->getLoc(), aLocal, upstream);
-    gradMap[a] = aDownstream;
+    maybeAccumulateGrad(a, aDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, aDownstream, ones, aLocal);
 
@@ -388,7 +388,7 @@ struct ConvertTritonToAutodiff
     auto neg = createConstantTensor(builder, divfOp->getLoc(), div.getType(), -1.0);
     auto bLocal = builder.create<arith::MulFOp>(divfOp.getLoc(), neg, div);
     auto bDownstream = builder.create<arith::MulFOp>(divfOp.getLoc(), bLocal, upstream);
-    gradMap[b] = bDownstream;
+    maybeAccumulateGrad(b, bDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
@@ -413,7 +413,7 @@ struct ConvertTritonToAutodiff
     // answer-now:
     //  gardMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
     //  to values in backward graph which I've already re-written
-    gradMap[x] = xDownstream;
+    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, negSin, negOne, sinOp);
   }
@@ -433,7 +433,7 @@ struct ConvertTritonToAutodiff
     auto cosOp = builder.create<math::CosOp>(sinOp.getLoc(), xCloned);
     auto xDownstream = builder.create<arith::MulFOp>(sinOp.getLoc(), cosOp, upstream);
 
-    gradMap[x] = xDownstream;
+    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, cosOp);
   }
@@ -459,7 +459,7 @@ struct ConvertTritonToAutodiff
     auto localGrad = builder.create<arith::DivFOp>(sqrtOp.getLoc(), one, twoSqrtX);
     auto xDownstream = builder.create<arith::MulFOp>(sqrtOp.getLoc(), localGrad, upstream);
 
-    gradMap[x] = xDownstream;
+    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one, twoSqrtX, two);
   }
@@ -480,7 +480,7 @@ struct ConvertTritonToAutodiff
     auto localGrad = builder.create<arith::DivFOp>(logOp.getLoc(), one, xCloned);
     auto xDownstream = builder.create<arith::MulFOp>(logOp.getLoc(), localGrad, upstream);
 
-    gradMap[x] = xDownstream;
+    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one);
   }
@@ -501,7 +501,7 @@ struct ConvertTritonToAutodiff
     // We already have exp(x) from the forward pass, so use it directly
     auto xDownstream = builder.create<arith::MulFOp>(expOp.getLoc(), expResultCloned, upstream);
 
-    gradMap[x] = xDownstream;
+    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream);
   }
@@ -543,7 +543,7 @@ struct ConvertTritonToAutodiff
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
-    gradMap[a] = gradA;
+    maybeAccumulateGrad(a, gradA, gradMap, builder);
 
 
     auto aTrans = builder.create<triton::TransOp>(
@@ -562,7 +562,7 @@ struct ConvertTritonToAutodiff
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
-    gradMap[b] = gradB;
+    maybeAccumulateGrad(b, gradB, gradMap, builder);
 
 
     markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);

@@ -49,6 +49,35 @@ namespace triton {
     return it->second;
   }
 
+  void maybeAccumulateGrad(Value val, Value grad,
+                          llvm::DenseMap<Value, Value> &gradMap,
+                          OpBuilder &builder) {
+    auto it = gradMap.find(val);
+
+    // no existing grad
+    if (it == gradMap.end()) {
+      gradMap[val] = grad;
+
+    // found existing grad wrt val
+    } else {
+      auto existingGrad = it->second;
+
+      // otherwise "does not dominate its use"  err
+      builder.setInsertionPointAfterValue(existingGrad);
+
+      // // todo: don't use atomics unless needed (requires some analysis pass
+      // // to identify if this accesses the same memory location)
+      // auto accumulated_grad = create_atomic_add(existingGrad, grad);
+
+      // keys in my grad map already belong to the re-written part of
+      // the bwd graph so don't need map them though origToCloned
+      auto accumulatedGrad = builder.create<arith::AddFOp>(existingGrad.getLoc(), existingGrad, grad);
+      markVisited(builder, visitedType::Inserted, accumulatedGrad);
+
+      gradMap[val] = accumulatedGrad;
+    }
+  }
+
   triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value) {
     auto scalarType = builder.getF32Type();
     auto scalarValue = builder.create<arith::ConstantOp>(loc, scalarType, builder.getF32FloatAttr(value));

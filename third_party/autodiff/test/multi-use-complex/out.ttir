@@ -1,0 +1,53 @@
+module {
+  tt.func public @kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %0 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %1 = tt.make_range {autogradVisited = true, end = 4 : i32, isCloned = true, start = 0 : i32} : tensor<4xi32>
+    %2 = tt.addptr %0, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %3 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %4 = tt.addptr %3, %1 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %5 = tt.load %4 {autogradVisited = true, isCloned = true} : tensor<4x!tt.ptr<f32>>
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<5.000000e-01> : tensor<4xf32>
+
+    // x = a + 0.5
+    %6 = arith.addf %5, %cst {autogradVisited = true, isCloned = true} : tensor<4xf32>
+    // y = a * x
+    %7 = arith.mulf %5, %6 {autogradVisited = true, isCloned = true} : tensor<4xf32>
+    // z = a * y
+    %8 = arith.mulf %5, %7 {autogradVisited = true, isCloned = true} : tensor<4xf32>
+
+
+    //////////////
+    // backward //
+    //////////////
+
+    // load upstream
+    %9 = tt.load %2 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+
+    /// backprop through Z: ///
+    // y_grad = a * upstream
+    %10 = arith.mulf %5, %9 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // a_grad = y * upstream
+    %13 = arith.mulf %7, %9 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    /// backprop through Y: ///
+    // x_grad = a * y_grad (upstream wrt y)
+    %11 = arith.mulf %5, %10 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // a_grad = x * y_grad (upstream wrt y)
+    %12 = arith.mulf %6, %10 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    /// backprop through X: ///
+    // NOTE: omitted, bc local grad of ADD is 1 -- omit multiplying by 1
+    // [a_grad = x_grad]
+
+    // NOTE: accumulate the two grads of a
+    %14 = arith.addf %13, %12 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // and accumulate its final grad (from the x node)
+    %15 = arith.addf %14, %11 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
+    // store accumulated grad of a, in a's ptr
+    tt.store %4, %15 {autogradVisited = true, gradOf = "%19 = tt.load %18 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+
+    tt.return
+  }
+}
+
