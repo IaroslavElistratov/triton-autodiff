@@ -19,14 +19,14 @@
 #include "mlir/Dialect/SCF/Utils/Utils.h"
 
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Signals.h" // report_fatal_error
 
 namespace mlir {
 namespace triton {
 
   void markVisited(OpBuilder &builder, visitedType mode, Operation *op) {
     if (!op) {
-      llvm::outs() << "markVisited received null operation pointer\n";
-      exit(1);
+      llvm::report_fatal_error("markVisited received null operation pointer\n");
     }
 
     NamedAttrList attrs;
@@ -38,8 +38,7 @@ namespace triton {
     else if (mode == visitedType::Cloned)
       attrs.append("isCloned", builder.getBoolAttr(true));
     else {
-      llvm::outs() << "markVisited invalid visitedType value\n";
-      exit(1);
+      llvm::report_fatal_error("markVisited invalid visitedType value\n");
     }
     op->setAttrs(attrs);
   }
@@ -47,8 +46,9 @@ namespace triton {
   Value getUpstreamGrad(Value result, const llvm::DenseMap<Value, Value> &gradMap) {
     auto it = gradMap.find(result);
     if (it == gradMap.end()) {
-      llvm::outs() << "Expected gradient in the map\n";
-      exit(1);
+      llvm::errs() << "No grad found for " << result << "\n";
+      llvm::report_fatal_error("Expected gradient in gradMap");
+      // llvm::report_fatal_error("Expected gradient in the map for " + Twine(result));
     }
     return it->second;
   }
@@ -183,8 +183,7 @@ namespace triton {
         auto resultLoops = loopUnrollByFactor(forOp, numIters);
         if (DEBUG_PRINTS) llvm::outs() << "Unrolled loop with " << numIters << " iterations\n";
       } else {
-        llvm::outs() << "[unrollAllForOps] failed to extract upper bound\n";
-        exit(1);
+        llvm::report_fatal_error("[unrollAllForOps] failed to extract upper bound\n");
       }
     }
 
