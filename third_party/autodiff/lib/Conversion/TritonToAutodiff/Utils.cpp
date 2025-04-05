@@ -37,6 +37,8 @@ namespace triton {
       attrs.append("isInserted", builder.getBoolAttr(true));
     else if (mode == visitedType::Cloned)
       attrs.append("isCloned", builder.getBoolAttr(true));
+    else if (mode == visitedType::GradPtrRebase)
+      attrs.append("isGradPtrRebase", builder.getBoolAttr(true));
     else {
       llvm::report_fatal_error("markVisited invalid visitedType value\n");
     }
@@ -95,7 +97,6 @@ namespace triton {
 
   Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder) {
 
-    // Null check
     if (!targetOp)
       return nullptr;
 
@@ -153,7 +154,136 @@ namespace triton {
   }
 
 
+  Operation* substituteBasePtr(Operation *targetOp, OpBuilder &builder, llvm::DenseMap<Value, Value> ptrToAddedPtrMap) {
 
+    if (!targetOp)
+      return nullptr;
+
+    // First identify the base pointer (block argument) we need to replace
+    Value basePtr = nullptr;
+    {
+      SmallVector<Operation*> worklist{targetOp};
+      DenseSet<Operation*> visited;
+
+      while (!worklist.empty() && !basePtr) {
+        Operation *op = worklist.back();
+        worklist.pop_back();
+
+        // If the operation was NOT newly inserted (meaning it was already in the set)
+        //  The insert method of a set in C++ (like DenseSet<Operation*> here) returns a std::pair<iterator, bool> where:
+        //  The .first element is an iterator pointing to the inserted element or to the existing element if it was already in the set
+        //  The .second element is a boolean that is true if the insertion took place or false if the element was already in the set
+        if (!visited.insert(op).second)
+          continue;
+
+        for (Value operand : op->getOperands()) {
+          if (isa<BlockArgument>(operand)) {
+            basePtr = operand;
+            break;
+          }
+
+          if (Operation *defOp = operand.getDefiningOp())
+            worklist.push_back(defOp);
+        }
+      }
+    }
+
+    IRMapping mapper;
+
+    // No base pointer found
+    if (!basePtr)
+      return nullptr;
+
+    // based on the basePtr we found (corresponds to some FuncOp arg), select gradPtr for the basePtr (previsoly in addPointerArgsToFunction I added additional args to the func, corresponding to grad pointers for every arg)
+    Value replacementPtr = ptrToAddedPtrMap[basePtr];
+    if (DEBUG_PRINTS)
+      llvm::outs() << "load's basePtr " << basePtr << " was replaced with replacementPtr " << replacementPtr << ". Dependant nodes cloned to use the new base\n";
+
+    // so the below subgraph will use the new ptr insted of original
+    mapper.map(basePtr, replacementPtr);
+
+
+    /*
+    Track operations that depend on the base pointer.
+    this is only need for early return below -- need to know what bool return
+
+      if (auto *clonedOp = mapper.lookupOrNull(targetOp))
+        return clonedOp;
+
+    */
+    DenseSet<Operation*> opsDependendingOnBasePtr;
+
+    // Recursive post-order processing function
+    std::function<std::pair<Operation*, bool>(Operation*)> processOp =
+        [&](Operation *op) -> std::pair<Operation*, bool> {
+
+      // wt this conditional, same node (e.g. make_range) is duplicated multiple times
+      if (auto *clonedOp = mapper.lookupOrNull(op))
+        return std::make_pair(clonedOp, opsDependendingOnBasePtr.contains(op));
+
+      // computed as OR of all operands
+      // iow if even one of the operands depends, then the current depends as well
+      bool dependsOnBasePtr = false;
+      Operation *resultOp;
+
+      // Clone all operations we depend on first
+      for (Value operand : op->getOperands()) {
+
+        // Skip block arguments and values already in the mapper
+        if (isa<BlockArgument>(operand)){
+
+          // todo: I don't think there can be other BlockArgs in the subtree leading to tt:load operand
+          //  because I think triton does not supprot adding two pointers, thus there can only be one base (IOW blockArgument)
+          assert(operand == basePtr);
+          dependsOnBasePtr = true;
+
+          // // there can be other BlockArguments which are not my basePtr
+          // if (operand == basePtr)
+          //   dependsOnBasePtr = true;
+          continue;
+        }
+
+        if (Operation *defOp = operand.getDefiningOp()){
+          auto [_, isCurrDepends] = processOp(defOp); // , mapper, builder)
+          dependsOnBasePtr = dependsOnBasePtr || isCurrDepends;
+        }
+      }
+
+      if (dependsOnBasePtr){
+        if (DEBUG_PRINTS) llvm::outs() << "Cloning (depends on base ptr): " << *op << "\n";
+        resultOp = builder.clone(*op, mapper);
+        markVisited(builder, visitedType::GradPtrRebase, resultOp);
+        opsDependendingOnBasePtr.insert(op);
+      } else {
+        // Reuse this operation by mapping its results to themselves
+        if (DEBUG_PRINTS) llvm::outs() << "Reusing (independent of base ptr): " << *op << "\n";
+        // todo: correct?
+        for (Value result : op->getResults())
+          mapper.map(result, result);
+        resultOp = op;
+      }
+
+      return std::make_pair(resultOp, dependsOnBasePtr);
+    };
+
+    auto [result, _] = processOp(targetOp);
+
+    return result;
+
+  }
+
+  /*
+    f = a * z
+    k = BASE_PTR + f
+    p = k - y
+
+    // ops that don't depend on REPLACED_PTR don't need to be copied
+    // ops that depend on it (directly or indirectly need to be copied)
+
+    f = a * z
+    k_copy = REPLACED_PTR + f
+    p_copy = k_copy - y
+  */
 
   // Helper to get constant integer value if possible
   static std::optional<int64_t> getConstantIntValue(Value value) {
@@ -189,6 +319,75 @@ namespace triton {
 
   }
 
+  // todo-now: simplify this
+  llvm::DenseMap<Value, Value> addPointerArgsToFunction(triton::FuncOp funcOp) {
+
+    // If the function has a body, update the entry block arguments
+    if (funcOp.isExternal())
+      llvm::report_fatal_error("FuncOp body is emtpy\n");
+
+    // Get existing function type
+    auto fnType = funcOp.getFunctionType();
+    SmallVector<Type> newInputTypes;
+    SmallVector<Type> additionalPtrTypes; // Track only the new pointer types
+
+    std::map<unsigned, unsigned> ptrIdxToAddedPtrIdxMap;
+
+    unsigned numOrigInputs = fnType.getInputs().size();
+
+    // For each argument, if it's a pointer, add a corresponding additional pointer
+    for (auto [i, inputType] : llvm::enumerate(fnType.getInputs())) {
+      newInputTypes.push_back(inputType);
+
+      if (auto ptrType = dyn_cast<triton::PointerType>(inputType)) {
+        newInputTypes.push_back(ptrType);
+        additionalPtrTypes.push_back(ptrType); // Remember only the new ones
+
+        // origPtrArgIndices.push_back(i);
+        auto numAdded = ptrIdxToAddedPtrIdxMap.size();
+        ptrIdxToAddedPtrIdxMap[i] = numOrigInputs + numAdded;
+      }
+
+    }
+
+    // Create and set the new function type
+    // isExternal() checks if the function is just a declaration without a body. If a function is external, it has no implementation block, so we don't need to add arguments to its entry block.
+    auto newFnType = FunctionType::get(funcOp.getContext(), newInputTypes,  fnType.getResults());
+    funcOp.setType(newFnType);
+
+
+    Block &entryBlock = funcOp.getBody().front();
+
+    // Only add block arguments for the newly added pointer types
+    for (auto ptrType : additionalPtrTypes) {
+      entryBlock.addArgument(ptrType, funcOp.getLoc());
+    }
+
+
+
+    // the below is only needed bc I also want to extract map from orig ptr args to the added ptr args (map from input ptr to its grad ptr)
+    // but can't get an SSA value directly from an inputType since types only describe the kind of value, not the actual value
+    // so need get Values from entryBlock instead
+    llvm::DenseMap<Value, Value> ptrToAddedPtrMap; // map: input ptr -> its grad ptr
+
+    for (auto [origIdx, addedIdx] : ptrIdxToAddedPtrIdxMap){
+      // Block.getArgument returns BlockArgument
+      // A BlockArgument is already a Value in MLIR. BlockArgument inherits from Value, so you can use it directly wherever a Value is expected.
+      // Value origPtrSSA = entryBlock.getArgument(origIdx);
+      // Value addedPtrSSA = entryBlock.getArgument(addedIdx);
+      Value origPtrSSA = dyn_cast<Value>(entryBlock.getArgument(origIdx));
+      Value addedPtrSSA = dyn_cast<Value>(entryBlock.getArgument(addedIdx));
+      ptrToAddedPtrMap[origPtrSSA] = addedPtrSSA;
+
+      if (DEBUG_PRINTS)
+        // here still see BlockArgument printing overloads due to RTTI
+        llvm::outs() << origPtrSSA << "(orig ptr) maps to " << addedPtrSSA << "(added ptr)\n";
+    }
+
+    return ptrToAddedPtrMap;
+
+
+  }
 
 } // namespace triton
 } // namespace mlir

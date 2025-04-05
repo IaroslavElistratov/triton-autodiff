@@ -45,7 +45,7 @@ namespace triton {
         "Type must be Operation*, have getOperation(), or have getDefiningOp()");
   }
 
-  enum visitedType { Original = 0, Inserted = 1, Cloned = 2 };
+  enum visitedType { Original = 0, Inserted = 1, Cloned = 2, GradPtrRebase = 3 };
 
   void markVisited(OpBuilder &builder, visitedType mode, Operation *op);
 
@@ -63,6 +63,10 @@ namespace triton {
   Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
 
   void unrollAllForOps(triton::FuncOp func);
+
+  llvm::DenseMap<Value, Value> addPointerArgsToFunction(triton::FuncOp funcOp);
+
+  Operation* substituteBasePtr(Operation *targetOp, OpBuilder &builder, llvm::DenseMap<Value, Value> ptrToAddedPtrMap);
 
 } // namespace triton
 } // namespace mlir

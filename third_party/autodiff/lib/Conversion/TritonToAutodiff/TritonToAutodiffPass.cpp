@@ -46,8 +46,11 @@ struct ConvertTritonToAutodiff
   // walk the IR backward, rewrite each operation with its corresponding backward function
   void rewriteSplatAddOp(triton::FuncOp func) {
 
+    // todo-now: undo
     unrollAllForOps(func);
-    func.getBody().front().dump();
+
+    llvm::DenseMap<Value, Value> ptrToAddedPtrMap = addPointerArgsToFunction(func);
+
 
     // printOperation(func, true);
 
@@ -105,7 +108,7 @@ struct ConvertTritonToAutodiff
 
       // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastFwdOp);
+        handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastFwdOp, ptrToAddedPtrMap);
       } else if (auto mmOp = dyn_cast<triton::DotOp>(op)){
         handleMatmulBackward(mmOp, builder, gradMap, origToCloned);
 
@@ -162,7 +165,7 @@ struct ConvertTritonToAutodiff
       }
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, builder, gradMap, origToCloned, func);
+        handleLoadBackward(loadOp, builder, gradMap, origToCloned, ptrToAddedPtrMap, func);
       }
     } // for loop over loads
 
@@ -191,15 +194,29 @@ struct ConvertTritonToAutodiff
 
   void handleStoreBackward(triton::StoreOp storeOp, OpBuilder &builder,
                           llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
-                          Operation *lastFwdOp){
-    // why .getValue works for StoreOp, but not for AddPtrOp
-    //  - getResult() only seems to work on generic Operation -- seems specific subclases (e.g. triton::SplatOp) don't have the attributes of generic Operation (unless use ->)
+                          Operation *lastFwdOp,
+                          llvm::DenseMap<Value, Value> ptrToAddedPtrMap){
 
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
     builder.setInsertionPointAfter(lastFwdOp);
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
-    Value ptr = origToCloned.lookup(storeOp->getOperand(0));
+    // Value ptr = origToCloned.lookup(storeOp->getOperand(0));
+
+    // [see code_comments]
+    //   - using substituteBasePtr in handleLoadBackward is needed so that I STORE gradients I computed NOT into the fwd args themselves, but into additional arguments representing grads of these fwd args
+    //   - using substituteBasePtr in handleStoreBackward is needed so that I LOAD **UPSTREAM** grads NOT from the "out" fwd arg directly, but from the additional argument representing grad wrt to "out"
+    //   - ==> these can be looked at as two separate goals
+    Value ptrCloned = origToCloned.lookup(storeOp->getOperand(0));
+    Operation* ptrParentWithNewBase = substituteBasePtr(ptrCloned.getDefiningOp(), builder, ptrToAddedPtrMap);
+    Value ptrWithNewBase = ptrParentWithNewBase->getResult(0);
+
+    // todo: this make it use one op before
+    // Operation* opWithNewBase = substituteBasePtr(ptr.getDefiningOp(), builder, ptrToAddedPtrMap);
+    // Value loadResult = origToCloned.lookup(loadOp.getResult());
+    // Operation* opWithNewBase = substituteBasePtr(loadResult.getDefiningOp(), builder, ptrToAddedPtrMap);
+    // Operation* opWithNewBase = substituteBasePtr(*ptr.user_begin(), builder, ptrToAddedPtrMap);
+
 
     // remember the semantics:
     // you're iterating over the backward graph (that you're
@@ -217,7 +234,7 @@ struct ConvertTritonToAutodiff
 
     auto load = builder.create<triton::LoadOp>(
         storeOp.getLoc(),
-        ptr,
+        ptrWithNewBase,
         maskCloned,
         storeOp.getCache(),  // copy cache modifier
         storeOp.getEvict(),  // copy eviction policy
@@ -225,7 +242,7 @@ struct ConvertTritonToAutodiff
     );
 
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
-    if (DEBUG_PRINTS) llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
+    // if (DEBUG_PRINTS) llvm::outs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
     // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the gradMap
     maybeAccumulateGrad(storeOp->getOperand(1), load, gradMap, builder);
 
@@ -240,6 +257,7 @@ struct ConvertTritonToAutodiff
   // this version of the func adds atomics
   void handleLoadBackward(triton::LoadOp loadOp, OpBuilder &builder,
                           llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
+                          llvm::DenseMap<Value, Value> ptrToAddedPtrMap,
                           triton::FuncOp func){
     if (DEBUG_PRINTS) printIndent() << "visiting tt.load op\n";
 
@@ -259,7 +277,7 @@ struct ConvertTritonToAutodiff
     //  At the moment this works fine because these nodes leading to opFromBwd are typically
     //  splat, make_range, etc -- and bc you're first loop done't match to these nodes this kind of
     //  works -- but it would be more robust and future proof to explicitly mark them for deletion
-    Value ptr = origToCloned.lookup(loadOp->getOperand(0));
+
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
 
     // Create a builder without setting insertion point at first, then set insertion point
@@ -277,6 +295,25 @@ struct ConvertTritonToAutodiff
     Value mask = loadOp.getMask();
     Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
 
+    // NOTE: use this ptr in the created atomicOp (or StoreOp) would essentially write gradient inplace of the original funcOp argument
+    //  but using the opWithNewBase would write the gradient wrt to the argument in the grad ptr for the argument (instead in the arg ptr itself)
+    // Value ptr = origToCloned.lookup(loadOp->getOperand(0));
+
+    // op with tree leading to it rooted at the new base (grad ptr)
+    // question-now: use loadOp directly or instead use ptr->getDefiningOp -- I think the former would give the op in the backward grpah being re-written, but the latter should give the fwd graph
+    // question-now: pass mapper as argument (e.g. origToCloned) or create a compiltely new mapper from inside the function
+
+    // todo: this make it use one op before
+    // Operation* opWithNewBase = substituteBasePtr(ptr.getDefiningOp(), builder, ptrToAddedPtrMap);
+
+    Value loadResult = origToCloned.lookup(loadOp.getResult());
+    Operation* opWithNewBase = substituteBasePtr(loadResult.getDefiningOp(), builder, ptrToAddedPtrMap);
+
+    // Operation* opWithNewBase = substituteBasePtr(*ptr.user_begin(), builder, ptrToAddedPtrMap);
+
+    Value ptrWithNewBase = opWithNewBase->getOperand(0);
+
+
     // Create an AtomicRMWOp with FADD operation instead of StoreOp
     // This will atomically add the upstream gradient to the memory location
     //
@@ -285,7 +322,7 @@ struct ConvertTritonToAutodiff
         loadOp.getLoc(),
         upstream.getType(),  // Result type
         triton::RMWOp::FADD, // Atomic add operation
-        ptr,                 // Pointer to update
+        ptrWithNewBase,      // Pointer to update
         upstream,            // Value to add
         maskCloned,          // Optional mask
         triton::MemSemantic::ACQUIRE_RELEASE, // Memory semantics
