@@ -14,6 +14,10 @@
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
+// for loop unroll
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Utils/Utils.h"
+
 #include "llvm/Support/Debug.h"
 
 namespace mlir {
@@ -146,6 +150,44 @@ namespace triton {
     // e.g. tt.store, does not have result
     // Cloned the operation (above) but don't try to return its (non-existent) result
     return clonedOp;
+  }
+
+
+
+
+  // Helper to get constant integer value if possible
+  static std::optional<int64_t> getConstantIntValue(Value value) {
+    if (!value)
+      return std::nullopt;
+
+    if (auto constOp = value.getDefiningOp<arith::ConstantOp>()) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue()))
+        return intAttr.getInt();
+    }
+    return std::nullopt;
+  }
+
+  void unrollAllForOps(triton::FuncOp func){
+
+    // Find and unroll any for loops in the function body
+    SmallVector<scf::ForOp> forOpsToUnroll;
+    func.walk([&](scf::ForOp forOp) {
+      forOpsToUnroll.push_back(forOp);
+    });
+
+    for (auto forOp : forOpsToUnroll) {
+      // Check if we can get the upper bound as a constant
+      if (auto upperBound = getConstantIntValue(forOp.getUpperBound())) {
+        unsigned numIters = *upperBound;
+        // Completely unroll
+        auto resultLoops = loopUnrollByFactor(forOp, numIters);
+        if (DEBUG_PRINTS) llvm::outs() << "Unrolled loop with " << numIters << " iterations\n";
+      } else {
+        llvm::outs() << "[unrollAllForOps] failed to extract upper bound\n";
+        exit(1);
+      }
+    }
+
   }
 
 

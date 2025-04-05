@@ -62,6 +62,7 @@ namespace triton {
 
   Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
 
+  void unrollAllForOps(triton::FuncOp func);
 
 } // namespace triton
 } // namespace mlir

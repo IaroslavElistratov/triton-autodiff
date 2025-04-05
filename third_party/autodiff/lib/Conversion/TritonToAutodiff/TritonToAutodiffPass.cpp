@@ -46,6 +46,9 @@ struct ConvertTritonToAutodiff
   // walk the IR backward, rewrite each operation with its corresponding backward function
   void rewriteSplatAddOp(triton::FuncOp func) {
 
+    unrollAllForOps(func);
+    func.getBody().front().dump();
+
     // printOperation(func, true);
 
     // assimung there's upstream grad only wrt to a single variable initially
@@ -301,19 +304,14 @@ struct ConvertTritonToAutodiff
 
     Value upstream = getUpstreamGrad(addfOp, gradMap);
 
+    // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
     // float local_grad = 1.;
 
-    // 0-th arg is not a consant, so compute grad wrt it
     Value lhs = addfOp.getOperand(0);
-    assert(!dyn_cast<arith::ConstantOp>(lhs.getDefiningOp()));
-    // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
     maybeAccumulateGrad(lhs, upstream, gradMap, builder);
 
-    // todo-high: hardcoded for my specific graph
-    // 1st arg is a constant, so grad wrt it is zero
     Value rhs = addfOp.getOperand(1);
-    Operation* rhs_producer = rhs.getDefiningOp();
-    assert(dyn_cast<arith::ConstantOp>(rhs_producer));
+    maybeAccumulateGrad(rhs, upstream, gradMap, builder);
   }
 
   void handleMulBackward(arith::MulFOp mulfOp, OpBuilder &builder,
