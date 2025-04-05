@@ -1,0 +1,97 @@
+module {
+  tt.func public @matmul_kernel(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f16>, %arg4: !tt.ptr<f16>, %arg5: !tt.ptr<f16>) attributes {noinline = false} {
+    %0 = tt.splat %arg2 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x1x!tt.ptr<f16>>
+    %1 = tt.get_program_id x {autogradVisited = true, isCloned = true} : i32
+    %c2_i32 = arith.constant {autogradVisited = true, isCloned = true} 2 : i32
+    %2 = arith.divsi %1, %c2_i32 {autogradVisited = true, isCloned = true} : i32
+    %c16_i32 = arith.constant {autogradVisited = true, isCloned = true} 16 : i32
+    %3 = arith.muli %2, %c16_i32 {autogradVisited = true, isCloned = true} : i32
+    %4 = tt.splat %3 {autogradVisited = true, isCloned = true} : i32 -> tensor<16xi32>
+    %5 = tt.make_range {autogradVisited = true, end = 16 : i32, isCloned = true, start = 0 : i32} : tensor<16xi32>
+    %6 = arith.addi %4, %5 {autogradVisited = true, isCloned = true} : tensor<16xi32>
+    %7 = tt.expand_dims %6 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi32> -> tensor<16x1xi32>
+    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<32> : tensor<16x1xi32>
+    %8 = arith.muli %7, %cst {autogradVisited = true, isCloned = true} : tensor<16x1xi32>
+    %9 = tt.addptr %0, %8 {autogradVisited = true, isCloned = true} : tensor<16x1x!tt.ptr<f16>>, tensor<16x1xi32>
+    %10 = tt.broadcast %9 {autogradVisited = true, isCloned = true} : tensor<16x1x!tt.ptr<f16>> -> tensor<16x16x!tt.ptr<f16>>
+    %11 = arith.remsi %1, %c2_i32 {autogradVisited = true, isCloned = true} : i32
+    %12 = arith.muli %11, %c16_i32 {autogradVisited = true, isCloned = true} : i32
+    %13 = tt.splat %12 {autogradVisited = true, isCloned = true} : i32 -> tensor<16xi32>
+    %14 = arith.addi %13, %5 {autogradVisited = true, isCloned = true} : tensor<16xi32>
+    %15 = tt.expand_dims %14 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi32> -> tensor<1x16xi32>
+    %16 = tt.broadcast %15 {autogradVisited = true, isCloned = true} : tensor<1x16xi32> -> tensor<16x16xi32>
+    %17 = tt.addptr %10, %16 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %18 = tt.splat %arg0 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %cst_0 = arith.constant {autogradVisited = true, isCloned = true} dense<32> : tensor<16xi32>
+    %19 = arith.remsi %6, %cst_0 {autogradVisited = true, isCloned = true} : tensor<16xi32>
+    %20 = tt.expand_dims %19 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi32> -> tensor<16x1xi32>
+    %21 = arith.muli %20, %cst {autogradVisited = true, isCloned = true} : tensor<16x1xi32>
+    %22 = tt.broadcast %21 {autogradVisited = true, isCloned = true} : tensor<16x1xi32> -> tensor<16x16xi32>
+    %23 = tt.expand_dims %5 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi32> -> tensor<1x16xi32>
+    %24 = tt.broadcast %23 {autogradVisited = true, isCloned = true} : tensor<1x16xi32> -> tensor<16x16xi32>
+    %25 = arith.addi %22, %24 {autogradVisited = true, isCloned = true} : tensor<16x16xi32>
+    %26 = tt.addptr %18, %25 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %cst_1 = arith.constant {autogradVisited = true, isCloned = true} dense<16> : tensor<16x16xi32>
+    %27 = tt.addptr %26, %cst_1 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %28 = tt.load %27 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
+    %29 = tt.splat %arg1 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %30 = tt.expand_dims %5 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi32> -> tensor<16x1xi32>
+    %31 = arith.muli %30, %cst {autogradVisited = true, isCloned = true} : tensor<16x1xi32>
+    %32 = tt.broadcast %31 {autogradVisited = true, isCloned = true} : tensor<16x1xi32> -> tensor<16x16xi32>
+    %33 = arith.remsi %14, %cst_0 {autogradVisited = true, isCloned = true} : tensor<16xi32>
+    %34 = tt.expand_dims %33 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi32> -> tensor<1x16xi32>
+    %35 = tt.broadcast %34 {autogradVisited = true, isCloned = true} : tensor<1x16xi32> -> tensor<16x16xi32>
+    %36 = arith.addi %32, %35 {autogradVisited = true, isCloned = true} : tensor<16x16xi32>
+    %37 = tt.addptr %29, %36 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %cst_2 = arith.constant {autogradVisited = true, isCloned = true} dense<512> : tensor<16x16xi32>
+    %38 = tt.addptr %37, %cst_2 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %39 = tt.load %38 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
+    %40 = tt.load %26 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
+    %41 = tt.load %37 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
+    %cst_3 = arith.constant {autogradVisited = true, isCloned = true} dense<0.000000e+00> : tensor<16x16xf32>
+    %42 = tt.dot %40, %41, %cst_3, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
+    %43 = tt.dot %28, %39, %42, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
+    %44 = arith.truncf %43 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> to tensor<16x16xf16>
+    %45 = tt.splat %arg5 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x1x!tt.ptr<f16>>
+    %46 = tt.addptr %45, %8 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x1x!tt.ptr<f16>>, tensor<16x1xi32>
+    %47 = tt.broadcast %46 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x1x!tt.ptr<f16>> -> tensor<16x16x!tt.ptr<f16>>
+    %48 = tt.addptr %47, %16 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %49 = tt.load %48 {autogradVisited = true, isInserted = true} : tensor<16x16x!tt.ptr<f16>>
+    %50 = tt.trans %41 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
+    %cst_4 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
+    %51 = tt.splat %cst_4 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
+    %52 = tt.dot %49, %50, %51, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
+    %53 = tt.trans %40 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
+    %cst_5 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
+    %54 = tt.splat %cst_5 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
+    %55 = tt.dot %53, %49, %54, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
+    %56 = tt.trans %39 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
+    %cst_6 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
+    %57 = tt.splat %cst_6 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
+    %58 = tt.dot %49, %56, %57, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
+    %59 = tt.trans %28 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
+    %cst_7 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
+    %60 = tt.splat %cst_7 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
+    %61 = tt.dot %59, %49, %60, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
+    %62 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %63 = tt.addptr %62, %36 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %64 = tt.load %63 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>
+    %65 = tt.atomic_rmw fadd, acq_rel, gpu, %63, %55 {autogradVisited = true, gradOf = "%91 = tt.load %89 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
+    %66 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %67 = tt.addptr %66, %36 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %68 = tt.addptr %67, %cst_2 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %69 = tt.load %68 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>
+    %70 = tt.atomic_rmw fadd, acq_rel, gpu, %68, %61 {autogradVisited = true, gradOf = "%96 = tt.load %94 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
+    %71 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %72 = tt.addptr %71, %25 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %73 = tt.load %72 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>
+    %74 = tt.atomic_rmw fadd, acq_rel, gpu, %72, %52 {autogradVisited = true, gradOf = "%90 = tt.load %81 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
+    %75 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %76 = tt.addptr %75, %25 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %77 = tt.addptr %76, %cst_1 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %78 = tt.load %77 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>
+    %79 = tt.atomic_rmw fadd, acq_rel, gpu, %77, %58 {autogradVisited = true, gradOf = "%95 = tt.load %93 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
+    tt.return
+  }
+}
+

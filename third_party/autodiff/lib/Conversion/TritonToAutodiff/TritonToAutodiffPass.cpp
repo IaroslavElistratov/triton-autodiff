@@ -126,6 +126,8 @@ struct ConvertTritonToAutodiff
         handleMulBackward(mulfOp, builder, gradMap, origToCloned);
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
         handleDivBackward(divfOp, builder, gradMap, origToCloned);
+      } else if (auto truncfOp = dyn_cast<arith::TruncFOp>(op)){
+        handleTruncfBackward(truncfOp, builder, gradMap);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         if (DEBUG_PRINTS) printIndent() << "visiting arith.constant op\n";
 
@@ -360,6 +362,52 @@ struct ConvertTritonToAutodiff
     maybeAccumulateGrad(rhs, upstream, gradMap, builder);
   }
 
+  void handleTruncfBackward(arith::TruncFOp truncfOp, OpBuilder &builder,
+                           llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) printIndent() << "visiting arith.truncf op\n";
+
+    /*
+    handler solves:
+      // NOTE: 97 didn't have gradient in the gradMap bc I was not matching to the "arith.truncf"
+      %97 = tt.dot %95, %96, %92
+      %100 = arith.truncf %97
+      tt.store %109, %100
+    */
+
+    Value upstream = getUpstreamGrad(truncfOp, gradMap);
+    builder.setInsertionPointAfterValue(upstream);
+
+    Value x = truncfOp.getOperand();
+
+    // // Create an extension operation to match the input type
+    // // Since we're going backward, we need to extend from result type to operand type
+    // auto extOp = builder.create<arith::ExtFOp>(
+    //     truncfOp.getLoc(),
+    //     x.getType(),  // Target type is the original input type
+    //     upstream      // Upstream gradient with the truncated type
+    // );
+
+    // maybeAccumulateGrad(x, extOp, gradMap, builder);
+
+    // markAllVisited(builder, visitedType::Inserted, extOp);
+
+
+
+    // todo-now: the problem is that I'm casting upstream gradient from float16 to float32 -- but then I'm adding [that upstream] @ [some fwd activation] where the forward activation is float16
+    /* my backward graph
+      %58 = "tt.load"(%22) tensor<16x16xf16>
+      %59 = "arith.extf"(%58) (tensor<16x16xf16>) -> tensor<16x16xf32>
+      %61 = "arith.constant"() <{value = 0.000000e+00 : f16}> () -> f16
+      %62 = "tt.splat"(%61) (f16) -> tensor<16x16xf16>
+      %60 = "tt.trans"(%51) <{order = array<i32: 1, 0>}> (tensor<16x16xf16>) -> tensor<16x16xf16>
+      // NOTE: this creates a problem because the first operand is float32, but the second operand is float16
+      %63 = "tt.dot"(%59, %60, %62)(tensor<16x16xf32>, tensor<16x16xf16>, tensor<16x16xf16>) -> tensor<16x16xf16>
+
+    */
+    maybeAccumulateGrad(x, upstream, gradMap, builder);
+
+  }
+
   void handleMulBackward(arith::MulFOp mulfOp, OpBuilder &builder,
                         llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
     if (DEBUG_PRINTS) printIndent() << "visiting arith.mulf op\n";
@@ -569,6 +617,7 @@ struct ConvertTritonToAutodiff
     // For matmul C = A * B + acc
     // dA = dC * B^T
     // dB = A^T * dC
+    // dacc = dC (gradient flows directly to accumulator)
 
     std::vector<int32_t> transOrder = {1, 0};
     auto bTrans = builder.create<triton::TransOp>(
@@ -602,12 +651,16 @@ struct ConvertTritonToAutodiff
         b.getType(),                  // Result type should match B's type
         aTrans,                       // A^T
         upstream,                     // dC
+        // todo-now: or accumualte into here (instead of maybeAccumulateGrad)
         createConstantTensor(builder, mmOp.getLoc(), b.getType(), 0.0), // zero accumulator
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
     maybeAccumulateGrad(b, gradB, gradMap, builder);
 
+    // Compute gradient for C (accumulator): dC = dOut
+    // The gradient of the accumulator is just the upstream gradient
+    maybeAccumulateGrad(c, upstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);
   }

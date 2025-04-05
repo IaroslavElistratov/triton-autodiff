@@ -85,12 +85,22 @@ namespace triton {
   }
 
   triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value) {
-    auto scalarType = builder.getF32Type();
-    auto scalarValue = builder.create<arith::ConstantOp>(loc, scalarType, builder.getF32FloatAttr(value));
-    auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
-    markVisited(builder, visitedType::Inserted, scalarValue);
-    markVisited(builder, visitedType::Inserted, tensorValue);
-    return tensorValue;
+      // Determine the element type of the tensor
+      auto tensorElemType = mlir::cast<ShapedType>(tensorType).getElementType();
+
+      // Ensure the tensor element type is either float16 or float32
+      assert((tensorElemType.isF16() || tensorElemType.isF32()) && "Tensor element type must be float16 or float32");
+
+      // Create a constant value of the appropriate type
+      auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(tensorElemType, value));
+
+      // Splat the scalar value into a tensor of the desired type
+      auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+
+      // Mark the operations as visited
+      markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+
+      return tensorValue;
   }
 
 
