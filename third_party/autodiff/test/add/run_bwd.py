@@ -28,16 +28,20 @@ add_bwd_kernel = compile("out.ttir", target=target)
 def add_bwd(a, upstream, BLOCK_SIZE=4):
     assert upstream.device == DEVICE and a.device == DEVICE
     grid = (1, 1, 1)
-    return add_bwd_kernel[grid](a, upstream)
+    a_grad = torch.zeros_like(a)
+    out = torch.empty_like(a)
+    # upstream is passed into out_grad
+    out_grad = upstream
+    _compiled_kernel = add_bwd_kernel[grid](a, out, a_grad, out_grad)
+    return _compiled_kernel, a_grad
 
 np_a = np.array([0.3990, 0.5167, 0.0249, 0.9401])
 
 a = torch.from_numpy(np_a).to(dtype=torch.float32, device='cuda:0')
 upstream = torch.ones(4, device=DEVICE)
-_compiled_kernel = add_bwd(a, upstream)
+_compiled_kernel, grad_a = add_bwd(a, upstream)
 
-# comment: grads have been written inplace of the original values
-print("grad a: ", a)
+print("grad a: ", grad_a)
 print()
 
 # compare with pytorch
@@ -51,7 +55,7 @@ print("torch grad a: ", torch_a.grad)
 print()
 
 
-if torch.allclose(a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")

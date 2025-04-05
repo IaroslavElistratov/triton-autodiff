@@ -14,7 +14,12 @@ bwd_kernel = compile("out.ttir", target=target)
 def bwd(a, b, upstream):
     assert a.device == DEVICE and b.device == DEVICE and upstream.device == DEVICE
     grid = (1, 1, 1)
-    return bwd_kernel[grid](a, b, upstream)
+    out = torch.empty_like(upstream)
+    grad_a = torch.zeros_like(a)
+    grad_b = torch.zeros_like(b)
+    out_grad = upstream
+    _compiled_kernel = bwd_kernel[grid](a, b, out, grad_a, grad_b, out_grad)
+    return _compiled_kernel, grad_a, grad_b
 
 np_a = np.array([
     [0.4963, 0.7682, 0.0885, 0.1320, 0.3074, 0.6341, 0.4901, 0.8964, 0.4556, 0.6323, 0.3489, 0.4017, 0.0223, 0.1689, 0.2939, 0.5185],
@@ -58,10 +63,10 @@ np_b = np.array([
 a = torch.from_numpy(np_a).to(dtype=torch.float32, device='cuda:0')
 b = torch.from_numpy(np_b).to(dtype=torch.float32, device='cuda:0')
 upstream = torch.ones(a.shape[0], b.shape[1]).to(dtype=torch.float32, device='cuda:0')
-_compiled_kernel = bwd(a, b, upstream)
+_compiled_kernel, grad_a, grad_b = bwd(a, b, upstream)
 
-print("grad a[:3, :3]: ", a[:3, :3])
-print("grad b[:3, :3]: ", b[:3, :3])
+print("grad a[:3, :3]: ", grad_a[:3, :3])
+print("grad b[:3, :3]: ", grad_b[:3, :3])
 print()
 
 # compare with pytorch
@@ -81,12 +86,12 @@ print("torch grad b[:3, :3]: ", torch_b.grad[:3, :3])
 print()
 
 
-if torch.allclose(a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
-if torch.allclose(b, torch_b.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_b, torch_b.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")

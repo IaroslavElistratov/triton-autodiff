@@ -1,5 +1,5 @@
 module {
-  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<f32>, %arg5: !tt.ptr<f32>) attributes {noinline = false} {
     %0 = tt.splat %arg2 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %1 = tt.get_program_id x {autogradVisited = true, isCloned = true} : i32
     %c4_i32 = arith.constant {autogradVisited = true, isCloned = true} 4 : i32
@@ -25,18 +25,30 @@ module {
     //////////////
 
     // masked load upstream
-    %16 = tt.load %6, %9 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+    %16 = tt.splat %arg5 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %17 = tt.addptr %16, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %18 = tt.load %17, %9 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
 
     // b grad: x * upstream
-    %17 = arith.mulf %11, %16 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    %19 = arith.mulf %11, %18 {autogradVisited = true, isInserted = true} : tensor<4xf32>
     // x grad: b * upstream
-    %18 = arith.mulf %14, %16 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    %20 = arith.mulf %14, %18 {autogradVisited = true, isInserted = true} : tensor<4xf32>
 
-    // masked store: b grad into b ptr
-    tt.store %13, %17, %9 {autogradVisited = true, gradOf = "%30 = tt.load %29, %24 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+    // masked store: b grad into b_grad_ptr
+    //  1) apply transformations (which were originally applied to b_ptr) to b_grad_ptr
+    %21 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %22 = tt.addptr %21, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %23 = tt.load %22, %9 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    //  2) store grad
+    %24 = tt.atomic_rmw fadd, acq_rel, gpu, %22, %19, %9 {autogradVisited = true, gradOf = "%32 = tt.load %31, %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>, tensor<4xi1>) -> tensor<4xf32>
+
     // masked store: x grad into a ptr (skipping multiplication by 1, for add bwd)
-    tt.store %8, %18, %9 {autogradVisited = true, gradOf = "%27 = tt.load %26, %24 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
-
+    //  1) apply transformations (which were originally applied to a_ptr) to x_grad_ptr
+    %25 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %26 = tt.addptr %25, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %27 = tt.load %26, %9 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    //  2) store grad
+    %28 = tt.atomic_rmw fadd, acq_rel, gpu, %26, %20, %9 {autogradVisited = true, gradOf = "%29 = tt.load %28, %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>, tensor<4xi1>) -> tensor<4xf32>
     tt.return
   }
 }

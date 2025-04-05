@@ -12,7 +12,13 @@ bwd_kernel = compile("out.ttir", target=target)
 
 def bwd(a, b, c, upstream):
     grid = (1, 1, 1)
-    return bwd_kernel[grid](a, b, c, upstream)
+    out = torch.empty_like(a)
+    grad_a = torch.zeros_like(a)
+    grad_b = torch.zeros_like(b)
+    grad_c = torch.zeros_like(c)
+    grad_out = upstream
+    _compiled_kernel = bwd_kernel[grid](a, b, c, out, grad_a, grad_b, grad_c, grad_out)
+    return _compiled_kernel, grad_a, grad_b, grad_c
 
 np_a = np.array([ 0.7578,  2.1274, -0.5905,  0.8350])
 np_b = np.array([ 0.6962,  0.5211,  1.3674, -0.7933])
@@ -25,10 +31,10 @@ c = torch.from_numpy(np_c).to(dtype=torch.float32, device='cuda:0')
 
 
 upstream = torch.ones_like(a)
-_compiled_kernel = bwd(a, b, c, upstream)
-print("grad a: ", a)
-print("grad b: ", b)
-print("grad c: ", c)
+_compiled_kernel, grad_a, grad_b, grad_c = bwd(a, b, c, upstream)
+print("grad a: ", grad_a)
+print("grad b: ", grad_b)
+print("grad c: ", grad_c)
 print()
 
 # compare with pytorch
@@ -59,17 +65,17 @@ print("torch grad c: ", torch_c.grad)
 print()
 
 
-if torch.allclose(a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
-if torch.allclose(b, torch_b.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_b, torch_b.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
-if torch.allclose(c, torch_c.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_c, torch_c.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")

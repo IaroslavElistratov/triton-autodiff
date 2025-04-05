@@ -11,15 +11,20 @@ target = GPUTarget("cuda", arch=89, warp_size=32)
 bwd_kernel = compile("out.ttir", target=target)
 
 
-def bwd(a, upstream): # , BLOCK_SIZE=4
-    return bwd_kernel[(1, 1, 1)](a, upstream)
+def bwd(a, upstream):
+    out = torch.empty_like(a)
+    grad_out = upstream
+    grad_a = torch.zeros_like(a)
+    _compiled_kernel = bwd_kernel[(1, 1, 1)](a, out, grad_a, grad_out)
+    return _compiled_kernel, grad_a
+
 
 np_a = np.array([0.3990, 0.5167, 0.0249, 0.9401])
 a = torch.from_numpy(np_a).to(dtype=torch.float32, device='cuda:0')
 
 upstream = torch.ones_like(a)
-_compiled_kernel = bwd(a, upstream)
-print("grad a: ", a)
+_compiled_kernel, grad_a = bwd(a, upstream)
+print("grad a: ", grad_a)
 print()
 
 # compare with pytorch
@@ -34,7 +39,7 @@ print("torch grad a: ", torch_a.grad)
 print()
 
 
-if torch.allclose(a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(grad_a, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")

@@ -1,5 +1,5 @@
 module {
-  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+  tt.func public @add_kernel(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32>, %arg4: !tt.ptr<f32>, %arg5: !tt.ptr<f32>) attributes {noinline = false} {
 
     // block_start = pid * BLOCK_SIZE
     %1 = tt.get_program_id x {autogradVisited = true, isCloned = true} : i32
@@ -39,19 +39,33 @@ module {
     // backward //
     //////////////
 
-    // load upstream
-    %15 = tt.load %6 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
+    // load upstream (replaying some transformations which were applied to out_ptr, now applied to grad_out_ptr)
+    %15 = tt.splat %arg5 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %16 = tt.addptr %15, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %17 = tt.load %16 {autogradVisited = true, isInserted = true} : tensor<4x!tt.ptr<f32>>
 
     // grad b: x * upstream
-    %16 = arith.mulf %10, %15 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    %18 = arith.mulf %10, %17 {autogradVisited = true, isInserted = true} : tensor<4xf32>
     // grad x: b * upstream
-    %17 = arith.mulf %13, %15 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    %19 = arith.mulf %13, %17 {autogradVisited = true, isInserted = true} : tensor<4xf32>
 
-    // store grad b at b ptr
-    tt.store %12, %16 {autogradVisited = true, gradOf = "%28 = tt.load %27 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
-    // store grad x at a ptr (omitting multiplying by 1 for differentiating though add)
-    tt.store %8, %17 {autogradVisited = true, gradOf = "%25 = tt.load %24 : tensor<4x!tt.ptr<f32>>", isInserted = true} : tensor<4x!tt.ptr<f32>>
+    // store grad b at b_grad_ptr
+    //  1) load b_grad (replaying transformations that were applied to b_ptr)
+    %20 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %21 = tt.addptr %20, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %22 = tt.load %21 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    //  2) store b grad
+    %23 = tt.atomic_rmw fadd, acq_rel, gpu, %21, %18 {autogradVisited = true, gradOf = "%30 = tt.load %29 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+
+    // store grad x at a_grad_ptr (omitting multiplying by 1 for differentiating though add)
+    //  1) load a_ptr (replaying transformations that were applied to a_ptr)
+    %24 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %25 = tt.addptr %24, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %26 = tt.load %25 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    //  2) store a grad
+    %27 = tt.atomic_rmw fadd, acq_rel, gpu, %25, %19 {autogradVisited = true, gradOf = "%27 = tt.load %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }
 
+// todo: in these sample cases atomic add is not needed
