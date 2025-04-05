@@ -235,11 +235,13 @@ struct ConvertTritonToAutodiff
     // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
   }
 
+  // todo-now:
+  //  Don't just blindly add atomics in all cases, instead have an anylysis pass of what kernel instances actaully confifct and add finer grained atomics (locks) only for them
+  // this version of the func adds atomics
   void handleLoadBackward(triton::LoadOp loadOp, OpBuilder &builder,
                           llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
                           triton::FuncOp func){
     if (DEBUG_PRINTS) printIndent() << "visiting tt.load op\n";
-    // traverse parents to find the initial pointer
 
     Value upstream = getUpstreamGrad(loadOp, gradMap);
     // question-now:
@@ -274,19 +276,27 @@ struct ConvertTritonToAutodiff
     // auto newOp = builder.create<triton::StoreOp>(loadOp.getLoc(), TypeRange(), operands);
     Value mask = loadOp.getMask();
     Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
-    auto store = builder.create<triton::StoreOp>(
-      loadOp.getLoc(),
-      ptr,
-      upstream,
-      maskCloned,
-      triton::CacheModifier::NONE,
-      triton::EvictionPolicy::NORMAL);
+
+    // Create an AtomicRMWOp with FADD operation instead of StoreOp
+    // This will atomically add the upstream gradient to the memory location
+    //
+    // NOTE: atomics are needed bc e.g. tiled matmul accesses same memory locations of input A from different instances of the kernel -- see Done/loop/my.png
+    auto atomicOp = builder.create<triton::AtomicRMWOp>(
+        loadOp.getLoc(),
+        upstream.getType(),  // Result type
+        triton::RMWOp::FADD, // Atomic add operation
+        ptr,                 // Pointer to update
+        upstream,            // Value to add
+        maskCloned,          // Optional mask
+        triton::MemSemantic::ACQUIRE_RELEASE, // Memory semantics
+        triton::MemSyncScope::GPU             // Memory scope
+    );
 
     // todo-high: note this op does not add anything to the gradMap, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
 
-    markVisited(builder, visitedType::Inserted, store);
+    markVisited(builder, visitedType::Inserted, atomicOp);
 
     // Record original operation for debugging
     // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
@@ -294,8 +304,7 @@ struct ConvertTritonToAutodiff
     std::string opStr;
     llvm::raw_string_ostream os(opStr);
     loadOp->print(os);
-    store->setAttr("gradOf", builder.getStringAttr(opStr));
-
+    atomicOp->setAttr("gradOf", builder.getStringAttr(opStr));
   }
 
   void handleAddBackward(arith::AddFOp addfOp, OpBuilder &builder,
