@@ -48,8 +48,16 @@ struct ConvertTritonToAutodiff
 
     // todo-now: undo
     unrollAllForOps(func);
+    if (DEBUG_PRINTS) {
+      llvm::outs() << "flattening for loop:\n";
+      func.getBody().front().print(llvm::outs());
+      llvm::outs() << "\n";
+    }
 
     llvm::DenseMap<Value, Value> ptrToAddedPtrMap = addPointerArgsToFunction(func);
+    if (DEBUG_PRINTS) {
+      llvm::outs() << "adding new pointers:\n" << func.getFunctionType().getInputs() << "\n\n";
+    }
 
 
     // printOperation(func, true);
@@ -81,6 +89,10 @@ struct ConvertTritonToAutodiff
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder.setInsertionPointAfter(lastFwdOp);
 
+    if (DEBUG_PRINTS) {
+      llvm::outs() << "after clonning:\n";
+      func.getBody().front().print(llvm::outs());
+    }
 
     // the above mapping: original nodes -> inserted nodes.
     // To lookup intermideats in the cloned (aka cloned subgraph),
@@ -105,6 +117,14 @@ struct ConvertTritonToAutodiff
           if (DEBUG_PRINTS) llvm::outs() << "Skipping visited" << "\n";
           continue;
       }
+
+      if (DEBUG_PRINTS) llvm::outs() << "\n\n\niterating over op " << *op << "\n";
+
+
+      // print only if changed
+      std::string initialIR;
+      llvm::raw_string_ostream initialStream(initialIR);
+      entryBlock->print(initialStream);
 
       // triton ops
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
@@ -146,6 +166,19 @@ struct ConvertTritonToAutodiff
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
       // (otherwise users can have unsorted ops in their programs, and mine will just silently fail)
+
+      // cleaner and more robust than adding printing to each handler
+      if (DEBUG_PRINTS) {
+        std::string currentIR;
+        llvm::raw_string_ostream currentStream(currentIR);
+        entryBlock->print(currentStream);
+        if (initialIR != currentIR){
+          // llvm::outs() << entryBlock->print();
+          // dump writes to std err, but I want these be in "sync" with my other prints --
+          llvm::raw_ostream &os = llvm::outs();
+          entryBlock->print(os);
+        }
+      }
 
     } // for loop over ops
 
@@ -334,7 +367,6 @@ struct ConvertTritonToAutodiff
     // todo-high: note this op does not add anything to the gradMap, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
-
     markVisited(builder, visitedType::Inserted, atomicOp);
 
     // Record original operation for debugging
