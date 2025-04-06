@@ -145,18 +145,18 @@ print("torch grad b: ", torch_b.grad)
 print()
 
 print(torch.abs(grad_a - torch_a.grad).mean())
-print(torch.abs(grad_a - torch_b.grad).mean())
+print(torch.abs(grad_b - torch_b.grad).mean())
 print()
 
 
 
-if torch.allclose(grad_a, torch_a.grad.to(dtype=torch.float16), atol=1e-2, rtol=0.02):
+if torch.allclose(grad_a, torch_a.grad.to(dtype=torch.float16), atol=1e-2, rtol=0.001):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
 
-if torch.allclose(grad_a, torch_b.grad.to(dtype=torch.float16), atol=1e-2, rtol=0.02):
+if torch.allclose(grad_b, torch_b.grad.to(dtype=torch.float16), atol=1e-2, rtol=0.001):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
