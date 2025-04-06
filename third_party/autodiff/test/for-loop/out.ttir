@@ -72,22 +72,23 @@ module {
 
     // grad accum
     %26 = arith.mulf %6, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
     // grad a
-    %27 = arith.mulf %8, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    %27 = arith.mulf %20, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
 
     // grad accum
     %28 = arith.mulf %6, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
     // grad a
     %29 = arith.mulf %14, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // sum grad of a
+    %30 = arith.addf %27, %29 {autogradVisited = true, isInserted = true} : tensor<4xf32>
 
-    // grad accum
-    %30 = arith.mulf %6, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+
     // grad a
-    %31 = arith.mulf %20, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
-
-    // sum up all grad of a
-    %32 = arith.addf %31, %29 {autogradVisited = true, isInserted = true} : tensor<4xf32>
-    %33 = arith.addf %32, %27 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    %32 = arith.mulf %8, %25 {autogradVisited = true, isInserted = true} : tensor<4xf32>
+    // sum grad of a
+    %33 = arith.addf %30, %32 {autogradVisited = true, isInserted = true} : tensor<4xf32>
 
     // todo: it writes the same thing that it loaded (upstream) -- useless
     %34 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>

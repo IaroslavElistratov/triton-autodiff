@@ -69,7 +69,11 @@ namespace triton {
       auto existingGrad = it->second;
 
       // otherwise "does not dominate its use"  err
-      builder.setInsertionPointAfterValue(existingGrad);
+      // Note: when the grad value was defined by an op which was inserted by
+      //  a handler which called setInsertionPointAfterLastUse, that means the
+      //  grad Value is already inserted into the graph after last use of the
+      //  upstream value (IOW existingGrad value)
+      builder.setInsertionPointAfterValue(grad);
 
       // // todo: don't use atomics unless needed (requires some analysis pass
       // // to identify if this accesses the same memory location)
