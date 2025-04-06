@@ -393,5 +393,42 @@ namespace triton {
     return ptrToAddedPtrMap;
   }
 
+
+
+
+  // find the last operation with a specific attribute among users of an SSA value
+  Operation* findLastNodeWithAttribute(Value val, StringRef attrName) {
+
+    // fallback in case there are no operations in the bwd graph (being built) that use the "val"
+    Operation* lastOpWithAttr = val.getDefiningOp();
+
+    for (Operation* user : val.getUsers()) {
+
+      if (user->hasAttr(attrName) && lastOpWithAttr->isBeforeInBlock(user)) {
+        lastOpWithAttr = user;
+      }
+
+      // Recursively check the users of each result of this operation
+      for (Value result : user->getResults()) {
+        Operation* childWithAttr = findLastNodeWithAttribute(result, attrName);
+        if (lastOpWithAttr->isBeforeInBlock(childWithAttr)) {
+          lastOpWithAttr = childWithAttr;
+        }
+      }
+    }
+
+    assert(lastOpWithAttr);
+
+    return lastOpWithAttr;
+  }
+
+  // set insertion point after the **LAST USE** (in the bwd graph being re-written) of gradient value they depend on
+  // IOW: the last SSA value from the bwd (differentiated so far) that used the gradient value
+  void setInsertionPointAfterLastUse(Value val, OpBuilder &builder){
+    Operation* lastUseInBwd = findLastNodeWithAttribute(val, "isInserted");
+    builder.setInsertionPointAfter(lastUseInBwd);
+  }
+
+
 } // namespace triton
 } // namespace mlir

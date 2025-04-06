@@ -68,6 +68,8 @@ namespace triton {
 
   Operation* substituteBasePtr(Operation *targetOp, OpBuilder &builder, llvm::DenseMap<Value, Value> ptrToAddedPtrMap);
 
+  void setInsertionPointAfterLastUse(Value val, OpBuilder &builder);
+
 } // namespace triton
 } // namespace mlir
 
