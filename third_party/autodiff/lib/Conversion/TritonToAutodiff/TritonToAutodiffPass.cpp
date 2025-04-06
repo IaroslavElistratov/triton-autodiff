@@ -242,16 +242,9 @@ struct ConvertTritonToAutodiff
     //   - using substituteBasePtr in handleLoadBackward is needed so that I STORE gradients I computed NOT into the fwd args themselves, but into additional arguments representing grads of these fwd args
     //   - using substituteBasePtr in handleStoreBackward is needed so that I LOAD **UPSTREAM** grads NOT from the "out" fwd arg directly, but from the additional argument representing grad wrt to "out"
     //   - ==> these can be looked at as two separate goals
-    Value ptrCloned = origToCloned.lookup(storeOp->getOperand(0));
-    Operation* ptrParentWithNewBase = substituteBasePtr(ptrCloned.getDefiningOp(), builder, ptrToAddedPtrMap);
-    Value ptrWithNewBase = ptrParentWithNewBase->getResult(0);
-
-    // todo: this make it use one op before
-    // Operation* opWithNewBase = substituteBasePtr(ptr.getDefiningOp(), builder, ptrToAddedPtrMap);
-    // Value loadResult = origToCloned.lookup(loadOp.getResult());
-    // Operation* opWithNewBase = substituteBasePtr(loadResult.getDefiningOp(), builder, ptrToAddedPtrMap);
-    // Operation* opWithNewBase = substituteBasePtr(*ptr.user_begin(), builder, ptrToAddedPtrMap);
-
+    Value clonedPtr = origToCloned.lookup(storeOp.getPtr());
+    Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, ptrToAddedPtrMap);
+    Value clonedPtrRebased = clonedPtrOpRebased->getResult(0);
 
     // remember the semantics:
     // you're iterating over the backward graph (that you're
@@ -269,7 +262,7 @@ struct ConvertTritonToAutodiff
 
     auto load = builder.create<triton::LoadOp>(
         storeOp.getLoc(),
-        ptrWithNewBase,
+        clonedPtrRebased,
         maskCloned,
         storeOp.getCache(),  // copy cache modifier
         storeOp.getEvict(),  // copy eviction policy
@@ -297,23 +290,6 @@ struct ConvertTritonToAutodiff
     if (DEBUG_PRINTS) printIndent() << "visiting tt.load op\n";
 
     Value upstream = getUpstreamGrad(loadOp, gradMap);
-    // question-now:
-    //  here and everywhere where you use lookup to get clonedOp (i.e. op from the fwd graph),
-    //  explicitly mark subgraph leading to original op (that you use in the lookup) for deletion?
-    //  So that you don't match to them in my first loop.
-    //  IOW: Basically you're iterating over the bwd graph, and matching to ops, and re-writing these
-    //  ops with bwd formulas, and when you need some intermidiate for a bwd formula you use that
-    //  intermidiate from fwd (by doing "opFromFwd = origToCloned.lookup(opFromBwd)")
-    //  but there is still subgraph of nodes leading to "opFromBwd" -- you don't use opFromBwd,
-    //  and subsequently all the nodes that produced that node.
-    //  Because you don't set isAutogradVisited attribute on these nodes, they subsequently get
-    //  deleted by my 3rd loop. But you're first loop may match to these nodes again
-    //  (you just processed them here and thus you don't want 1st loop to match to them again).
-    //  At the moment this works fine because these nodes leading to opFromBwd are typically
-    //  splat, make_range, etc -- and bc you're first loop done't match to these nodes this kind of
-    //  works -- but it would be more robust and future proof to explicitly mark them for deletion
-
-    // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
 
     // Create a builder without setting insertion point at first, then set insertion point
     // Seems no constructor to specify "InsertionPointAfter" at the time of construction
@@ -330,15 +306,19 @@ struct ConvertTritonToAutodiff
     Value mask = loadOp.getMask();
     Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
 
+    // op with tree (pointer arithmetic) leading to it rooted at the new base (grad ptr)
+    //
     // NOTE: use this ptr in the created atomicOp (or StoreOp) would essentially write gradient inplace of the original funcOp argument
-    //  but using the opWithNewBase would write the gradient wrt to the argument in the grad ptr for the argument (instead in the arg ptr itself)
+    //  but using the opWithNewBase would write the gradient wrt to the argument in the grad ptr for the argument (instead of in the arg ptr itself)
     // Value ptr = origToCloned.lookup(loadOp->getOperand(0));
+    //
+    // NOTE: use origToCloned.lookup(loadOp->getOperand(0))->getDefiningOp instead of loadOp
+    //  directly -- I think the latter would give the op in the backward graph being re-written,
+    //  but the latter should give the fwd graph. And since I want my "cloning/or-reusing logic"
+    //  (in substituteBasePtr) to re-use intermideats from fwd -- I'm passing the op from the fwd
+    //  graph (accessed via origToCloned)
 
-    // op with tree leading to it rooted at the new base (grad ptr)
-    // question-now: use loadOp directly or instead use ptr->getDefiningOp -- I think the former would give the op in the backward grpah being re-written, but the latter should give the fwd graph
-    // question-now: pass mapper as argument (e.g. origToCloned) or create a compiltely new mapper from inside the function
-
-    // todo: this make it use one op before
+    // todo: this makes it use one op before
     // Operation* opWithNewBase = substituteBasePtr(ptr.getDefiningOp(), builder, ptrToAddedPtrMap);
 
     Value loadResult = origToCloned.lookup(loadOp.getResult());
@@ -352,7 +332,8 @@ struct ConvertTritonToAutodiff
     // Create an AtomicRMWOp with FADD operation instead of StoreOp
     // This will atomically add the upstream gradient to the memory location
     //
-    // NOTE: atomics are needed bc e.g. tiled matmul accesses same memory locations of input A from different instances of the kernel -- see Done/loop/my.png
+    // NOTE: atomics are needed bc e.g. tiled matmul accesses same memory locations
+    // of input A from different instances of the kernel -- see Done/6_/my.png
     auto atomicOp = builder.create<triton::AtomicRMWOp>(
         loadOp.getLoc(),
         upstream.getType(),  // Result type
@@ -364,10 +345,13 @@ struct ConvertTritonToAutodiff
         triton::MemSyncScope::GPU             // Memory scope
     );
 
-    // todo-high: note this op does not add anything to the gradMap, bc here I'm manually traversing inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so that they will not be switched on (IOW iterated over) by this loop
+    // todo-high: note this op does not add anything to the gradMap, bc here I'm manually traversing
+    // inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so
+    // that they will not be switched on (IOW iterated over) by this loop
+    markVisited(builder, visitedType::Inserted, atomicOp);
+
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
-    markVisited(builder, visitedType::Inserted, atomicOp);
 
     // Record original operation for debugging
     // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
@@ -425,7 +409,7 @@ struct ConvertTritonToAutodiff
 
 
 
-    // todo-now: the problem is that I'm casting upstream gradient from float16 to float32 -- but then I'm adding [that upstream] @ [some fwd activation] where the forward activation is float16
+    // todo-high: the problem is that I'm casting upstream gradient from float16 to float32 -- but then I'm adding [that upstream] @ [some fwd activation] where the forward activation is float16
     /* my backward graph
       %58 = "tt.load"(%22) tensor<16x16xf16>
       %59 = "arith.extf"(%58) (tensor<16x16xf16>) -> tensor<16x16xf32>
@@ -683,7 +667,7 @@ struct ConvertTritonToAutodiff
         b.getType(),                  // Result type should match B's type
         aTrans,                       // A^T
         upstream,                     // dC
-        // todo-now: or accumualte into here (instead of maybeAccumulateGrad)
+        // todo-high: or accumualte into here (instead of maybeAccumulateGrad)
         createConstantTensor(builder, mmOp.getLoc(), b.getType(), 0.0), // zero accumulator
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
