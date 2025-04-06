@@ -37,9 +37,8 @@ module {
     //  1) load grad_a replaying transformations (which were originally applied to a_ptr) now replay on top of grad_a_ptr
     %14 = tt.splat %arg2 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %15 = tt.addptr %14, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %16 = tt.load %15 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
     //  2) store grad
-    %17 = tt.atomic_rmw fadd, acq_rel, gpu, %15, %13 {autogradVisited = true, gradOf = "%17 = tt.load %16 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %16 = tt.atomic_rmw fadd, acq_rel, gpu, %15, %13 {autogradVisited = true, gradOf = "%17 = tt.load %16 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }

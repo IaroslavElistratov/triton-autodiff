@@ -29,8 +29,7 @@ module {
     // store upstream into grad of a (because derivative of add is one, skipping multiplication of local by upstream here)
     %10 = tt.splat %arg2 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %11 = tt.addptr %10, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %12 = tt.load %11 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
-    %13 = tt.atomic_rmw fadd, acq_rel, gpu, %11, %9 {autogradVisited = true, gradOf = "%13 = tt.load %12 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %12 = tt.atomic_rmw fadd, acq_rel, gpu, %11, %9 {autogradVisited = true, gradOf = "%13 = tt.load %12 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }

@@ -318,16 +318,9 @@ struct ConvertTritonToAutodiff
     //  (in substituteBasePtr) to re-use intermideats from fwd -- I'm passing the op from the fwd
     //  graph (accessed via origToCloned)
 
-    // todo: this makes it use one op before
-    // Operation* opWithNewBase = substituteBasePtr(ptr.getDefiningOp(), builder, ptrToAddedPtrMap);
-
-    Value loadResult = origToCloned.lookup(loadOp.getResult());
-    Operation* opWithNewBase = substituteBasePtr(loadResult.getDefiningOp(), builder, ptrToAddedPtrMap);
-
-    // Operation* opWithNewBase = substituteBasePtr(*ptr.user_begin(), builder, ptrToAddedPtrMap);
-
-    Value ptrWithNewBase = opWithNewBase->getOperand(0);
-
+    Value clonedPtr = origToCloned.lookup(loadOp.getPtr());
+    Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, ptrToAddedPtrMap);
+    Value clonedPtrRebased = clonedPtrOpRebased->getResult(0);
 
     // Create an AtomicRMWOp with FADD operation instead of StoreOp
     // This will atomically add the upstream gradient to the memory location
@@ -338,7 +331,7 @@ struct ConvertTritonToAutodiff
         loadOp.getLoc(),
         upstream.getType(),  // Result type
         triton::RMWOp::FADD, // Atomic add operation
-        ptrWithNewBase,      // Pointer to update
+        clonedPtrRebased,    // Pointer to update
         upstream,            // Value to add
         maskCloned,          // Optional mask
         triton::MemSemantic::ACQUIRE_RELEASE, // Memory semantics

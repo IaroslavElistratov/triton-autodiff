@@ -52,17 +52,16 @@ module {
     //  1) apply transformations (which were originally applied to b_ptr) on top of b_grad_ptr
     %21 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %22 = tt.addptr %21, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %23 = tt.load %22 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
     //  2) store grad
-    %24 = tt.atomic_rmw fadd, acq_rel, gpu, %22, %20 {autogradVisited = true, gradOf = "%27 = tt.load %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %23 = tt.atomic_rmw fadd, acq_rel, gpu, %22, %20 {autogradVisited = true, gradOf = "%27 = tt.load %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
 
     // store a downstream
     //  1) apply transformations (which were originally applied to a_ptr) on top of a_grad_ptr
-    %25 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %26 = tt.addptr %25, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %27 = tt.load %26 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    %24 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %25 = tt.addptr %24, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
     //  2) store grad
-    %28 = tt.atomic_rmw fadd, acq_rel, gpu, %26, %15 {autogradVisited = true, gradOf = "%24 = tt.load %23 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %26 = tt.atomic_rmw fadd, acq_rel, gpu, %25, %15 {autogradVisited = true, gradOf = "%24 = tt.load %23 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }
+

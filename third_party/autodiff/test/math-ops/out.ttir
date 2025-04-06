@@ -57,16 +57,13 @@ module {
     %47 = arith.mulf %46, %37 {autogradVisited = true, isInserted = true} : tensor<4xf32>
     %48 = tt.splat %arg6 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %49 = tt.addptr %48, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %50 = tt.load %49 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
-    %51 = tt.atomic_rmw fadd, acq_rel, gpu, %49, %47 {autogradVisited = true, gradOf = "%57 = tt.load %56 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
-    %52 = tt.splat %arg5 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %53 = tt.addptr %52, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %54 = tt.load %53 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
-    %55 = tt.atomic_rmw fadd, acq_rel, gpu, %53, %41 {autogradVisited = true, gradOf = "%54 = tt.load %53 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
-    %56 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %57 = tt.addptr %56, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %58 = tt.load %57 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
-    %59 = tt.atomic_rmw fadd, acq_rel, gpu, %57, %42 {autogradVisited = true, gradOf = "%51 = tt.load %50 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %50 = tt.atomic_rmw fadd, acq_rel, gpu, %49, %47 {autogradVisited = true, gradOf = "%57 = tt.load %56 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %51 = tt.splat %arg5 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %52 = tt.addptr %51, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %53 = tt.atomic_rmw fadd, acq_rel, gpu, %52, %41 {autogradVisited = true, gradOf = "%54 = tt.load %53 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %54 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %55 = tt.addptr %54, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %56 = tt.atomic_rmw fadd, acq_rel, gpu, %55, %42 {autogradVisited = true, gradOf = "%51 = tt.load %50 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }

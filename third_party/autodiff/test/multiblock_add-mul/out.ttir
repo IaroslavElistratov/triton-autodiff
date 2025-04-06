@@ -53,19 +53,16 @@ module {
     //  1) load b_grad (replaying transformations that were applied to b_ptr)
     %20 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %21 = tt.addptr %20, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %22 = tt.load %21 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
     //  2) store b grad
-    %23 = tt.atomic_rmw fadd, acq_rel, gpu, %21, %18 {autogradVisited = true, gradOf = "%30 = tt.load %29 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %22 = tt.atomic_rmw fadd, acq_rel, gpu, %21, %18 {autogradVisited = true, gradOf = "%30 = tt.load %29 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
 
     // store grad x at a_grad_ptr (omitting multiplying by 1 for differentiating though add)
     //  1) load a_ptr (replaying transformations that were applied to a_ptr)
-    %24 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %25 = tt.addptr %24, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %26 = tt.load %25 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    %23 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %24 = tt.addptr %23, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
     //  2) store a grad
-    %27 = tt.atomic_rmw fadd, acq_rel, gpu, %25, %19 {autogradVisited = true, gradOf = "%27 = tt.load %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %25 = tt.atomic_rmw fadd, acq_rel, gpu, %24, %19 {autogradVisited = true, gradOf = "%27 = tt.load %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }
 
-// todo: in these sample cases atomic add is not needed

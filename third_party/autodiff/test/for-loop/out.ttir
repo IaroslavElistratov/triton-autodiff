@@ -92,14 +92,12 @@ module {
     // todo: it writes the same thing that it loaded (upstream) -- useless
     %34 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %35 = tt.addptr %34, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %36 = tt.load %35 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
-    %37 = tt.atomic_rmw fadd, acq_rel, gpu, %35, %25 {autogradVisited = true, gradOf = "%40 = tt.load %39 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %36 = tt.atomic_rmw fadd, acq_rel, gpu, %35, %25 {autogradVisited = true, gradOf = "%40 = tt.load %39 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
 
     // store grad a
-    %38 = tt.splat %arg2 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %39 = tt.addptr %38, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %40 = tt.load %39 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
-    %41 = tt.atomic_rmw fadd, acq_rel, gpu, %39, %33 {autogradVisited = true, gradOf = "%37 = tt.load %36 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
+    %37 = tt.splat %arg2 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %38 = tt.addptr %37, %1 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
+    %39 = tt.atomic_rmw fadd, acq_rel, gpu, %38, %33 {autogradVisited = true, gradOf = "%37 = tt.load %36 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>) -> tensor<4xf32>
     tt.return
   }
 }

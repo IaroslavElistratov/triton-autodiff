@@ -38,17 +38,16 @@ module {
     //  1) apply transformations (which were originally applied to b_ptr) to b_grad_ptr
     %21 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
     %22 = tt.addptr %21, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %23 = tt.load %22, %9 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
     //  2) store grad
-    %24 = tt.atomic_rmw fadd, acq_rel, gpu, %22, %19, %9 {autogradVisited = true, gradOf = "%32 = tt.load %31, %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>, tensor<4xi1>) -> tensor<4xf32>
+    %23 = tt.atomic_rmw fadd, acq_rel, gpu, %22, %19, %9 {autogradVisited = true, gradOf = "%32 = tt.load %31, %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>, tensor<4xi1>) -> tensor<4xf32>
+
 
     // masked store: x grad into a ptr (skipping multiplication by 1, for add bwd)
     //  1) apply transformations (which were originally applied to a_ptr) to x_grad_ptr
-    %25 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
-    %26 = tt.addptr %25, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
-    %27 = tt.load %26, %9 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>
+    %24 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>
+    %25 = tt.addptr %24, %5 {autogradVisited = true, isGradPtrRebase = true} : tensor<4x!tt.ptr<f32>>, tensor<4xi32>
     //  2) store grad
-    %28 = tt.atomic_rmw fadd, acq_rel, gpu, %26, %20, %9 {autogradVisited = true, gradOf = "%29 = tt.load %28, %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>, tensor<4xi1>) -> tensor<4xf32>
+    %26 = tt.atomic_rmw fadd, acq_rel, gpu, %25, %20, %9 {autogradVisited = true, gradOf = "%29 = tt.load %28, %26 : tensor<4x!tt.ptr<f32>>", isInserted = true} : (tensor<4x!tt.ptr<f32>>, tensor<4xf32>, tensor<4xi1>) -> tensor<4xf32>
     tt.return
   }
 }

@@ -56,17 +56,15 @@ module {
     //  1) apply same transformations (which were applied to the base b_ptr) to b_grad_ptr
     %25 = tt.splat %arg4 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
     %26 = tt.addptr %25, %7 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
-    %27 = tt.load %26 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f32>>
     //  2) store
-    %28 = tt.atomic_rmw fadd, acq_rel, gpu, %26, %24 {autogradVisited = true, gradOf = "%37 = tt.load %36 : tensor<16x16x!tt.ptr<f32>>", isInserted = true} : (tensor<16x16x!tt.ptr<f32>>, tensor<16x16xf32>) -> tensor<16x16xf32>
+    %27 = tt.atomic_rmw fadd, acq_rel, gpu, %26, %24 {autogradVisited = true, gradOf = "%37 = tt.load %36 : tensor<16x16x!tt.ptr<f32>>", isInserted = true} : (tensor<16x16x!tt.ptr<f32>>, tensor<16x16xf32>) -> tensor<16x16xf32>
 
     // store a grad into a grad ptr
     //  1) apply same transformations (which were applied to the base a_ptr) to a_grad_ptr
-    %29 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
-    %30 = tt.addptr %29, %7 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
-    %31 = tt.load %30 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f32>>
+    %28 = tt.splat %arg3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<16x16x!tt.ptr<f32>>
+    %29 = tt.addptr %28, %7 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f32>>, tensor<16x16xi32>
     //  2) store
-    %32 = tt.atomic_rmw fadd, acq_rel, gpu, %30, %21 {autogradVisited = true, gradOf = "%34 = tt.load %33 : tensor<16x16x!tt.ptr<f32>>", isInserted = true} : (tensor<16x16x!tt.ptr<f32>>, tensor<16x16xf32>) -> tensor<16x16xf32>
+    %30 = tt.atomic_rmw fadd, acq_rel, gpu, %29, %21 {autogradVisited = true, gradOf = "%34 = tt.load %33 : tensor<16x16x!tt.ptr<f32>>", isInserted = true} : (tensor<16x16x!tt.ptr<f32>>, tensor<16x16xf32>) -> tensor<16x16xf32>
     tt.return
   }
 }
