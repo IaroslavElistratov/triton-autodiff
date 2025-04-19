@@ -226,7 +226,7 @@ namespace triton {
     // corresponding to grad pointers for every arg)
     Value replacementPtr = ptrToAddedPtrMap[basePtr];
     if (DEBUG_PRINTS)
-      llvm::outs() << "load's basePtr " << basePtr << " was replaced with replacementPtr " << replacementPtr << ". Dependant nodes cloned to use the new base\n";
+      llvm::errs() << "[substituteBasePtr] load's basePtr " << basePtr << " was replaced with replacementPtr " << replacementPtr << ". Dependant nodes cloned to use the new base\n";
 
     // don't pass origToCloned as mapper argument (IRMapping) to substituteBasePtr,
     // instead create a completely new IRMapping from inside this function
@@ -280,13 +280,15 @@ namespace triton {
       }
 
       if (isOpDependsOnBasePtr){
-        if (DEBUG_PRINTS) llvm::outs() << "Cloning (depends on base ptr): " << *op << "\n";
+        if (DEBUG_PRINTS) llvm::errs() << "Cloning (depends on base ptr): " << *op << "\n";
+
         resultOp = builder.clone(*op, mapper);
+
         markVisited(builder, visitedType::GradPtrRebase, resultOp);
         opsDependendingOnBasePtr.insert(op);
       } else {
         // Reuse this operation by mapping its results to themselves
-        if (DEBUG_PRINTS) llvm::outs() << "Reusing (independent of base ptr): " << *op << "\n";
+        if (DEBUG_PRINTS) llvm::errs() << "Reusing (independent of base ptr): " << *op << "\n";
         // todo: correct?
         for (Value result : op->getResults())
           mapper.map(result, result);
