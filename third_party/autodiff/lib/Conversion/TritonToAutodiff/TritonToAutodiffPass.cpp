@@ -187,7 +187,21 @@ struct ConvertTritonToAutodiff
           continue;
       }
 
-      if (DEBUG_PRINTS) llvm::outs() << "\n\n\niterating over op " << *op << "\n";
+
+      // Note: I want to handle nested ops by dedicated handlers (e.g. reduce handler) -- not by the main loop
+      //
+      // No grad found for %96 = "arith.addf"(%arg18, %arg19) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+      // ^bb0(%arg18: f32, %arg19: f32):
+      //   %96 = "arith.addf"(%arg18, %arg19) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+      //   "tt.reduce.return"(%96) : (f32) -> ()
+      // ERROR: Expected gradient in gradMap
+      if (op->getBlock() != entryBlock){
+          if (DEBUG_PRINTS) llvm::errs() << "Skipping nested ops" << "\n";
+          continue;
+      }
+
+
+      if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
 
 
       // print only if changed
@@ -271,19 +285,53 @@ struct ConvertTritonToAutodiff
       }
     } // for loop over loads
 
+
+
+
+
+    // I think it's bc here i explicitly delete all operations that don't have autogradVisited or isCloned attributes
+    //  set -- the problem is this func->wall recursive walks on all IR nodes (including ones contained inside bodies of other
+    // ops like reduce in thiscase)
+    //
+    // So actually I don't want to delete ops (even that doesn't have isCloned  or autogradVisited set) provided that the op
+    // they are embedded into (e.g. reduce in this case has these attributes) -- so modify that function that walks that ir and
+    // deletes nodes to also check attributes of the outher op -- and to not delete the current op in this case
+
+    // the below modifications make sure I don't delete nested op (in this case %171) even if its unmarked -- provided that the outer op (in this case %18) is marked
+    // %18 = "tt.reduce"(%17) <{axis = 0 : i32}> ({
+    // ^bb0(%arg20: f32, %arg21: f32):
+    //   %171 = "arith.addf"(%arg20, %arg21) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+    //   "tt.reduce.return"(%171) : (f32) -> ()
+    // }) {autogradVisited = true, isCloned = true} : (tensor<8192xf32>) -> f32
+
+
     // Final pass: remove unmarked operations
     func->walk<WalkOrder::PostOrder>([&](Operation *op) {
 
       auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
+      // auto isClonedAttr = op->getAttrOfType<BoolAttr>("isCloned");
+
       if (DEBUG_PRINTS) {
-        if (visitedAttr) llvm::outs() << "  Operation is marked as visited: " << *op << "\n";
-        else llvm::outs() << "  Operation is NOT marked as visited: " << *op << "\n";
+        if (visitedAttr) llvm::errs() << "  Operation is marked as visited: " << *op << "\n";
+        else llvm::errs() << "  Operation is NOT marked as visited: " << *op << "\n";
       }
 
-      // don't delete the fn itself
-      if (!op->getAttrOfType<BoolAttr>("autogradVisited") &&
-          !isa<triton::FuncOp, triton::ReturnOp>(op)) {
-        if (DEBUG_PRINTS) llvm::outs() << "Deleting unmarked node" << *op << "\n";
+      // Check if this operation or any parent operation has the required attributes
+      bool shouldPreserve = visitedAttr || isa<triton::FuncOp, triton::ReturnOp>(op);
+
+      // todo-now: i don't think I want to check for "parent node" but rather for an "outer node"
+      // If not, check if any ancestor has the attributes
+      if (!shouldPreserve) {
+        Operation *parent = op->getParentOp();
+        while (parent && !shouldPreserve) {
+          shouldPreserve = parent->getAttrOfType<BoolAttr>("autogradVisited") || parent->getAttrOfType<BoolAttr>("isCloned");
+          parent = parent->getParentOp();
+        }
+      }
+
+      // Only delete if neither this op nor any parent has the required attributes
+      if (!shouldPreserve) {
+        if (DEBUG_PRINTS) llvm::errs() << "Deleting unmarked node" << *op << "\n";
         op->dropAllUses();
         op->erase();
 
