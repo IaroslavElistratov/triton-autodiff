@@ -49,6 +49,7 @@ namespace triton {
     auto it = gradMap.find(result);
     if (it == gradMap.end()) {
       llvm::errs() << "No grad found for " << result << "\n";
+      result.getParentBlock()->dump();
       llvm::report_fatal_error("Expected gradient in gradMap");
       // llvm::report_fatal_error("Expected gradient in the map for " + Twine(result));
     }
@@ -58,6 +59,12 @@ namespace triton {
   void maybeAccumulateGrad(Value val, Value grad,
                           llvm::DenseMap<Value, Value> &gradMap,
                           OpBuilder &builder) {
+
+    if (val.getType() != grad.getType()) {
+      llvm::errs() << "val type: " << val.getType() << "\n";
+      llvm::errs() << "grad type: " << grad.getType() << "\n";
+      llvm::report_fatal_error("[maybeAccumulateGrad] shape of grad does not match shape of Value");
+    }
     auto it = gradMap.find(val);
 
     // no existing grad
