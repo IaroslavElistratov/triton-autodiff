@@ -138,9 +138,46 @@ struct ConvertTritonToAutodiff
     // func->walk<WalkOrder::PostOrder>([&](Operation *op) {           // https://mlir.llvm.org/doxygen/classmlir_1_1Operation.html#a59740592240b950b8c8afcf4a2eb4113
 
 
-    // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
-    SetVector<Operation *> forwardSlice;
-    getForwardSlice(func.getOperation(), &forwardSlice);
+
+
+    // separate loop for handle store[s]
+    for (Operation *op : llvm::reverse(forwardSlice)) {
+
+      if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
+
+      if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
+          if (DEBUG_PRINTS) llvm::errs() << "Skipping visited" << "\n";
+          continue;
+      }
+
+      // print only if changed
+      std::string initialIR;
+      llvm::raw_string_ostream initialStream(initialIR);
+      entryBlock->print(initialStream);
+
+      Operation *lastBwdOp = lastFwdOp;
+      if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
+        lastBwdOp = handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastBwdOp, ptrToAddedPtrMap);
+      }
+
+      if (DEBUG_PRINTS) {
+        std::string currentIR;
+        llvm::raw_string_ostream currentStream(currentIR);
+        entryBlock->print(currentStream);
+        if (initialIR != currentIR){
+          // llvm::errs() << entryBlock->print();
+          // dump writes to std err, but I want these be in "sync" with my other prints --
+          llvm::raw_ostream &os = llvm::errs();
+          entryBlock->print(os);
+        }
+      }
+
+    }
+
+
+
+
+
 
     // First pass: handle all operations except LoadOp
     for (Operation *op : llvm::reverse(forwardSlice)) {
@@ -159,9 +196,7 @@ struct ConvertTritonToAutodiff
       entryBlock->print(initialStream);
 
       // triton ops
-      if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastFwdOp, ptrToAddedPtrMap);
-      } else if (auto mmOp = dyn_cast<triton::DotOp>(op)){
+      if (auto mmOp = dyn_cast<triton::DotOp>(op)){
         handleMatmulBackward(mmOp, builder, gradMap, origToCloned);
 
       // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
@@ -259,13 +294,14 @@ struct ConvertTritonToAutodiff
 
 
 
-  void handleStoreBackward(triton::StoreOp storeOp, OpBuilder &builder,
+  Operation* handleStoreBackward(triton::StoreOp storeOp, OpBuilder &builder,
                           llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
-                          Operation *lastFwdOp,
+                          Operation *lastBwdOp,
                           llvm::DenseMap<Value, Value> ptrToAddedPtrMap){
 
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
-    builder.setInsertionPointAfter(lastFwdOp);
+    builder.setInsertionPointAfter(lastBwdOp);
+    llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
     // Value ptr = origToCloned.lookup(storeOp->getOperand(0));
@@ -310,6 +346,9 @@ struct ConvertTritonToAutodiff
     markVisited(builder, visitedType::Inserted, load);
 
     // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
+
+    // return to use as insertion point for differentiating next soreOp I match to
+    return load;
   }
 
   // todo-now:
