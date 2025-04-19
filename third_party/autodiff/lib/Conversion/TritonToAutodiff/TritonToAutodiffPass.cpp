@@ -81,11 +81,43 @@ struct ConvertTritonToAutodiff
     // them in your loop below, and thus you will not re-write
     // them -- so effectively this cloned is your *Forward* graph
 
-    // answer-now: the problem because I didn't set the insertion point :)
     OpBuilder builder(func.getContext());
     builder.setInsertionPointToStart(entryBlock);
 
-    Operation *lastFwdOp = cloneSubtree(beforeReturnOp, origToCloned, builder);
+    // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
+    SetVector<Operation *> forwardSlice;
+    getForwardSlice(func.getOperation(), &forwardSlice);
+
+
+
+
+    // Clones the entire fwd graph (not just a single subgraph leading from the last fwd op)
+    DenseSet<Operation*> visitedLoads;
+    // Operation *lastFwdOp = nullptr;
+    Operation *lastFwdOp = beforeReturnOp;
+    // Operation *currFwdOp;
+    for (Operation *op : llvm::reverse(forwardSlice)) {
+
+      if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
+
+      auto currStoreOp = dyn_cast<triton::StoreOp>(op);
+      if (visitedLoads.contains(op) || !currStoreOp || op->getBlock() != entryBlock){
+        continue;
+      }
+
+      // note: important to pass the same map (origToCloned) -- so that the cloning logic
+      //  does not re-clone nodes that are common between the subgraphs of nodes leading to different StoreOps
+      cloneSubtree(currStoreOp, origToCloned, builder);
+      // currFwdOp = cloneSubtree(currStoreOp, origToCloned, builder);
+      // // first condition is for the 1st iter -- to overwrite nullptr at least with some currFwdOp
+      // if (!lastFwdOp || currFwdOp->isBeforeInBlock(lastFwdOp)){
+      //   lastFwdOp = currFwdOp;
+      // }
+    }
+
+
+
+
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder.setInsertionPointAfter(lastFwdOp);
 
