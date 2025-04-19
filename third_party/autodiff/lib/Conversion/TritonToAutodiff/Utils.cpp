@@ -95,24 +95,71 @@ namespace triton {
     }
   }
 
-  triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value) {
+
+  Value createConstantTensor(OpBuilder &builder, Location loc, Type type, float value) {
       // Determine the element type of the tensor
-      auto tensorElemType = mlir::cast<ShapedType>(tensorType).getElementType();
+      // llvm::errs() << type; // tensor<8192xf32>f32
 
-      // Ensure the tensor element type is either float16 or float32
-      assert((tensorElemType.isF16() || tensorElemType.isF32()) && "Tensor element type must be float16 or float32");
 
-      // Create a constant value of the appropriate type
-      auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(tensorElemType, value));
+      // Difference between Type and ShapedType in MLIR:
+      // - Type is the base class for all types in MLIR's type system. It represents any kind of type in MLIR, which could be primitive types (like integers, floats), complex types (like tensors, memrefs), or function types.
+      // - ShapedType is a subclass of Type that specifically represents types with a shape, such as:
+      //    RankedTensorType: Tensors with known dimensions
+      //    MemRefType: Memory references with known dimensions
+      //    UnrankedTensorType: Tensors with unknown dimensions
+      //    UnrankedMemRefType: Memory references with unknown dimensions
+      // auto tensorElemType = dyn_cast<ShapedType>(tensorType).getElementType();
 
-      // Splat the scalar value into a tensor of the desired type
-      auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
 
-      // Mark the operations as visited
-      markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+      /*
+      This needs to handle the case where tensorType is just a Type and not Shaped Type -- e.g. below when divf's operand is just a scalar (and not a tensor)
+        but I still need to differentiate it, bc that scalar was computed by taking a tensor and reducing it into a single float (via tt.reduce)
 
-      return tensorValue;
+        %18 = "tt.reduce"(%17) <{axis = 0 : i32}> ({
+        ^bb0(%arg8: f32, %arg9: f32):
+          %43 = arith.addf %arg8, %arg9 : f32
+          tt.reduce.return %43 : f32
+        }) : (tensor<8192xf32>) -> f32
+        %19 = arith.divf %18, %cst_1 : f32
+        %20 = arith.addf %19, %arg7 : f32
+        %21 = math.sqrt %20 : f32
+        %22 = arith.divf %cst_0, %21 : f32
+
+      */
+
+      // Handle all cases: either it's already a ShapedType or we need to extract it
+      if (auto tensorType = dyn_cast<ShapedType>(type)) {
+        // If it's ShapedType extract type of a single element
+        Type scalarType = tensorType.getElementType();
+        assert((scalarType.isF16() || scalarType.isF32()) && "Tensor element type must be float16 or float32");
+
+        auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(scalarType, value));
+
+        // Splat the scalar value into a tensor of the desired type
+        auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+
+        markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+
+        return tensorValue;
+
+      } else if (auto scalarType = dyn_cast<Type>(type)) {
+        // If it's Type, just use it directly
+        assert((scalarType.isF16() || scalarType.isF32()) && "Tensor element type must be float16 or float32");
+
+        auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(scalarType, value));
+        markVisited(builder, visitedType::Inserted, scalarValue);
+        return scalarValue;
+
+      } else {
+        // can handle other cases in the future,
+        // thigh can't hink of any at the moment
+        llvm::report_fatal_error("unreachable");
+      }
+
   }
+
+
+
 
 
 

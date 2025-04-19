@@ -58,7 +58,7 @@ namespace triton {
 
   void maybeAccumulateGrad(Value val, Value grad, llvm::DenseMap<Value, Value> &gradMap, OpBuilder &builder);
 
-  triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value);
+  Value createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value);
 
   Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
 
