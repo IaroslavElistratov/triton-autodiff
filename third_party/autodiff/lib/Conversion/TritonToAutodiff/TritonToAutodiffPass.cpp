@@ -509,17 +509,17 @@ struct ConvertTritonToAutodiff
 
     Value x = truncfOp.getOperand();
 
-    // // Create an extension operation to match the input type
-    // // Since we're going backward, we need to extend from result type to operand type
-    // auto extOp = builder.create<arith::ExtFOp>(
-    //     truncfOp.getLoc(),
-    //     x.getType(),  // Target type is the original input type
-    //     upstream      // Upstream gradient with the truncated type
-    // );
+    // Create an extension operation to match the input type
+    // Since we're going backward, we need to extend from result type to operand type
+    auto extOp = builder.create<arith::ExtFOp>(
+        truncfOp.getLoc(),
+        x.getType(),  // Target type is the original input type
+        upstream      // Upstream gradient with the truncated type
+    );
 
-    // maybeAccumulateGrad(x, extOp, gradMap, builder);
+    maybeAccumulateGrad(x, extOp, gradMap, builder);
 
-    // markAllVisited(builder, visitedType::Inserted, extOp);
+    markAllVisited(builder, visitedType::Inserted, extOp);
 
 
 
@@ -534,7 +534,7 @@ struct ConvertTritonToAutodiff
       %63 = "tt.dot"(%59, %60, %62)(tensor<16x16xf32>, tensor<16x16xf16>, tensor<16x16xf16>) -> tensor<16x16xf16>
 
     */
-    maybeAccumulateGrad(x, upstream, gradMap, builder);
+    // maybeAccumulateGrad(x, upstream, gradMap, builder);
 
   }
 
