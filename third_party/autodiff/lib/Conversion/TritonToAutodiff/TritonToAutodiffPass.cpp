@@ -871,29 +871,29 @@ struct ConvertTritonToAutodiff
     if (isa<arith::AddFOp>(combiner)) {
 
       // Get the axis being reduced
-      // int32_t axis = reduceOp.getAxis();
+      // int32_t axis = reduceOp.getAxis(); 
 
       // Create a broadcast of the upstream gradient along the reduced axis
       // For reduce_sum, gradient is uniform broadcast of upstream gradient
-      auto splatUpstream = builder.create<triton::SplatOp>(
-          reduceOp.getLoc(),
+      Value downstreamGrad = createBroadcastOrSplat(
+          upstream, // castToSameEncoding(upstream, input, builder);
           input.getType(),
-          upstream);
+          reduceOp.getLoc(),
+          builder);
 
       // Propagate the gradient to the input
-      maybeAccumulateGrad(input, splatUpstream, gradMap, builder);
-
-      markVisited(builder, visitedType::Inserted, splatUpstream);
+      maybeAccumulateGrad(input, downstreamGrad, gradMap, builder);
 
     } else if (isa<arith::MaxNumFOp>(combiner)) {
       // For reduce_max, gradient only flows through the maximum element(s)
       // We need to create a mask where elements equal to the maximum get the gradient
 
-      // Create a splat of the reduced value (the maximum)
-      auto splatMax = builder.create<triton::SplatOp>(
-          reduceOp.getLoc(),
+      // Create a broadcast of the reduced value (the maximum)
+      Value maxBroadcast = createBroadcastOrSplat(
+          reducedValue,
           input.getType(),
-          reducedValue);
+          reduceOp.getLoc(),
+          builder);
 
       // Create a mask where elements equal to the max get 1.0, others get 0.0
       // Compare input with the broadcasted max value
@@ -901,7 +901,7 @@ struct ConvertTritonToAutodiff
           reduceOp.getLoc(),
           arith::CmpFPredicate::OEQ,  // ordered equal
           inputCloned,
-          splatMax);
+          maxBroadcast);
 
       // Convert boolean mask to float mask (1.0 where true, 0.0 where false)
       auto floatType = cast<ShapedType>(upstream.getType()).getElementType();
@@ -916,22 +916,23 @@ struct ConvertTritonToAutodiff
           zeroConst);
 
       // Create a broadcast of the upstream gradient
-      auto splatUpstream = builder.create<triton::SplatOp>(
-          reduceOp.getLoc(),
+      Value upstreamBroadcast = createBroadcastOrSplat(
+          upstream,   // castToSameEncoding(upstream, input, builder)
           input.getType(),
-          upstream);
+          reduceOp.getLoc(),
+          builder);
 
       // Multiply the mask by the upstream gradient
       auto maskedGrad = builder.create<arith::MulFOp>(
           reduceOp.getLoc(),
           floatMask,
-          splatUpstream);
+          upstreamBroadcast);
 
       // Propagate the masked gradient to the input
       maybeAccumulateGrad(input, maskedGrad, gradMap, builder);
 
-      markAllVisited(builder, visitedType::Inserted, splatMax, cmpOp, floatMask,
-                    oneConst, zeroConst, splatUpstream, maskedGrad);
+      markAllVisited(builder, visitedType::Inserted, cmpOp, floatMask,
+                    oneConst, zeroConst, maskedGrad);
 
     } else {
         llvm::report_fatal_error("Only sum / add reduction are supported\n");
@@ -980,8 +981,8 @@ struct ConvertTritonToAutodiff
     // dz/dy = -1, so negate the upstream gradient
     auto negOne = createConstantTensor(builder, subfOp->getLoc(), upstream.getType(), -1.0);
     auto negUpstream = builder.create<arith::MulFOp>(
-        subfOp.getLoc(), 
-        upstream, 
+        subfOp.getLoc(),
+        upstream,
         negOne
     );
     maybeAccumulateGrad(rhs, negUpstream, gradMap, builder);

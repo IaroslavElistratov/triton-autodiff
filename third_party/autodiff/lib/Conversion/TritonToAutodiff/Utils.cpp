@@ -542,5 +542,52 @@ namespace triton {
   }
 
 
+  // Helper function to create either a SplatOp or ExpandDimsOp+BroadcastOp based on input type
+  Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder) {
+    // Check if input is a tensor or scalar
+    if (isa<TensorType>(input.getType())) {
+      // For tensor input, use expand_dims + broadcast
+      auto inputTensorType = dyn_cast<RankedTensorType>(input.getType());
+      auto targetTensorType = dyn_cast<RankedTensorType>(targetType);
+
+      if (inputTensorType && targetTensorType) {
+        // First expand dimensions to match the target shape
+        Value currentResult = input;
+
+        // If ranks don't match, we need to add dimensions
+        int inputRank = inputTensorType.getRank();
+        int targetRank = targetTensorType.getRank();
+
+        // Add missing dimensions
+        for (int i = inputRank; i < targetRank; i++) {
+          auto expandOp = builder.create<triton::ExpandDimsOp>(
+              loc,
+              currentResult,
+              i); // Add dimension at position i
+          currentResult = expandOp->getResult(0);
+          markVisited(builder, visitedType::Inserted, expandOp);
+        }
+
+        // Then broadcast to the target shape
+        auto broadcastOp = builder.create<triton::BroadcastOp>(
+            loc,
+            targetType,
+            currentResult);
+
+        markVisited(builder, visitedType::Inserted, broadcastOp);
+        return broadcastOp->getResult(0);
+      }
+    }
+
+    // For scalar input or fallback case, use splat
+    auto splatOp = builder.create<triton::SplatOp>(
+        loc,
+        targetType,
+        input);
+
+    markVisited(builder, visitedType::Inserted, splatOp);
+    return splatOp->getResult(0);
+  }
+
 } // namespace triton
 } // namespace mlir

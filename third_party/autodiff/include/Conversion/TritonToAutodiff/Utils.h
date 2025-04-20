@@ -72,6 +72,8 @@ namespace triton {
 
   void setInsertionPointAfterLastUse(Value val, OpBuilder &builder);
 
+  Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder);
+
 } // namespace triton
 } // namespace mlir
 
