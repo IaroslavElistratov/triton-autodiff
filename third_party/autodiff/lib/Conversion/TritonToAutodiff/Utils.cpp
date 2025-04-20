@@ -399,6 +399,28 @@ namespace triton {
 
   }
 
+  /* error
+
+  The function's signature expects argument #4 to have the type !tt.ptr<f16> (a pointer to a 16-bit floating-point value).
+  However, the entry block of the function defines argument #4 as !tt.ptr<f32> (a pointer to a 32-bit floating-point value).
+
+    the types of arguments in the function's entry block must exactly match the types declared in the function signature
+
+
+  or: 'tt.func' op type of entry block argument #4('!tt.ptr<f32>') must match the type of the corresponding argument in function signature('!tt.ptr<f16>')
+    tt.func public @_layer_norm_fwd_fused(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg5: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg6: i32 {tt.divisibility = 16 : i32}, %arg7: f32) attributes {noinline = false} {
+    ^
+
+  answer-now:
+  ==> currently for block args, I just append newly added arguments AFTER all the original argumenets -- that only works when all
+
+    I think the problem was bc I inserted ptr args to right after original ptr arg (for the fn signature)
+    (ptr_1, ADDED_ptr_1, ptr_2, ADDED_ptr_2, **int_1**, ptr_3, ADDED_ptr_3)
+
+    but incorrectly inserted all inserted args after all original args for the blockArgs:
+    (ptr_1, ptr_2, **int_1**, ptr_3, ADDED_ptr_1, ADDED_ptr_2, ADDED_ptr_3)
+
+  */
   // todo: simplify this
   llvm::DenseMap<Value, Value> addPointerArgsToFunction(triton::FuncOp funcOp) {
 
@@ -420,7 +442,6 @@ namespace triton {
       newInputTypes.push_back(inputType);
 
       if (auto ptrType = dyn_cast<triton::PointerType>(inputType)) {
-        newInputTypes.push_back(ptrType);
         additionalPtrTypes.push_back(ptrType); // Remember only the new ones
 
         auto numAdded = ptrIdxToAddedPtrIdxMap.size();
@@ -428,6 +449,11 @@ namespace triton {
       }
 
     }
+
+    // append newly added args to the end of ALL original args (including after original non ptr args), iow:
+    //  Original inputs: (ptr_1, ptr_2, **int_1**, ptr_3)
+    //  Modified: (ptr_1, ptr_2, **int_1**, ptr_3, ADDED_ptr_1, ADDED_ptr_2, ADDED_ptr_3)
+    newInputTypes.append(additionalPtrTypes.begin(), additionalPtrTypes.end());
 
     // Create and set the new function type
     auto newFnType = FunctionType::get(funcOp.getContext(), newInputTypes,  fnType.getResults());
