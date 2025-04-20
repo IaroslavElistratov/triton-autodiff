@@ -60,6 +60,8 @@ namespace triton {
 
   Value createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value);
 
+  Value createConstantBoolTensor(OpBuilder &builder, Location loc, Type type, bool value);
+
   Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
 
   void unrollAllForOps(triton::FuncOp func);

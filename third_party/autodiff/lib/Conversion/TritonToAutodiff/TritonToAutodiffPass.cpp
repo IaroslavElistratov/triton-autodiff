@@ -214,13 +214,13 @@ struct ConvertTritonToAutodiff
       // triton ops
       if (auto mmOp = dyn_cast<triton::DotOp>(op)){
         handleMatmulBackward(mmOp, builder, gradMap, origToCloned);
-
-      // } else if (auto rangeOp = dyn_cast<triton::MakeRangeOp>(op)){
-      //   if (DEBUG_PRINTS) printIndent() << "visiting tt.make_range op\n";
+      } else if (auto reduceOp = dyn_cast<triton::ReduceOp>(op)){
+        handleReduceBackward(reduceOp, builder, gradMap, origToCloned);
+      } else if (auto broadcastOp = dyn_cast<triton::BroadcastOp>(op)){
+        handleBroadcastBackward(broadcastOp, builder, gradMap);
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
-      //   if (DEBUG_PRINTS) printIndent() << "visiting tt.splat op\n";
-      // } else if (auto addptrOp = dyn_cast<triton::AddPtrOp>(op)){
-      //   if (DEBUG_PRINTS) printIndent() << "visiting tt.addptr op\n";
+      //   handleSplatBackward(splatOp, builder, gradMap);
+
 
       // arith ops
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
@@ -232,7 +232,13 @@ struct ConvertTritonToAutodiff
       } else if (auto truncfOp = dyn_cast<arith::TruncFOp>(op)){
         handleTruncfBackward(truncfOp, builder, gradMap);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
-        if (DEBUG_PRINTS) printIndent() << "visiting arith.constant op\n";
+        if (DEBUG_PRINTS) llvm::errs() << "visiting arith.constant op\n";
+      } else if (auto extfOp = dyn_cast<arith::ExtFOp>(op)){
+        handleExtFBackward(extfOp, builder, gradMap);
+      } else if (auto subfOp = dyn_cast<arith::SubFOp>(op)){
+        handleSubfBackward(subfOp, builder, gradMap);
+      } else if (auto selectOp = dyn_cast<arith::SelectOp>(op)){
+        handleSelectBackward(selectOp, builder, gradMap, origToCloned);
 
       // math ops
       } else if (auto cosOp = dyn_cast<math::CosOp>(op)){
@@ -242,9 +248,13 @@ struct ConvertTritonToAutodiff
       } else if (auto sqrtOp = dyn_cast<math::SqrtOp>(op)){
         handleSqrtBackward(sqrtOp, builder, gradMap, origToCloned);
       } else if (auto logOp = dyn_cast<math::LogOp>(op)){
-        handleLogBackward(logOp, builder, gradMap, origToCloned);
+        handleLogBackward(logOp, builder, gradMap, origToCloned);  // For natural logarithm (base e): The derivative of ln(x) is 1/x
+      } else if (auto log2Op = dyn_cast<math::Log2Op>(op)){
+        handleLog2Backward(log2Op, builder, gradMap, origToCloned); // For logarithm base 2: The derivative of log₂(x) is 1/(x·ln(2))
       } else if (auto expOp = dyn_cast<math::ExpOp>(op)){
         handleExpBackward(expOp, builder, gradMap, origToCloned);
+      } else if (auto exp2Op = dyn_cast<math::Exp2Op>(op)){
+        handleExp2Backward(exp2Op, builder, gradMap, origToCloned);
       }
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
@@ -831,6 +841,217 @@ struct ConvertTritonToAutodiff
     maybeAccumulateGrad(c, upstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);
+  }
+
+
+  void handleReduceBackward(triton::ReduceOp reduceOp, OpBuilder &builder,
+                            llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting tt.reduce op\n";
+
+    // Get the upstream gradient
+    //  getResult retruns result_range
+    // answer-now: again I did the same mistake as before. triton::ReduceOp (a specific subclass of Operation) for some reason does not have getReuslt method attached to it -- so what you should instead is use -> syntax on it to dispatch to its parent (generic Operation) which has getResult(1) implemented
+    //    same for getOperand(): reduceOp.getOperand(0) -- ERRORS OUT.    reduceOp->getOperand(0) -- works!
+    Value upstream = getUpstreamGrad(reduceOp->getResult(0), gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    // Check that this is a sum reduction (contains only single node, e.g. arith.addf)
+    Operation *combiner = reduceOp.getSingleCombiner();
+    if (!combiner) {
+      llvm::report_fatal_error("Combiner is missing\n");
+    }
+
+    // Get the input tensor and its type
+    Value input = reduceOp->getOperand(0);
+
+    // Get the input from the forward graph
+    Value inputCloned = origToCloned.lookup(input);
+    Value reducedValue = origToCloned.lookup(reduceOp->getResult(0));
+
+    if (isa<arith::AddFOp>(combiner)) {
+
+      // Get the axis being reduced
+      // int32_t axis = reduceOp.getAxis();
+
+      // Create a broadcast of the upstream gradient along the reduced axis
+      // For reduce_sum, gradient is uniform broadcast of upstream gradient
+      auto splatUpstream = builder.create<triton::SplatOp>(
+          reduceOp.getLoc(),
+          input.getType(),
+          upstream);
+
+      // Propagate the gradient to the input
+      maybeAccumulateGrad(input, splatUpstream, gradMap, builder);
+
+      markVisited(builder, visitedType::Inserted, splatUpstream);
+
+    } else if (isa<arith::MaxNumFOp>(combiner)) {
+      // For reduce_max, gradient only flows through the maximum element(s)
+      // We need to create a mask where elements equal to the maximum get the gradient
+
+      // Create a splat of the reduced value (the maximum)
+      auto splatMax = builder.create<triton::SplatOp>(
+          reduceOp.getLoc(),
+          input.getType(),
+          reducedValue);
+
+      // Create a mask where elements equal to the max get 1.0, others get 0.0
+      // Compare input with the broadcasted max value
+      auto cmpOp = builder.create<arith::CmpFOp>(
+          reduceOp.getLoc(),
+          arith::CmpFPredicate::OEQ,  // ordered equal
+          inputCloned,
+          splatMax);
+
+      // Convert boolean mask to float mask (1.0 where true, 0.0 where false)
+      auto floatType = cast<ShapedType>(upstream.getType()).getElementType();
+      auto oneConst = createConstantTensor(builder, reduceOp.getLoc(), input.getType(), 1.0);
+      auto zeroConst = createConstantTensor(builder, reduceOp.getLoc(), input.getType(), 0.0);
+
+      auto floatMask = builder.create<arith::SelectOp>(
+          reduceOp.getLoc(),
+          input.getType(),
+          cmpOp,
+          oneConst,
+          zeroConst);
+
+      // Create a broadcast of the upstream gradient
+      auto splatUpstream = builder.create<triton::SplatOp>(
+          reduceOp.getLoc(),
+          input.getType(),
+          upstream);
+
+      // Multiply the mask by the upstream gradient
+      auto maskedGrad = builder.create<arith::MulFOp>(
+          reduceOp.getLoc(),
+          floatMask,
+          splatUpstream);
+
+      // Propagate the masked gradient to the input
+      maybeAccumulateGrad(input, maskedGrad, gradMap, builder);
+
+      markAllVisited(builder, visitedType::Inserted, splatMax, cmpOp, floatMask,
+                    oneConst, zeroConst, splatUpstream, maskedGrad);
+
+    } else {
+        llvm::report_fatal_error("Only sum / add reduction are supported\n");
+    }
+  }
+
+
+  void handleExtFBackward(arith::ExtFOp extfOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting arith.extf op\n";
+
+    Value upstream = getUpstreamGrad(extfOp, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    Value x = extfOp.getOperand();
+
+    // For extf, the gradient is simply the truncation of the upstream gradient
+    // to the precision of the input
+    auto truncOp = builder.create<arith::TruncFOp>(
+        extfOp.getLoc(),
+        x.getType(),  // Result type should match the original input type
+        upstream      // Upstream gradient with the extended type
+    );
+
+    // Propagate the gradient to the input
+    maybeAccumulateGrad(x, truncOp, gradMap, builder);
+
+    markVisited(builder, visitedType::Inserted, truncOp);
+  }
+
+
+  void handleSubfBackward(arith::SubFOp subfOp, OpBuilder &builder,
+                        llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting arith.subf op\n";
+
+    Value upstream = getUpstreamGrad(subfOp, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    // For subtraction z = x - y
+    Value lhs = subfOp.getOperand(0);
+    Value rhs = subfOp.getOperand(1);
+
+    // dz/dx = 1, so just pass through the upstream gradient
+    maybeAccumulateGrad(lhs, upstream, gradMap, builder);
+
+    // dz/dy = -1, so negate the upstream gradient
+    auto negOne = createConstantTensor(builder, subfOp->getLoc(), upstream.getType(), -1.0);
+    auto negUpstream = builder.create<arith::MulFOp>(
+        subfOp.getLoc(), 
+        upstream, 
+        negOne
+    );
+    maybeAccumulateGrad(rhs, negUpstream, gradMap, builder);
+
+    markAllVisited(builder, visitedType::Inserted, negUpstream, negOne);
+  }
+
+
+  // For a select operation like %result = arith.select %condition, %true_value, %false_value, the gradient flows as follows:
+  // 1) The condition doesn't receive any gradient since it's a boolean predicate
+  // 2) The true value receives the upstream gradient only where the condition is true
+  // 3) The false value receives the upstream gradient only where the condition is false
+  // The implementation creates two masked gradients:
+  //  - For the true value: select(condition, upstream_gradient, zeros)
+  //  - For the false value: select(NOT condition, upstream_gradient, zeros)
+  void handleSelectBackward(arith::SelectOp selectOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting arith.select op\n";
+
+    Value upstream = getUpstreamGrad(selectOp, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    // Get operands
+    Value condition = selectOp.getCondition();
+    Value trueValue = selectOp.getTrueValue();
+    Value falseValue = selectOp.getFalseValue();
+
+    // Get the cloned condition from the forward pass
+    Value conditionCloned = origToCloned.lookup(condition);
+
+    // For select(cond, true_val, false_val):
+    // - No gradient for condition (it's boolean/predicate)
+    // - For true_val: gradient flows only where condition is true
+    // - For false_val: gradient flows only where condition is false
+
+    // Create masked gradients for true value
+    auto trueGrad = builder.create<arith::SelectOp>(
+        selectOp.getLoc(),
+        upstream.getType(),
+        conditionCloned,    // original condition
+        upstream,           // upstream gradient where condition is true
+        createConstantTensor(builder, selectOp.getLoc(), upstream.getType(), 0.0) // zeros where condition is false
+    );
+
+    // Propagate gradient to the true value operand
+    maybeAccumulateGrad(trueValue, trueGrad, gradMap, builder);
+
+    // Create masked gradients for false value
+    // First, create the negated condition
+    auto notCond = builder.create<arith::SelectOp>(
+        selectOp.getLoc(),
+        conditionCloned.getType(),
+        conditionCloned,
+        createConstantBoolTensor(builder, selectOp.getLoc(), conditionCloned.getType(), false),
+        createConstantBoolTensor(builder, selectOp.getLoc(), conditionCloned.getType(), true)
+    );
+
+    auto falseGrad = builder.create<arith::SelectOp>(
+        selectOp.getLoc(),
+        upstream.getType(),
+        notCond,           // negated condition
+        upstream,          // upstream gradient where condition is false
+        createConstantTensor(builder, selectOp.getLoc(), upstream.getType(), 0.0) // zeros where condition is true
+    );
+
+    // Propagate gradient to the false value operand
+    maybeAccumulateGrad(falseValue, falseGrad, gradMap, builder);
+
+    // Mark all created operations as visited
+    markAllVisited(builder, visitedType::Inserted, trueGrad, notCond, falseGrad);
   }
 
 

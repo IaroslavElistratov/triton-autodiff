@@ -139,7 +139,6 @@ namespace triton {
         auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
 
         markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
-
         return tensorValue;
 
       } else if (auto scalarType = dyn_cast<Type>(type)) {
@@ -158,6 +157,24 @@ namespace triton {
 
   }
 
+
+  // todo-low: re-use createConstantTensor?
+  Value createConstantBoolTensor(OpBuilder &builder, Location loc, Type type, bool value) {
+      // llvm::errs() << type; // tensor<8192xi1>
+      //    i1 represents a 1-bit integer (a boolean-like value, typically 0 or 1).
+
+      if (auto tensorType = dyn_cast<ShapedType>(type)) {
+        Type elemType = tensorType.getElementType();
+        assert(elemType.isInteger(1) && "Tensor element type must be an int with exactly 1 bit");
+        auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getBoolAttr(value));
+        // auto scalarValue = builder.create<arith::ConstantOp>(loc, getAttr(elemType, value ? 1 : 0));
+        auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+        markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+        return tensorValue;
+      } else {
+        llvm::report_fatal_error("unreachable");
+      }
+  }
 
 
 
