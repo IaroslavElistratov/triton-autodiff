@@ -1055,6 +1055,181 @@ struct ConvertTritonToAutodiff
   }
 
 
+
+
+
+
+
+
+  void handleBroadcastBackward(triton::BroadcastOp broadcastOp, OpBuilder &builder,
+                            llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting tt.broadcast op\n";
+
+    Value input = broadcastOp.getOperand();
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    auto resultType = dyn_cast<RankedTensorType>(broadcastOp.getType());
+    if (!inputType || !resultType) {
+      llvm::report_fatal_error("Expected ranked tensor types for broadcast op");
+    }
+
+    // my previous kernels also had broadcast ops, but I didn't match on them bc they
+    // were using int inputs (computing some pointer offsets) not actual tensor values -- but
+    // this attention kernel is different, bc broadcast is used there on the data (rather on the idxs)
+    bool isFloat = isa<FloatType>(inputType.getElementType());
+    if (!isFloat){
+      llvm::errs() << "[handleBroadcastBackward] existing early, input is not a Float\n";
+      return;
+    }
+
+    Value upstream = getUpstreamGrad(broadcastOp, gradMap);
+    // setInsertionPointAfterLastUse(upstream, builder);
+
+    // the gradient is the reduction (sum) of the upstream gradient
+    // along the dimensions that were broadcasted
+    auto inputShape = inputType.getShape();
+    auto resultShape = resultType.getShape();
+
+    // Find dimensions that were broadcasted (where input dim is 1 and result dim is > 1)
+
+    // "broadcast changes one or more dimensions", but reduce (which is the grad
+    // of broadcast) only supports one dim at a time -- so need the for loop
+    //
+    // The implementation reduces each dimension separately due to the design of Triton's ReduceOp, which only supports reducing along a single axis at a time. The ReduceOp constructor takes a single integer parameter for the axis to reduce, not a list of dimensions -- build(..., int axis).
+    // While conceptually we're computing the sum across all broadcasted dimensions, in MLIR/Triton couldn't find single operation that can reduce along multiple dimensions at once.
+    for (int i = 0; i < inputShape.size(); i++) {
+
+      // if this is the dim that was expanded (during fwd)
+      if (inputShape[i] == 1 && resultShape[i] > 1) {
+
+        setInsertionPointAfterLastUse(upstream, builder);
+
+        // Sum along this dimension
+        auto reduceOp = builder.create<triton::ReduceOp>(
+            broadcastOp.getLoc(),
+            upstream,
+            i); // axis
+
+        // Add a block to the region first
+        auto &combineRegion = reduceOp.getCombineOp();
+        auto *combinerBlock = builder.createBlock(&combineRegion);
+
+        // Add arguments
+        // the block itself is typically created automatically because it has the OpTrait::SingleBlock trait, but the arguments aren't automatically added.
+        Type elemType = dyn_cast<ShapedType>(upstream.getType()).getElementType();
+        combinerBlock->addArgument(elemType, broadcastOp.getLoc());
+        combinerBlock->addArgument(elemType, broadcastOp.getLoc());
+
+        // insertion point for ops within the reduceOp itself
+        // this is kind of inner (builder for the ops inside the reduceOp)
+        auto blockBuilder = OpBuilder::atBlockBegin(combinerBlock);
+        auto sum = blockBuilder.create<arith::AddFOp>(
+            broadcastOp.getLoc(),
+            combinerBlock->getArgument(0),
+            combinerBlock->getArgument(1));
+
+        blockBuilder.create<triton::ReduceReturnOp>(broadcastOp.getLoc(), sum.getResult());
+
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // wt the ExpandDimsOp below, we'd completely collapse the 0-th dim, but instead need
+        // to preserve it as singleton dim (1) -- bc shape of grad needs to match shape of the original input
+        //    iterating over op %150 = tt.broadcast %149 : tensor<16x1xf32> -> tensor<16x16xf32>
+
+        //question-now:
+        // setInsertionPointAfterLastUse(upstream, builder);
+        // insertion point in the outer graph -- for the expand to be directly after reduceOp
+        builder.setInsertionPointAfter(reduceOp);
+
+        // Note: expand_dims needs to outside of the reduce
+        // must return the scalar sum directly in the reduce.return op,
+        // don't try to use expand_dims inside the reduce region
+        auto expand = builder.create<triton::ExpandDimsOp>(
+            broadcastOp.getLoc(),
+            reduceOp->getResult(0),
+            i); // axis
+
+        // expand_dims needs to be outside of the reduce
+        //    %130 = "tt.reduce"(%129) <{axis = 1 : i32}> ({
+        //    ^bb0(%arg23: f32, %arg24: f32):
+        //      %184 = "arith.addf"(%arg23, %arg24) : (f32, f32) -> f32
+        //      %185 = "tt.expand_dims"(%130) <{axis = 1 : i32}> : (tensor<16xf32>) -> tensor<16x1xf32>
+        //      "tt.reduce.return"(%185) : (f32) -> ()
+        //    }): (tensor<16x16xf32>) -> tensor<16xf32>
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+        // Update upstream for the next dim: apply expand_dims AFTER the reduce operation, outside its region
+        // so that ouput of this entire for loop -- is a sequence of:
+        //  reduce(inner_fn=add, dim=0) -> reduce(inner_fn=add, dim=1) -> reduce(inner_fn=add, dim=2)
+        upstream = expand->getResult(0);
+
+        // question-now: I think don't need to explicitly mark the inner op (addf) as well?
+        markAllVisited(builder, visitedType::Inserted, reduceOp, expand);
+      }
+    }
+
+    // todo-now: grad accum logic needs to be outside of the reuce
+    // %108 = "tt.reduce"(%97) <{axis = 1 : i32}> ({
+    // ^bb0(%arg27: f32, %arg28: f32):
+    //   %188 = "arith.addf"(%arg27, %arg28) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+    //   "tt.reduce.return"(%188) : (f32) -> ()
+    //   %189 = "tt.expand_dims"(%108) <{axis = 1 : i32}> : (tensor<16xf32>) -> tensor<16x1xf32>
+    //   %190 = "arith.mulf"(%66, %189) <{fastmath = #arith.fastmath<none>}> {autogradVisited = true, isInserted = true} : (tensor<16x1xf32>, tensor<16x1xf32>) -> tensor<16x1xf32>
+    //   %191 = "arith.mulf"(%67, %189) <{fastmath = #arith.fastmath<none>}> {autogradVisited = true, isInserted = true} : (tensor<16x1xf32>, tensor<16x1xf32>) -> tensor<16x1xf32>
+    // })
+
+    // Reduce along all necessary dimensions
+    // Only then propagate the final reduced gradient to the input
+
+    // setInsertionPointAfterLastUse(initialUpstream, builder);
+    maybeAccumulateGrad(input, upstream, gradMap, builder);
+  }
+
+  void handleLog2Backward(math::Log2Op log2Op, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting math.log2 op\n";
+
+    Value upstream = getUpstreamGrad(log2Op, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    Value x = log2Op.getOperand();
+    Value xCloned = origToCloned.lookup(x);
+
+    // derivative of log2(x) is 1/(x*ln(2))
+    // ln(2) ≈ 0.693147
+    auto ln2 = createConstantTensor(builder, log2Op->getLoc(), upstream.getType(), 0.693147);
+    auto xTimesLn2 = builder.create<arith::MulFOp>(log2Op.getLoc(), xCloned, ln2);
+    auto one = createConstantTensor(builder, log2Op->getLoc(), upstream.getType(), 1.0);
+    auto localGrad = builder.create<arith::DivFOp>(log2Op.getLoc(), one, xTimesLn2);
+    auto downstreamGrad = builder.create<arith::MulFOp>(log2Op.getLoc(), localGrad, upstream);
+
+    maybeAccumulateGrad(x, downstreamGrad, gradMap, builder);
+
+    markAllVisited(builder, visitedType::Inserted, ln2, xTimesLn2, one, localGrad, downstreamGrad);
+  }
+
+  void handleExp2Backward(math::Exp2Op exp2Op, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp2 op\n";
+
+    Value upstream = getUpstreamGrad(exp2Op, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    Value x = exp2Op.getOperand();
+    Value resultCloned = origToCloned.lookup(exp2Op);
+
+    // derivative of exp2(x) is ln(2) * exp2(x)
+    // ln(2) ≈ 0.693147
+    auto ln2 = createConstantTensor(builder, exp2Op->getLoc(), upstream.getType(), 0.693147);
+    auto localGrad = builder.create<arith::MulFOp>(exp2Op.getLoc(), ln2, resultCloned);
+    auto downstreamGrad = builder.create<arith::MulFOp>(exp2Op.getLoc(), localGrad, upstream);
+
+    maybeAccumulateGrad(x, downstreamGrad, gradMap, builder);
+
+    markAllVisited(builder, visitedType::Inserted, ln2, localGrad, downstreamGrad);
+  }
+
+
 }; // ConvertTritonToAutodiff stuct
 
 } // private namespace
