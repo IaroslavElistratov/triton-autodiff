@@ -259,7 +259,7 @@ namespace triton {
         for (Value operand : op->getOperands()) {
           // NOTE: because I explicitly call substituteBasePtr on store / load (targetOp) -- there should be a base pointer (somewhere up in the def-chain, form the perspective of targetOp)
           //  and because, as I understand, triton does not support e.g. adding two pointers -- there can only be one basePtr in that def-chain
-          if (isa<BlockArgument>(operand)) {
+          if (isa<BlockArgument>(operand) && isa<triton::PointerType>(operand.getType())) {
             basePtr = operand;
             break;
           }
@@ -315,15 +315,24 @@ namespace triton {
       // Clone all operations we depend on first
       for (Value operand : op->getOperands()) {
 
-        if (isa<BlockArgument>(operand)){
+        // the 2nd condition is needed bc there can other non pointer arguments -- don't treat them as the pointer base that I'm looking for
+        if (isa<BlockArgument>(operand) && isa<triton::PointerType>(operand.getType())){
 
           // NOTE: I don't think there can be other BlockArgs in the subtree leading to tt:load operand
           //  because I think triton does not support adding two pointers, thus there can only be one base (IOW blockArgument)
+
+          // ==> oh yeah, there can be other **NON-POINTER** arguments (e.g. above) -- this was just used as some offset into another BlockArg which was a pointer
+          //   - operand: <block argument> of type 'i32' at index: 6; basePtr: <block argument> of type '!tt.ptr<f16>' at index: 1LLVM ERROR: Expected only to find basePtr
+          // signature of the associated tl code:
+          //    def _layer_norm_fwd_fused(
+          //        X,  # pointer to the input
+          //        Y,  # pointer to the output
+          //        stride,  # how much to increase the pointer when moving by 1 row
+          //        N,  # number of columns in X
+          //    )
+
           assert(operand == basePtr);
           isOpDependsOnBasePtr = true;
-
-          // there can be other BlockArguments which are not my basePtr
-          // if (operand == basePtr)
           continue;
         }
 
