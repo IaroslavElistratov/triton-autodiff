@@ -741,6 +741,47 @@ struct ConvertTritonToAutodiff
     Value aCloned = origToCloned.lookup(a);
     Value bCloned = origToCloned.lookup(b);
 
+
+    // ~~~~~~~~~~~~~~~~~ maybe truncate upstream ~~~~~~~~~~~~~~~~~
+    // todo: move this to separate fn; and run it for all handlers -- not just matmul?
+    /*
+    check dtype of upstream and dtype of a_cloned and b_cloned (operands from the fwd pass which will
+    be used for grad computation) -- and if the fwd operands are of lower precision than upstream (grad wrt output buffer for the
+    mamtul that we matched to) then add additional operations to cast upstream to the dtype of operands (lower precision)
+    */
+
+    // Check element types and truncate upstream if needed
+    auto upstreamType = dyn_cast<ShapedType>(upstream.getType());
+    auto aType = dyn_cast<ShapedType>(aCloned.getType());
+    auto bType = dyn_cast<ShapedType>(bCloned.getType());
+    if (!upstreamType || !aType || !bType) {
+      llvm::report_fatal_error("Expected shaped types in handleMatmulBackward");
+    }
+
+    auto upstreamElemType = dyn_cast<FloatType>(upstreamType.getElementType());
+    auto aElemType = dyn_cast<FloatType>(aType.getElementType());
+    auto bElemType = dyn_cast<FloatType>(bType.getElementType());
+
+    assert(aElemType == bElemType);
+
+    // If upstream has higher precision than operands, truncate it
+
+    // Potentially truncated dC
+    Value processedUpstream = upstream;
+    if (upstreamElemType.getWidth() > aElemType.getWidth() ||  upstreamElemType.getWidth() > bElemType.getWidth()) {
+      if (DEBUG_PRINTS) llvm::errs() << "Truncating upstream gradient to match operand precision\n";
+
+      // Determine the target type (use the lower precision of a and b)
+      FloatType targetElemType = aElemType;
+
+      auto targetType = RankedTensorType::get(upstreamType.getShape(), targetElemType);
+      auto processedUpstreamOp = builder.create<arith::TruncFOp>(mmOp.getLoc(), targetType, upstream);
+      processedUpstream = processedUpstreamOp->getResult(0);
+      markVisited(builder, visitedType::Inserted, processedUpstreamOp);
+    }
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
     // For matmul C = A * B + acc
     // dA = dC * B^T
     // dB = A^T * dC
@@ -757,7 +798,7 @@ struct ConvertTritonToAutodiff
     auto gradA = builder.create<triton::DotOp>(
         mmOp.getLoc(),
         a.getType(),                  // Result type should match A's type
-        upstream,                     // dC
+        processedUpstream,                     // dC
         bTrans,                       // B^T
         createConstantTensor(builder, mmOp.getLoc(), a.getType(), 0.0), // zero accumulator
         mmOp.getInputPrecision(),
@@ -777,8 +818,8 @@ struct ConvertTritonToAutodiff
         mmOp.getLoc(),
         b.getType(),                  // Result type should match B's type
         aTrans,                       // A^T
-        upstream,                     // dC
-        // todo-high: or accumualte into here (instead of maybeAccumulateGrad)
+        processedUpstream,                     // dC
+        // todo-high: or accumulate into here (instead of maybeAccumulateGrad)
         createConstantTensor(builder, mmOp.getLoc(), b.getType(), 0.0), // zero accumulator
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
