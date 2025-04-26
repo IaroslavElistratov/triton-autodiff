@@ -1305,7 +1305,54 @@ class CodeGenerator(ast.NodeVisitor):
                 raise AssertionError("encountered unexpected node of type {} in a JoinedStr node".format(type(value)))
         return ''.join(values)
 
+
+    def _set_src_loc(self, node):
+        """Attach a NameLoc built from the best-guess Python identifier."""
+        if not (hasattr(node, "lineno") and hasattr(node, "col_offset")):
+            return                          # no location info on this AST node
+
+        # --- heuristic for the 'stem' -------------------------------------------------
+        var = None
+        if isinstance(node, (ast.Call, ast.BinOp)):
+            # Name after the outermost operator or callee
+            var = getattr(node.func, "id", None) if isinstance(node, ast.Call) else type(node.op).__name__
+        elif isinstance(node, ast.For):
+            var = node.target.id                # induction variable
+
+        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            var = node.targets[0].id                       # x = ...
+        elif isinstance(node, ast.Name):
+            var = node.id                                  # bare 'x'
+        elif isinstance(node, ast.Attribute):
+            var = node.attr                                # obj.attr
+        # fall-back: line-based unique token
+
+        # Any expression that defines no obvious Python identifier – e.g. a bare function call, an arithmetic sub-expression, or tl.program_id(1) – falls through to the site_<lineno> placeholder.
+        # That placeholder is still useful because it keeps SSA IDs stable (%site_36, %site_36_1, …) but it obviously isn’t as descriptive as offs_m, stride_qh, etc.
+
+        if var is None:
+            var = f"site_{node.lineno}"
+
+        print("[codegen._set_src_loc] VAR: ", var)
+        self.builder.set_named_loc(
+            var,
+            self.file_name,
+            self.begin_line + node.lineno,
+            node.col_offset,
+        )
+
+
     def visit(self, node):
+
+        # Location.file and Location.name are the canonical factory helpers in the bindings. 
+        # The nested structure retains the file/line/col information, so IDE “jump-to-definition” and stack-trace printing still work. 
+
+        from mlir.ir import Location, StringAttr          # MLIR Python API
+        def _name_loc(ctx, var_name, file_name, line, col):
+            file_loc = Location.file(file_name, line, col, context=ctx)
+            return Location.name(StringAttr.get(var_name, context=ctx), file_loc)
+
+
         if node is None:
             return
         with warnings.catch_warnings():
@@ -1317,7 +1364,8 @@ class CodeGenerator(ast.NodeVisitor):
             last_loc = self.builder.get_loc()
             self.cur_node = node
             if hasattr(node, 'lineno') and hasattr(node, 'col_offset'):
-                self.builder.set_loc(self.file_name, self.begin_line + node.lineno, node.col_offset)
+                # self.builder.set_loc(self.file_name, self.begin_line + node.lineno, node.col_offset)
+                self._set_src_loc(node)
                 last_loc = self.builder.get_loc()
             try:
                 ret = super().visit(node)
