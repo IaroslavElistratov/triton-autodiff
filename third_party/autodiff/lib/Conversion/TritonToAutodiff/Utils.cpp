@@ -75,12 +75,31 @@ namespace triton {
     } else {
       auto existingGrad = it->second;
 
+      llvm::errs() << "[maybeAccumulateGrad] found existing grad wrt " << val << "\n";
+      llvm::errs() << "existing grad: " << existingGrad << " new grad: " << grad << "\n";
+
       // otherwise "does not dominate its use"  err
-      // Note: when the grad value was defined by an op which was inserted by
-      //  a handler which called setInsertionPointAfterLastUse, that means the
-      //  grad Value is already inserted into the graph after last use of the
+      // Note: when the newGrad value was defined by an op, which was inserted by
+      //  a handler, which called setInsertionPointAfterLastUse, that means the
+      //  grad Value is already inserted into the bwd graph after last use of the
       //  upstream value (IOW existingGrad value)
-      builder.setInsertionPointAfterValue(grad);
+
+      // The handler that called maybeAccumulateGrad must have already set the insertion point (for the ops it inserted)
+      //  to after the last use of upstream grad (for that handler) -- which is called "existingGrad" here
+      //  so the ops that produce new grad (which is called grad here) must have been insierted AFTER the last use of existingGrad
+      //  (so grad is below existingGrad)
+
+      // answer-now:
+      //  no, it's incorrect to assume that the "upstream" for the handler
+      //  that produced the newGrad was the existingGrad -- it's not!
+
+      // builder.setInsertionPointAfterValue(grad);
+
+      Operation *pNew = grad.getDefiningOp();
+      Operation *pOld = existingGrad.getDefiningOp();
+      if (!pOld) pOld = pNew;                    // block-arg case
+      Operation *later = pNew->isBeforeInBlock(pOld) ? pOld : pNew;   // choose the lower op
+      builder.setInsertionPointAfter(later);
 
       // // todo: don't use atomics unless needed (requires some analysis pass
       // // to identify if this accesses the same memory location)
@@ -91,6 +110,8 @@ namespace triton {
       auto accumulatedGrad = builder.create<arith::AddFOp>(existingGrad.getLoc(), existingGrad, grad);
       markVisited(builder, visitedType::Inserted, accumulatedGrad);
 
+      // In standard map/dictionary data structures, when you assign a new value to an existing key, the old value is overwritten
+      // You don't need to "pop" the old value first - the assignment operation automatically replaces the existing value.
       gradMap[val] = accumulatedGrad;
     }
   }
