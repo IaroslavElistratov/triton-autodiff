@@ -923,7 +923,7 @@ struct ConvertTritonToAutodiff
       Value downstreamGrad = createBroadcastOrSplat(
           upstream, // castToSameEncoding(upstream, input, builder);
           input.getType(),
-          reduceOp.getLoc(),
+          currentNodeName,
           builder);
 
       // Propagate the gradient to the input
