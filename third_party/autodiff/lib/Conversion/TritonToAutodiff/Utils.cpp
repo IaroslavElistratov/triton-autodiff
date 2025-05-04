@@ -24,18 +24,50 @@
 namespace mlir {
 namespace triton {
 
-  // this will be used for the nodes that I insert
   NameLoc createNodeName(Operation *op, std::string prefix){
     // Only use this approach for debugging purposes with -mlir-use-nameloc-as-prefix compilation flag
 
     auto origLoc = op->getLoc();
     std::string name = prefix;
 
-    if (auto nameLoc = dyn_cast<NameLoc>(origLoc)) {
-      name += nameLoc.getName().getValue();
+    // Declare first so the lambda can call itself.
+    std::function<std::optional<StringRef>(Location)> firstNameIn;
+
+    firstNameIn = [&firstNameIn](Location loc) -> std::optional<StringRef> {
+      // Fast‑path: most ops already have a NameLoc on top.
+      // handles e.g.:   #loc103 = loc("element_ty"(#loc51))
+      if (auto nl = dyn_cast<NameLoc>(loc))
+        return nl.getName().getValue();
+
+      // For CallSiteLoc, check both callee and caller.
+      //CallSiteLoc records a call stack: it always contains exactly one “callee” location and one “caller” location (the caller may itself be another CallSiteLoc, giving a chain).
+      if (auto cs = dyn_cast<CallSiteLoc>(loc)) {
+        if (auto s = firstNameIn(cs.getCallee())) return s;
+        if (auto s = firstNameIn(cs.getCaller())) return s;
+        return std::nullopt;
+      }
+
+
+      // A FusedLoc may hold several sub‑locations.
+      // handles e.g.: #loc106 = loc(callsite(#loc72 at #loc73))
+      //
+      // FusedLoc, in contrast, is a bag of locations: it owns an arbitrary‑length list of sub‑locations that were “fused” together (plus optional metadata).
+      // So when we search for the first NameLoc string we must look down the callee/caller chain for a CallSiteLoc, but iterate over the entire list for a FusedLoc.
+      if (auto fused = dyn_cast<FusedLoc>(loc))
+        for (Location sub : fused.getLocations())
+          if (auto s = firstNameIn(sub)) return s;
+
+      // UnknownLoc, FileLineCol, etc.
+      return std::nullopt;
+    };
+
+    std::optional<StringRef> optName = firstNameIn(origLoc);
+    if (optName.has_value()) {
+        name += optName.value().str();  // StringRef to std::string
     } else {
-      name += "unnamed";
+        name += "unnamed";
     }
+
 
     llvm::errs() << "name: " << name << "\n";
     auto nameAttr = StringAttr::get(op->getContext(), name);
