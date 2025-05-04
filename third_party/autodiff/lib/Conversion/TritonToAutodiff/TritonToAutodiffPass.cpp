@@ -95,9 +95,9 @@ struct ConvertTritonToAutodiff
 
     // Clones the entire fwd graph (not just a single subgraph leading from the last fwd op)
     DenseSet<Operation*> visitedLoads;
-    // Operation *lastFwdOp = nullptr;
-    Operation *lastFwdOp = beforeReturnOp;
-    // Operation *currFwdOp;
+    // todo: cleanup
+    Operation *lastFwdOp = nullptr;
+    Operation *currFwdOp;
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
       if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
@@ -109,12 +109,11 @@ struct ConvertTritonToAutodiff
 
       // note: important to pass the same map (origToCloned) -- so that the cloning logic
       //  does not re-clone nodes that are common between the subgraphs of nodes leading to different StoreOps
-      cloneSubtree(currStoreOp, origToCloned, builder);
-      // currFwdOp = cloneSubtree(currStoreOp, origToCloned, builder);
-      // // first condition is for the 1st iter -- to overwrite nullptr at least with some currFwdOp
-      // if (!lastFwdOp || currFwdOp->isBeforeInBlock(lastFwdOp)){
-      //   lastFwdOp = currFwdOp;
-      // }
+      currFwdOp = cloneSubtree(currStoreOp, origToCloned, builder);
+      // first condition is for the 1st iter -- to overwrite nullptr at least with some currFwdOp
+      if (!lastFwdOp || !currFwdOp->isBeforeInBlock(lastFwdOp)){
+        lastFwdOp = currFwdOp;
+      }
     }
 
 
