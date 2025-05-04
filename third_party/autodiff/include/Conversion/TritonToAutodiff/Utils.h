@@ -74,6 +74,8 @@ namespace triton {
 
   Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder);
 
+  NameLoc createNodeName(Operation *matchedOp);
+
 } // namespace triton
 } // namespace mlir
 

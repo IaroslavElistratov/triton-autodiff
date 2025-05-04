@@ -24,6 +24,25 @@
 namespace mlir {
 namespace triton {
 
+  // this will be used for the nodes that I insert
+  NameLoc createNodeName(Operation *op){
+    // Only use this approach for debugging purposes with -mlir-use-nameloc-as-prefix compilation flag
+
+    auto origLoc = op->getLoc();
+    std::string name = "grad_";
+
+    if (auto nameLoc = dyn_cast<NameLoc>(origLoc)) {
+      name += nameLoc.getName().getValue();
+    } else {
+      name += "unnamed";
+    }
+
+    llvm::errs() << "name: " << name << "\n";
+    auto nameAttr = StringAttr::get(op->getContext(), name);
+    auto newLoc = NameLoc::get(nameAttr, op->getLoc());
+    return newLoc;
+  }
+
   void markVisited(OpBuilder &builder, visitedType mode, Operation *op) {
     if (!op) {
       llvm::report_fatal_error("markVisited received null operation pointer\n");
