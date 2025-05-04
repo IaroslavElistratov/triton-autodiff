@@ -322,7 +322,7 @@ struct ConvertTritonToAutodiff
     //  writes output into that variable -- thus overwriting my upstream grad
     //
     // don't overwrite upstream with the fwd output
-    lastFwdOp->erase();
+    // lastFwdOp->erase();
 
     // Second pass: handle LoadOp operations
     // because its derivative (storeOp) destroyaes semantics of input args
