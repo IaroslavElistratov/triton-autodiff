@@ -162,7 +162,7 @@ struct ConvertTritonToAutodiff
           continue;
       }
 
-      NameLoc nodeName = createNodeName(op);
+      NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
 
@@ -219,7 +219,7 @@ struct ConvertTritonToAutodiff
 
       if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
 
-      NameLoc nodeName = createNodeName(op);
+      NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
 
@@ -309,7 +309,7 @@ struct ConvertTritonToAutodiff
           continue;
       }
 
-      NameLoc nodeName = createNodeName(op);
+      NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
 

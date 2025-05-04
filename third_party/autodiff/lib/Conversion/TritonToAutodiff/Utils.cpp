@@ -25,11 +25,11 @@ namespace mlir {
 namespace triton {
 
   // this will be used for the nodes that I insert
-  NameLoc createNodeName(Operation *op){
+  NameLoc createNodeName(Operation *op, std::string prefix){
     // Only use this approach for debugging purposes with -mlir-use-nameloc-as-prefix compilation flag
 
     auto origLoc = op->getLoc();
-    std::string name = "grad_";
+    std::string name = prefix;
 
     if (auto nameLoc = dyn_cast<NameLoc>(origLoc)) {
       name += nameLoc.getName().getValue();
@@ -264,6 +264,11 @@ namespace triton {
     // IRMapping used to ensure when I clone operations, the operands of the cloned
     // ops refer to the cloned values, not the original ones.
     Operation *clonedOp = builder.clone(*targetOp, mapper);
+
+    // add prefix to the name
+    NameLoc prefixedLoc = createNodeName(clonedOp, "fwd_");
+    clonedOp->setLoc(prefixedLoc);
+
     markVisited(builder, visitedType::Cloned, clonedOp);
 
     // if (clonedOp) {
