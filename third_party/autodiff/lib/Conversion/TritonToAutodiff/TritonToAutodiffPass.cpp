@@ -1,5 +1,10 @@
 //#include "triton/Conversion/TritonToAutodiff/TritonToAutodiffPass.h"
 
+
+#include "mlir/IR/AsmState.h"          // registerAsmPrinterCLOptions
+#include "llvm/Support/CommandLine.h"
+
+
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
@@ -54,8 +59,27 @@ struct ConvertTritonToAutodiff
     });
   }
 
+  void enableNameLocSSA() {
+    mlir::registerAsmPrinterCLOptions();   // registers --mlir-use-nameloc-as-prefix
+
+    static const char *argv[] = {
+        "TritonToAutodiffPass",           // argv[0] — file name must be present
+        "--mlir-use-nameloc-as-prefix"    // the one flag you need
+    };
+    constexpr int argc = sizeof(argv) / sizeof(argv[0]);
+
+    // If ParseCommandLineOptions might have run before, reset first:
+    llvm::cl::ResetAllOptionOccurrences();          // optional safety
+
+    llvm::cl::ParseCommandLineOptions(argc,
+                                      const_cast<char **>(argv),
+                                      /*Overview=*/"");  // overview text is optional
+  }
+
   // walk the IR backward, rewrite each operation with its corresponding backward function
   void rewriteSplatAddOp(triton::FuncOp func) {
+
+    enableNameLocSSA();
 
     // todo-now: undo
     unrollAllForOps(func);
