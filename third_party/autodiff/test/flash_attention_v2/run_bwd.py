@@ -1,5 +1,7 @@
 import numpy as np
 import torch
+
+torch.manual_seed(20)
 DEVICE = torch.device("cuda:0")
 
 import triton
@@ -16,19 +18,7 @@ bwd_kernel = compile("out.ttir", target=target)
 
 
 
-torch.manual_seed(20)
-
-def test_op(Z=1, H=2, N_CTX=16, HEAD_DIM=16, causal=True, dtype=torch.float16, sm_scale=0.5):
-
-    ######## COPY FROM FWD ########
-
-    q = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5).requires_grad_())
-    k = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5).requires_grad_())
-    v = (torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5).requires_grad_())
-    sm_scale = 0.5
-    # answer-now: note they use rand like upstream (not ones)
-    dout = torch.randn_like(q)
-
+def test_op(upstream, q, k, v, causal, sm_scale):
 
     ######## COPY FROM FWD ########
 
@@ -51,6 +41,7 @@ def test_op(Z=1, H=2, N_CTX=16, HEAD_DIM=16, causal=True, dtype=torch.float16, s
 
     # assert q.shape[2] / BLOCK_M == 1
     assert q.shape[2] == BLOCK_M
+    # comment: this tensor is float32 -- while others are float16
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
     ################################
 
@@ -60,38 +51,11 @@ def test_op(Z=1, H=2, N_CTX=16, HEAD_DIM=16, causal=True, dtype=torch.float16, s
     grad_k = torch.zeros_like(k)
     grad_v = torch.zeros_like(v)
     grad_m = torch.zeros_like(M)
-    # note: ones!
-    grad_o = torch.ones_like(o)
+    # note:
+    grad_o = upstream
 
     # enqueue kernel
     compiled_kernel = bwd_kernel[grid](  #
-
-        # # fwd values:
-        # q,      # FLOAT PTR!
-        # k,      # FLOAT PTR!
-        # v,      # FLOAT PTR!
-        # 0.5,    #   sm_scale
-        # M,      # FLOAT PTR!
-        # o,      # FLOAT PTR!
-        # 256,    #   q.stride(0)
-        # 256,    #   q.stride(1)
-        # 16,     #   q.stride(2)
-        # 1,      #   q.stride(3)
-        # 256,    #   k.stride(0)
-        # 256,    #   k.stride(1)
-        # 16,     #   k.stride(2)
-        # 1,      #   k.stride(3)
-        # 256,    #   v.stride(0)
-        # 256,    #   v.stride(1)
-        # 16,     #   v.stride(2)
-        # 1,      #   v.stride(3)
-        # 256,    #   o.stride(0)
-        # 256,    #   o.stride(1)
-        # 16,     #   o.stride(2)
-        # 1,      #   o.stride(3)
-        # 1,      #   q.shape[0]
-        # 1,      #   q.shape[1]
-
 
         # fwd values:
         q,      # FLOAT PTR!
@@ -101,9 +65,16 @@ def test_op(Z=1, H=2, N_CTX=16, HEAD_DIM=16, causal=True, dtype=torch.float16, s
         M,      # FLOAT PTR!
         o,      # FLOAT PTR!
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+
+        # k.stride(0), k.stride(1), # not used in the fwd kernel
+        k.stride(2), k.stride(3),
+
+        # v.stride(0), v.stride(1), # not used in the fwd kernel
+        v.stride(2), v.stride(3),
+
+        # o.stride(0), o.stride(1), # not used in the fwd kernel
+        o.stride(2), o.stride(3),
+
         q.shape[0], q.shape[1], q.shape[2],
 
         # HEAD_DIM=HEAD_DIM_K,  # constexpr
@@ -119,68 +90,113 @@ def test_op(Z=1, H=2, N_CTX=16, HEAD_DIM=16, causal=True, dtype=torch.float16, s
         grad_o,
 
     )
-    return compiled_kernel, grad_x_arg, grad_weight, grad_bias, grad_mean, grad_rstd
-
-# !tt.ptr<f16>, !tt.ptr<f16>, !tt.ptr<f16>, !tt.ptr<f32>, !tt.ptr<f16>,
-# i32, i32, i32, i32,
-# i32, i32, i32, i32,
-# i32, i32, i32, i32,
-# i32,
-# !tt.ptr<f16>, !tt.ptr<f16>, !tt.ptr<f16>, !tt.ptr<f32>, !tt.ptr<f16>
+    return compiled_kernel, o, grad_q, grad_k, grad_v, grad_m
 
 
 
 
+Z=1
+H=2
+N_CTX=16
+HEAD_DIM=16
+dtype=torch.float16
+
+causal=False
+sm_scale=0.5
+
+q = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+k = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+v = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+
+# note:
+# dout = torch.randn_like(q)
+dout = torch.ones_like(q)
+
+
+
+
+
+
+# my autodif
 
 # NOTE: this works but unrolls for 128 times -- so try smaller shapes
 # tri_out, ref_out = test_op(1, 1, 128, 64, True)
 
+compiled_kernel, out, grad_q, grad_k, grad_v, grad_m = test_op(dout, q, k, v, causal, sm_scale)
+print("out", out[0, 0, :4, :4])
+print("grad_q", grad_q[0, 0, :4, :4])
+print("grad_k", grad_k[0, 0, :4, :4])
+print("grad_v", grad_v[0, 0, :4, :4])
 
 
 
-test_op()
+# reference implementation
 
-# # todo-now:
+def torch_fn(q, k, v, causal, sm_scale):
+    M = torch.tril(torch.ones((N_CTX, N_CTX), device=DEVICE))
+    p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
+    if causal:
+        p[:, :, M == 0] = float("-inf")
 
-# # reference implementation
-# M = torch.tril(torch.ones((N_CTX, N_CTX), device=DEVICE))
-# p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-# if causal:
-#     p[:, :, M == 0] = float("-inf")
-# p = torch.softmax(p.float(), dim=-1).half()
-# # p = torch.exp(p)
-# ref_out = torch.matmul(p, v)
-# ref_out.backward(dout)
+    # ORIGINAL:
+    p = torch.softmax(p.float(), dim=-1).half()
+
+    #  todo-now: using softmax wt min-max trick to correspond to the inp.ttir
+    # # MY:
+    # p = p.float()
+    # exp = torch.exp(p)
+    # p = (exp / exp.sum(dim=-1, keepdim=True)).half()
+
+    # p = torch.exp(p)
+    ref_out = torch.matmul(p, v)
+    return ref_out
+
+q.requires_grad = True
+k.requires_grad = True
+v.requires_grad = True
+
+ref_out = torch_fn(q, k, v, causal, sm_scale)
+ref_out.backward(dout)
+
+print("ref_out", ref_out[0, 0, :4, :4])
+print("ref_grad_q", q.grad[0, 0, :4, :4])
+print("ref_grad_k", k.grad[0, 0, :4, :4])
+print("ref_grad_v", v.grad[0, 0, :4, :4])
+
 # ref_dv, v.grad = v.grad.clone(), None
 # ref_dk, k.grad = k.grad.clone(), None
 # ref_dq, q.grad = q.grad.clone(), None
-
 
 
 # # triton implementation
 # tri_out = attention(q, k, v, causal, sm_scale).half()
 
 # assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
-# rtol = 0.0
-# # assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=rtol)
-# # assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=rtol)
-# # assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol)
+# assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=0.0)
+# assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=0.0)
+# assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=0.0)
 # return tri_out, ref_out
 
 
+if torch.allclose(out, ref_out, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
+if torch.allclose(grad_q, q.grad, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
+if torch.allclose(grad_k, k.grad, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
-
-
-
-
-
-
-
-
-
-
+if torch.allclose(grad_v, v.grad, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
 
 
