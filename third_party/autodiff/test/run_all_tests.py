@@ -66,14 +66,14 @@ for test_name in ["add", "add-mul", "div", "add-mul-div", "math-ops",
   print("~" * 20 + f" Running {test_name} " + "~" * 20)
 
   # 1. produce fwd ttir
-  subprocess.run([sys.executable, f"{test_dir}/run_fwd.py"], cwd=test_dir)
+  subprocess.run([sys.executable, f"{test_dir}/fwd.py"], cwd=test_dir)
 
   # 2. optionally, produce readable fwd ttir
 
   # with open(f"{test_dir}/_inp_readable.ttir", "w") as f:
   #   subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{test_dir}/inp.ttir"], stdout=f)
 
-  # this is a bit ugly but needed bc run_fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
+  # this is a bit ugly but needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
   # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix" on it and write
   # to the same files to avoid creating redundant files
   with open(f"{test_dir}/inp.ttir", "r+") as f:
@@ -91,7 +91,7 @@ for test_name in ["add", "add-mul", "div", "add-mul-div", "math-ops",
     subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{test_dir}/inp.ttir"], stdout=f)
 
   # 5. run bwd ttir
-  subprocess.run([sys.executable, f"{test_dir}/run_bwd.py"], cwd=test_dir)
+  subprocess.run([sys.executable, f"{test_dir}/bwd.py"], cwd=test_dir)
 
   # 6. optionally, produce vis dot
   draw_dot(mode="bwd")
