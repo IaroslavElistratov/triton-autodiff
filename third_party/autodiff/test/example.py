@@ -47,34 +47,39 @@ import hashlib
 # fwd_shapes = []
 # import weakref
 
+FWD_ARGS = None
+
 # tensor_ptr_to_shape = weakref.WeakValueDictionary()
 
-# # to keep track of the shapes of the tensors (seems by default this info is not accessible form the bwd hook alone)
-# def shape_track_hook(*args, **kwargs):
-#     # Clear previous shapes if needed
-#     # fwd_shapes.clear()  # Uncomment if you want to reset on each call
+# to keep track of the shapes of the tensors (seems by default this info is not accessible form the bwd hook alone)
+def shape_track_hook(*args, **kwargs):
+    # Clear previous shapes if needed
+    # fwd_shapes.clear()  # Uncomment if you want to reset on each call
 
-#     for arg in args:
-#         if isinstance(arg, torch.Tensor):
-#             tensor_ptr_to_shape[arg.data_ptr()] = arg
+    global FWD_ARGS
+    FWD_ARGS = args
 
-#     # # Process positional arguments
-#     # for i, arg in enumerate(args):
-#     #     if hasattr(arg, 'shape') and hasattr(arg, 'dtype'):  # Simple check for tensor-like objects
-#     #         fwd_shapes.append((f"arg_{i}", arg.shape, arg.dtype))
-#     #     elif hasattr(arg, 'data_ptr'):  # This is a raw pointer, we can't get shape directly
-#     #         fwd_shapes.append((f"arg_{i}", "pointer", None))
+    # for arg in args:
+    #     if isinstance(arg, torch.Tensor):
+    #         tensor_ptr_to_shape[arg.data_ptr()] = arg
 
-#     # # Process keyword arguments
-#     # for name, arg in kwargs.items():
-#     #     if hasattr(arg, 'shape') and hasattr(arg, 'dtype'):
-#     #         fwd_shapes.append((name, arg.shape, arg.dtype))
-#     #     elif hasattr(arg, 'data_ptr'):
-#     #         fwd_shapes.append((name, "pointer", None))
+    # # Process positional arguments
+    # for i, arg in enumerate(args):
+    #     if hasattr(arg, 'shape') and hasattr(arg, 'dtype'):  # Simple check for tensor-like objects
+    #         fwd_shapes.append((f"arg_{i}", arg.shape, arg.dtype))
+    #     elif hasattr(arg, 'data_ptr'):  # This is a raw pointer, we can't get shape directly
+    #         fwd_shapes.append((f"arg_{i}", "pointer", None))
+
+    # # Process keyword arguments
+    # for name, arg in kwargs.items():
+    #     if hasattr(arg, 'shape') and hasattr(arg, 'dtype'):
+    #         fwd_shapes.append((name, arg.shape, arg.dtype))
+    #     elif hasattr(arg, 'data_ptr'):
+    #         fwd_shapes.append((name, "pointer", None))
 
 def grad(kernel):
 
-#   kernel.add_pre_run_hook(shape_track_hook)
+  kernel.add_pre_run_hook(shape_track_hook)
 
   # todo: add a hook to a specific instance of a JITFunction
   # Assign the hook to JITFunction's compiled_hook
@@ -160,8 +165,17 @@ def stub_bwd(fwd_args, upstream, idx_upstream):
     # todo: I guess output buffer needs to be initialized clean each time, but I'm currently passing the fwd buffer
     # out = torch.empty_like(a)
     # todo-high: but I guess in general this logic an be aritreally complex -- and I potentially need to overload stub as well?
-    fwd_args = list(fwd_args)
-    fwd_args.insert(idx_upstream, torch.empty_like(a))
+    #   basically, init'ing of the fwd buffers for the kernel happens in the stub_fwd
+    #   but I'm creating this fn (stub_bwd) in the post-hook of the kernel.
+    #   This fn (stub_bwd) will be called with input args, and is basically expected to do the work of fwd_stub
+    #   -- IOW: compute kernel-specific constants based on shapes of input args; initialize buffers; do argument checks; anything else that fwd kernel needs.
+    #   So maybe instead of doing that, access fwd_kernel inputs (prepared by the fwd_stub) and just feed these fwd input directly during bwd
+    #   There's a risk of overwriting fwd output (which was already produced when the fwd kernel ran) -- but it seems ok bc you know "idx_upstream"
+    #   so can replace them with zeros again before calling the bwd_kernel (but seems doesn't matter anyway bc even though your bwd produces fwd outputs as well, they aren't used anywhere)
+    #
+    #   Exactly: in Function.backward you call "inputs = ctx.saved_tensors", where ctx.saved_tensors are saved in Function.forward as args to the fwd_stub (so before even the fwd_stub ran).
+    #   So see seems that I do need pre_hook on the kernel after all. Bc I assume that pre-hook on the kernel runs after the logic in the fwd_stub initializes all the inputs to the fwd kernel
+    fwd_args = FWD_ARGS
 
     # todo: extract this from the kernel
     grid = (1, 1, 1)
