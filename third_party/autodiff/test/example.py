@@ -51,14 +51,29 @@ FWD_ARGS = None
 
 # tensor_ptr_to_shape = weakref.WeakValueDictionary()
 
+
+class StashArgsCtx:
+    _active_instance = None
+
+    def __enter__(self):
+        type(self)._active_instance = self
+        self.args = None
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        type(self)._active_instance = None
+
+
+
 # hook is called on the Python side with the same *args, **kwargs you pass when you launch the kernel
 # to keep track of the shapes of the tensors (seems by default this info is not accessible form the bwd hook alone)
 def shape_track_hook(*args, **kwargs):
     # Clear previous shapes if needed
     # fwd_shapes.clear()  # Uncomment if you want to reset on each call
 
-    global FWD_ARGS
-    FWD_ARGS = args # [weakref.ref(arg) for arg in args]
+    ctx = StashArgsCtx._active_instance
+    if ctx is not None:
+        ctx.args = args # [weakref.ref(arg) for arg in args]
 
     # for arg in args:
     #     if isinstance(arg, torch.Tensor):
@@ -253,7 +268,8 @@ class Op(torch.autograd.Function):
         # objects for use in the backward pass using the ctx.save_for_backward method.
 
         # now executing the stub should populate FWD_ARGS (bc we registered pre-hook on the kernel, and that kernel was called inside the stub)
-        outs = stub(*stub_inputs)
+        with StashArgsCtx() as arg_ctx:
+            outs = stub(*stub_inputs)
 
         # answer-now:
         # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
@@ -261,8 +277,7 @@ class Op(torch.autograd.Function):
         # todo:
         # note the execution of the kernel might have  over-written zeroed out output buffers (initialized in the stub) with actual kernel outputs
 
-        # with get_kernel_inputs():
-        kernel_inputs = FWD_ARGS
+        kernel_inputs = arg_ctx.args
         print("saving for bwd: ", kernel_inputs)
 
         # note stashing kernel inputs, not stub inputs
