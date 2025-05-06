@@ -51,13 +51,14 @@ FWD_ARGS = None
 
 # tensor_ptr_to_shape = weakref.WeakValueDictionary()
 
+# hook is called on the Python side with the same *args, **kwargs you pass when you launch the kernel
 # to keep track of the shapes of the tensors (seems by default this info is not accessible form the bwd hook alone)
 def shape_track_hook(*args, **kwargs):
     # Clear previous shapes if needed
     # fwd_shapes.clear()  # Uncomment if you want to reset on each call
 
     global FWD_ARGS
-    FWD_ARGS = args
+    FWD_ARGS = args # [weakref.ref(arg) for arg in args]
 
     # for arg in args:
     #     if isinstance(arg, torch.Tensor):
@@ -77,19 +78,29 @@ def shape_track_hook(*args, **kwargs):
     #     elif hasattr(arg, 'data_ptr'):
     #         fwd_shapes.append((name, "pointer", None))
 
-def grad(kernel):
 
-  kernel.add_pre_run_hook(shape_track_hook)
+# double nesting is needed here to support decorator with arguments
+# and I want make user pass the stub here -- bc need some generic way for usr
+# to specify what their stub fn is wt me hardcoding it
+#
+# todo: use stub and idx_upstream passed by the user
+def grad(stub, idx_upstream):
 
-  # todo: add a hook to a specific instance of a JITFunction
-  # Assign the hook to JITFunction's compiled_hook
-  triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
+    def inner(kernel):
+        kernel.add_pre_run_hook(shape_track_hook)
 
+        # todo: add a hook to a specific instance of a JITFunction
+        # Assign the hook to JITFunction's compiled_hook
 
-  return kernel
+        triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
+
+        return kernel
+
+    return inner
 
 BWD_KERNEL = None
 
+# def my_post_hook(stub):
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
     if not already_compiled:
         compile_dict = compile
@@ -144,6 +155,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         signature = compile_dict["signature"]
         print(f"Kernel signature: {signature}")
 
+        print("repr: ", repr)
+
         # for (name, shape, dtype) in fwd_shapes:
         #     print("shape:", shape)
 
@@ -161,39 +174,25 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
 
 
-def stub_bwd(fwd_args, upstream, idx_upstream):
-    # todo: I guess output buffer needs to be initialized clean each time, but I'm currently passing the fwd buffer
-    # out = torch.empty_like(a)
-    # todo-high: but I guess in general this logic an be aritreally complex -- and I potentially need to overload stub as well?
-    #   basically, init'ing of the fwd buffers for the kernel happens in the stub_fwd
-    #   but I'm creating this fn (stub_bwd) in the post-hook of the kernel.
-    #   This fn (stub_bwd) will be called with input args, and is basically expected to do the work of fwd_stub
-    #   -- IOW: compute kernel-specific constants based on shapes of input args; initialize buffers; do argument checks; anything else that fwd kernel needs.
-    #   So maybe instead of doing that, access fwd_kernel inputs (prepared by the fwd_stub) and just feed these fwd input directly during bwd
-    #   There's a risk of overwriting fwd output (which was already produced when the fwd kernel ran) -- but it seems ok bc you know "idx_upstream"
-    #   so can replace them with zeros again before calling the bwd_kernel (but seems doesn't matter anyway bc even though your bwd produces fwd outputs as well, they aren't used anywhere)
-    #
-    #   Exactly: in Function.backward you call "inputs = ctx.saved_tensors", where ctx.saved_tensors are saved in Function.forward as args to the fwd_stub (so before even the fwd_stub ran).
-    #   So see seems that I do need pre_hook on the kernel after all. Bc I assume that pre-hook on the kernel runs after the logic in the fwd_stub initializes all the inputs to the fwd kernel
-    fwd_args = FWD_ARGS
+def stub_bwd(kernel_inputs, upstream, idx_upstream):
 
     # todo: extract this from the kernel
     grid = (1, 1, 1)
 
     bwd_args = []
-    for i, arg in enumerate(fwd_args):
+    for i, arg in enumerate(kernel_inputs):
         if i == idx_upstream:
             bwd_args.append(upstream)
             continue
         if isinstance(arg, torch.Tensor):
             bwd_args.append(torch.zeros_like(arg))
 
-    print("[stub_bwd] fwd_args:", fwd_args)
+    # # print("[stub_bwd] kernel_inputs:", kernel_inputs)
     print("[stub_bwd] bwd_args:", bwd_args)
-    BWD_KERNEL[grid](*fwd_args, *bwd_args)
+    BWD_KERNEL[grid](*kernel_inputs, *bwd_args)
     print("[stub_bwd] grads", bwd_args)
 
-    # [stub_bwd] fwd_args: [tensor([0.3990, 0.5167, 0.0249, 0.9401], device='cuda:0', requires_grad=True), tensor([0.9722, 0.7910, 0.4690, 0.3300], device='cuda:0', requires_grad=True), tensor([0., 0., 0., 0.], device='cuda:0')]
+    # [stub_bwd] kernel_inputs: [tensor([0.3990, 0.5167, 0.0249, 0.9401], device='cuda:0', requires_grad=True), tensor([0.9722, 0.7910, 0.4690, 0.3300], device='cuda:0', requires_grad=True), tensor([0., 0., 0., 0.], device='cuda:0')]
     # [stub_bwd] bwd_args: [tensor([0., 0., 0., 0.], device='cuda:0'), tensor([0., 0., 0., 0.], device='cuda:0'), tensor([1., 1., 1., 1.], device='cuda:0')]
     # [stub_bwd] grads [tensor([0.9722, 0.7910, 0.4690, 0.3300], device='cuda:0'), tensor([0.8990, 1.0167, 0.5249, 1.4401], device='cuda:0'), tensor([1., 1., 1., 1.], device='cuda:0')
 
@@ -204,8 +203,16 @@ def stub_bwd(fwd_args, upstream, idx_upstream):
 
 
 
+def stub(a, b):
+    output = torch.empty_like(a)
+    assert a.device == DEVICE and output.device == DEVICE
+    n_elements = output.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    kernel[grid](a, b, output, BLOCK_SIZE=4)
+    return output
+
 # @autodiff
-@grad
+@grad(stub, idx_upstream=2)
 @triton.jit
 def kernel(
         a_ptr,
@@ -223,13 +230,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, y, mask=offsets<4)
 
-def stub(a, b):
-    output = torch.empty_like(a)
-    assert a.device == DEVICE and output.device == DEVICE
-    n_elements = output.numel()
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    kernel[grid](a, b, output, BLOCK_SIZE=4)
-    return output
+
 
 size = 4
 a = torch.rand(size, device=DEVICE)
@@ -243,12 +244,30 @@ upstream = torch.ones_like(a)
 
 class Op(torch.autograd.Function):
 
+
+    # question-now: bwd_stub really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
+    #   seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
     @staticmethod
-    def forward(ctx, *args):
+    def forward(ctx, *stub_inputs):
         # ctx is a context object that can be used to stash information for backward computation. You can cache arbitrary
         # objects for use in the backward pass using the ctx.save_for_backward method.
-        ctx.save_for_backward(*args)
-        return stub(*args)
+
+        # now executing the stub should populate FWD_ARGS (bc we registered pre-hook on the kernel, and that kernel was called inside the stub)
+        outs = stub(*stub_inputs)
+
+        # answer-now:
+        # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
+        #   ==> can overload kernel pre-hook to get access to them
+        # todo:
+        # note the execution of the kernel might have  over-written zeroed out output buffers (initialized in the stub) with actual kernel outputs
+
+        # with get_kernel_inputs():
+        kernel_inputs = FWD_ARGS
+        print("saving for bwd: ", kernel_inputs)
+
+        # note stashing kernel inputs, not stub inputs
+        ctx.save_for_backward(*kernel_inputs)
+        return outs
 
     @staticmethod
     def backward(ctx, upstream):
