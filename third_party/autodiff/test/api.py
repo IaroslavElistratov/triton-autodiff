@@ -236,7 +236,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # jit_fn.device_caches[device][0][key]
         # > triton.compiler.compiler.CompiledKernel
 
-        new_key, num_added_args = create_new_key()
+        new_key = create_new_key()
         # key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
         # new key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 

@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 
+import api
 from api import clone_jit_function, shape_track_hook, my_post_hook, bwd_stub, DifferentiatedCompiledKernel
 
 
@@ -45,6 +46,7 @@ def kernel(
 
 
 bwd_kernel = clone_jit_function(kernel)
+api.bwd_kernel = bwd_kernel
 
 
 
