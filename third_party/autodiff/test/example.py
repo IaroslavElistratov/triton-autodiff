@@ -1,55 +1,57 @@
+import hashlib
+from functools import partial
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
-
 import torch
 torch.manual_seed(0)
+DEVICE = torch.device("cuda:0")
 
 import triton
 import triton.language as tl
-
-DEVICE = torch.device("cuda:0")
-
-
 from triton.runtime import driver
 
 from run_all_tests import main
 
-"""
-kwargs = {
-    'signature': signature,
-    'device': device,
-    'constants': constants,
-    'num_warps': options.num_warps,
-    'num_ctas': options.num_ctas,
-    'num_stages': options.num_stages,
-    'enable_fp_fusion': options.enable_fp_fusion,
-    'launch_cooperative_grid': options.launch_cooperative_grid,
-    'extern_libs': options.extern_libs,
-    'configs': configs,
-    'specialization_data': specialization_data,
-    'is_warmup': is_warmup,
-}
+from triton.runtime.jit import JITFunction
 
-return hook(
-    key=key,
-    repr=repr,
-    fn=JitFunctionInfo(module, name, self),
-    compile={"key": key, **kwargs},
-    is_manual_warmup=is_warmup,
-    already_compiled=False,
-)
-"""
-
-import hashlib
+from collections import defaultdict
 
 
-# fwd_shapes = []
-# import weakref
+def stub(a, b):
+    output = torch.empty_like(a)
+    assert a.device == DEVICE and output.device == DEVICE
+    n_elements = output.numel()
+    # grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    grid = lambda meta: (triton.cdiv(n_elements, 4), )
+    print("[fwd stub] a, b, out", a, b, output)
+    kernel[grid](a, b, output) # , BLOCK_SIZE=4)
+    return output
 
-FWD_ARGS = None
 
-# tensor_ptr_to_shape = weakref.WeakValueDictionary()
+# @grad(stub, idx_upstream=2)
+@triton.jit
+def kernel(
+        a_ptr,
+        b_ptr,
+        output_ptr,
+        # BLOCK_SIZE: tl.constexpr,
+    ):
+    offsets = tl.arange(0, 4) # BLOCK_SIZE)
+
+    a = tl.load(a_ptr + offsets)
+    b = tl.load(b_ptr + offsets)
+
+    x = a + 0.5
+    y = x * b
+
+    tl.store(output_ptr + offsets, y, mask=offsets<4)
+
+
+
+
+
+
 
 
 class StashArgsCtx:
@@ -75,121 +77,37 @@ def shape_track_hook(*args, **kwargs):
     if ctx is not None:
         ctx.args = args # [weakref.ref(arg) for arg in args]
 
-    # for arg in args:
-    #     if isinstance(arg, torch.Tensor):
-    #         tensor_ptr_to_shape[arg.data_ptr()] = arg
-
-    # # Process positional arguments
-    # for i, arg in enumerate(args):
-    #     if hasattr(arg, 'shape') and hasattr(arg, 'dtype'):  # Simple check for tensor-like objects
-    #         fwd_shapes.append((f"arg_{i}", arg.shape, arg.dtype))
-    #     elif hasattr(arg, 'data_ptr'):  # This is a raw pointer, we can't get shape directly
-    #         fwd_shapes.append((f"arg_{i}", "pointer", None))
-
-    # # Process keyword arguments
-    # for name, arg in kwargs.items():
-    #     if hasattr(arg, 'shape') and hasattr(arg, 'dtype'):
-    #         fwd_shapes.append((name, arg.shape, arg.dtype))
-    #     elif hasattr(arg, 'data_ptr'):
-    #         fwd_shapes.append((name, "pointer", None))
-
-
-# double nesting is needed here to support decorator with arguments
-# and I want make user pass the stub here -- bc need some generic way for usr
-# to specify what their stub fn is wt me hardcoding it
-#
-# todo: use stub and idx_upstream passed by the user
-def grad(stub, idx_upstream):
-
-    def inner(kernel):
-        kernel.add_pre_run_hook(shape_track_hook)
-
-        # todo: add a hook to a specific instance of a JITFunction
-        # Assign the hook to JITFunction's compiled_hook
-
-        triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
-
-        return kernel
-
-    return inner
-
-BWD_KERNEL = None
-
-# def my_post_hook(stub):
-def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
-    if not already_compiled:
-        compile_dict = compile
-        print(f"Kernel {fn.name} just finished executing!")
-        print(f"Representation: {repr}")
-
-        # I see the post execution hook is called from here -- but how do i get "kenrel" (output of self.compile) from inside the hook?
-        # JITFunction.run
-        #     # compile the kernel
-        #     src = self.ASTSource(self, signature, constexprs, attrs)
-        #     kernel = self.compile(src, target=target, options=options.__dict__)
-        #     kernel_cache[key] = kernel
-        #     self._call_hook(key, signature, device, constexprs, options, [attrs], warmup, before=False)
-
-
-        # 1. The fn parameter passed to the hook contains a jit_function attribute that refers to the JITFunction instance.
-        # 2. Each JITFunction keeps its kernels in device_caches[device], which is a tuple where the first element is the kernel cache dictionary.
-        # 3. The same key that's passed to the hook is the one used to store the kernel in the cache.
-
-        # Get the device
-        device = driver.active.get_current_device()
-
-        # Access the kernel from the cache
-        jit_fn = fn.jit_function  # This is the JITFunction instance
-        kernel_cache = jit_fn.device_caches[device][0]  # First element is the kernel cache dict
-        _compiled_kernel = kernel_cache[key]  # Get the kernel using the same key
-
-        # # Now you have the kernel object
-        # print(f"Retrieved compiled kernel object: {_compiled_kernel}")
 
 
 
-        # the "key" arg is just a python string with input signatures of the kernel
-        # but I want some folder name -- one way is to hash it
-        hash_object = hashlib.sha256(key.encode())
-        dir_name = hash_object.hexdigest()[:10]
 
-        with open(f"{dir_name}/inp.ttir", "w") as f:
-          f.write(_compiled_kernel.asm['ttir'])
+def clone_jit_function(jit_func):
+    assert isinstance(jit_func, JITFunction)
 
-        main(f"./{dir_name}", run_py=False)
+    # Create a new JITFunction with the same base function and parameters
+    cloned = JITFunction(
+        jit_func.fn,
+        version=jit_func.version,
+        do_not_specialize=jit_func.do_not_specialize,
+        do_not_specialize_on_alignment=jit_func.do_not_specialize_on_alignment,
+        debug=jit_func.debug,
+        noinline=jit_func.noinline,
+        repr=jit_func._repr,
+        launch_metadata=jit_func.launch_metadata
+    )
 
+    # Copy any pre-run hooks
+    cloned.pre_run_hooks = list(jit_func.pre_run_hooks)
 
-        # create executable python fn for bwd
-        from triton.compiler import compile
-        from triton.backends.compiler import GPUTarget
-
-        target = GPUTarget("cuda", arch=89, warp_size=32)
-        bwd_kernel = compile("out.ttir", target=target)
-
-        # Extract signature from the compile dictionary
-        signature = compile_dict["signature"]
-        print(f"Kernel signature: {signature}")
-
-        print("repr: ", repr)
-
-        # for (name, shape, dtype) in fwd_shapes:
-        #     print("shape:", shape)
-
-
-        # grad_args = []
-        # for ptr, tensor in tensor_ptr_to_shape.items():
-        #     # print(ptr, tensor)
-        #     grad_args.append(torch.zeros_like(tensor))
-
-        # todo-now: need to input idx for upstream ptr from the user -- as to pass it during the bwd pass
-        global BWD_KERNEL
-        BWD_KERNEL = bwd_kernel
-
-    return False
+    return cloned
 
 
 
-def stub_bwd(kernel_inputs, upstream, idx_upstream):
+bwd_kernel = clone_jit_function(kernel)
+
+
+# todo-low: it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
+def bwd_stub(bwd_kernel, kernel_inputs, upstream, idx_upstream):
 
     # todo: extract this from the kernel
     grid = (1, 1, 1)
@@ -202,14 +120,13 @@ def stub_bwd(kernel_inputs, upstream, idx_upstream):
         if isinstance(arg, torch.Tensor):
             bwd_args.append(torch.zeros_like(arg))
 
-    # # print("[stub_bwd] kernel_inputs:", kernel_inputs)
-    print("[stub_bwd] bwd_args:", bwd_args)
-    BWD_KERNEL[grid](*kernel_inputs, *bwd_args)
-    print("[stub_bwd] grads", bwd_args)
+    # # print("[bwd_stub] kernel_inputs:", kernel_inputs)
+    print("[bwd_stub] bwd_args:", bwd_args)
+    bwd_kernel[grid](*kernel_inputs, *bwd_args)
+    print("[bwd_stub] grads", bwd_args)
 
-    # [stub_bwd] kernel_inputs: [tensor([0.3990, 0.5167, 0.0249, 0.9401], device='cuda:0', requires_grad=True), tensor([0.9722, 0.7910, 0.4690, 0.3300], device='cuda:0', requires_grad=True), tensor([0., 0., 0., 0.], device='cuda:0')]
-    # [stub_bwd] bwd_args: [tensor([0., 0., 0., 0.], device='cuda:0'), tensor([0., 0., 0., 0.], device='cuda:0'), tensor([1., 1., 1., 1.], device='cuda:0')]
-    # [stub_bwd] grads [tensor([0.9722, 0.7910, 0.4690, 0.3300], device='cuda:0'), tensor([0.8990, 1.0167, 0.5249, 1.4401], device='cuda:0'), tensor([1., 1., 1., 1.], device='cuda:0')
+    # [orig_arg, orig_arg, orig_arg_OUT, grad, grad, grad_OUT,]
+    # num_args = len([*kernel_inputs, *bwd_args])
 
     # remove upstream grad
     bwd_args.pop(idx_upstream)
@@ -217,33 +134,254 @@ def stub_bwd(kernel_inputs, upstream, idx_upstream):
     return (*bwd_args,)
 
 
+# def my_post_hook(stub):
+def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
-def stub(a, b):
-    output = torch.empty_like(a)
-    assert a.device == DEVICE and output.device == DEVICE
-    n_elements = output.numel()
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    kernel[grid](a, b, output, BLOCK_SIZE=4)
-    return output
 
-# @autodiff
-@grad(stub, idx_upstream=2)
-@triton.jit
-def kernel(
-        a_ptr,
-        b_ptr,
-        output_ptr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-    offsets = tl.arange(0, BLOCK_SIZE)
+    if not already_compiled:
 
-    a = tl.load(a_ptr + offsets)
-    b = tl.load(b_ptr + offsets)
+        # todo-now: find a cleaner way -- compile hook registers on all instances of JITFunction, but i want this hook to trigger only on bwd JITFuncton
+        if fn.jit_function is not bwd_kernel:
+            print("fn.jit_function is not bwd_kernel", id(fn.jit_function), id(bwd_kernel))
+            return
+        else:
+            print("post hook triggered on the bwd!")
 
-    x = a + 0.5
-    y = x * b
+        compile_dict = compile
+        print(f"Kernel {fn.name} just finished executing!")
+        print(f"Representation: {repr}")
 
-    tl.store(output_ptr + offsets, y, mask=offsets<4)
+        # The fn parameter passed to the hook contains a jit_function attribute that refers to the JITFunction instance.
+        # Each JITFunction keeps its kernels in device_caches[device], which is a tuple where the first element is the kernel cache dictionary.
+        # The same key that's passed to the hook is the one used to store the kernel in the cache.
+
+        # 1) extract fwd_compiled_kernel
+        # Get the device
+        device = driver.active.get_current_device()
+        # Access the kernel from the cache
+        jit_fn = fn.jit_function  # This is the JITFunction instance
+        kernel_cache, target, backend, _binder = jit_fn.device_caches[device]  # First element is the kernel cache dict
+        fwd_compiled_kernel = kernel_cache[key]  # Get the kernel using the same key
+
+
+        # todo: cleanup
+        # the "key" arg is just a python string with input signatures of the kernel
+        # but I want some folder name -- one way is to hash it
+        hash_object = hashlib.sha256(key.encode())
+        dir_name = hash_object.hexdigest()[:10]
+        print("dir_name: ", dir_name)
+
+        # 2) write fwd IR
+        os.makedirs(dir_name, exist_ok=True)
+        with open(f"{dir_name}/inp.ttir", "w") as f:
+          f.write(fwd_compiled_kernel.asm['ttir'])
+
+        # 3) autodiff
+        main(f"{dir_name}", run_py=False)
+
+        # 4) create executable python fn for bwd
+        from triton.compiler import compile
+        from triton.backends.compiler import GPUTarget
+
+        bwd_compiled_kernel = compile(
+            f"{dir_name}/out.ttir",
+            target=target,
+            # preserve the original CompiledKernel.options so Triton does not pick a different PTX flavour
+            # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
+        )
+        assert isinstance(bwd_compiled_kernel, triton.compiler.compiler.CompiledKernel)
+        # question-now: seem automtically lowered to ttgir not ttir
+        # print(bwd_compiled_kernel.asm.keys())
+
+        # good, I can confirm this is my autodiff'ed IR
+        # print(bwd_compiled_kernel.asm['ttgir'])
+
+
+        # 5) replace original fwd CompiledKernel with autograd.Function (replaces cache entry in the cache of JITFunction)
+
+        #   bwd_kernel is a CompiledKernel and I can directly swap original compiled kernel with this CompiledKernel
+        #   And because this never calls a stub (no possibility for recursion).
+
+        # print(dir(jit_fn.device_caches[device][0][key]))
+        # '_init_handles', 'asm', 'function', 'hash', 'kernel', 'launch_enter_hook', 'launch_exit_hook', 'launch_metadata', 'metadata', 'module', 'name', 'packed_metadata', 'src'
+
+        # print(jit_fn.device_caches[device][0][key])
+        # jit_fn.device_caches[device][0][key]
+        # > triton.compiler.compiler.CompiledKernel
+
+
+        # ---- splice everything back into the device cache ---------------
+
+        # todo-now: don't harcode
+        new_key = str([('*fp32','D')]*6) + "{'debug': False}"   # or call jit_fn.make_cache_key(...)
+        # print("key", key)
+        # print("new key", new_key)
+        # key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
+        # new key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
+
+        del jit_fn.device_caches[device][0][key]
+        # previsoly I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
+        # key on a new_key (containing added args) not on the old key, otherwise:
+        #   when you pass 6 args to the bwd JITFunction on the next call, it checks the cache for CompiledKernel with signature which has 6 args -- didn't find one (bc here you're storing the bwd CompiledKernel under the *original key* which only has 3 args) and thus re-compiles
+        #   JITFunction looking for key: [('*fp32','D'), … 6 items …]{'debug':False}
+        # IOW
+        #   otherwise re-wraps -- you'd think that it should bc the signature of args taht will be passed to bwd_kernel is the same as was passed to bwd_kernel (just line above) -- so it seems like shouldn't trigger a re-tracing, but in fact, i guess bc I modified function signature in the hook after last re-teacing, it tries to trace again!
+        #   no actually it was re-wrapping bc previously (in my post hook) I saved bwd graph while key'ing on the original signature (3 args). But now when passing 6 args -- it fails to find compiledKerenl with a key which has 6 args and thus re-compiles
+        kernel_cache[new_key] = bwd_compiled_kernel
+        print("kernel_cache[new_key]: ", kernel_cache[new_key])
+
+        # work out how many *runtime* args were added
+        # nargs_old = len(fwd_compiled_kernel.metadata.arg_types)           # CUDA/AMDGPU
+        # nargs_new = len(bwd_compiled_kernel.metadata.arg_types)
+        # delta     = nargs_new - nargs_old
+
+        # todo-now: don't hardcode
+        delta = 3 # bwd_compiled_kernel.num_wargs - fwd_compiled_kernel.num_wargs
+
+
+        s = fn.jit_function # RM
+
+        new_binder = rebuild_binder(fn, delta, backend)
+        print("new_binder: ", new_binder)
+        # s.device_caches = defaultdict(s.create_binder) # RM
+        # s.device_caches = defaultdict() # RM
+        fn.jit_function.device_caches[device] = (kernel_cache, target, backend, new_binder)
+
+
+        # # question-now: does recomputing them help?
+        # s.non_constexpr_indices = [i for (i, p) in enumerate(s.params) if not p.is_constexpr] # RM
+        # s.specialised_indices = [i for (i, p) in enumerate(s.params) if (not p.do_not_specialize) and (not p.is_constexpr)] # RM
+
+        # # if multiple gpus, patch caches of all devices?
+        # for d, (cch, t, b, _) in fn.jit_function.device_caches.items():
+        #     if key in cch:
+        #         cch[key] = new_k
+        #         fn.jit_function.device_caches[d] = (cch, t, b, new_binder)
+
+
+        # quick sanity check
+        # assert len(fwd_compiled_kernel.metadata.arg_types) == bwd_compiled_kernel.metadata.arg_types
+
+
+    return False
+
+
+
+def rebuild_binder(fn, delta, backend):
+    """
+    1 – update signatures	create_function_from_signature looks at fn.jit_function.signature and fn.jit_function.metadata.arg_types. If you forget to patch either, the binder will still have the old arity and you will hit TypeError: dynamic_func() takes N positional arguments… at launch 
+    2 – new binder	The helper builds the little Python function (dynamic_func) that maps user launch args → positional tuple for the GPU call
+    """
+
+    print("rebuild_binder")
+    import inspect
+
+    from triton.runtime.jit import (
+        KernelParam,                        # Triton’s helper for arg metadata
+        create_function_from_signature,     # binder factory
+    )
+
+
+    # 1. extend the Python signature *before* we rebuild the binder
+    sig_params = list(fn.jit_function.signature.parameters.values())
+    for i in range(delta):
+        p = inspect.Parameter(
+            f"extra_{i}",
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            annotation="tl.float16*" # "tl.pointer"
+        )
+        fn.jit_function.params.append(KernelParam(len(fn.jit_function.params), p, False, False)) # dns= dns_oa= , annotation="tl.float16*"
+        sig_params.append(p)
+    print("fn.jit_function.signature: ", fn.jit_function.signature)
+    fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
+
+    # 2. build a fresh binder
+    new_binder = create_function_from_signature(
+                    fn.jit_function.signature,
+                    fn.jit_function.params,
+                    backend)
+
+    return new_binder
+
+
+
+
+
+
+# double nesting is needed here to support decorator with arguments
+# and I want make user pass the stub here -- bc need some generic way for usr
+# to specify what their stub fn is wt me hardcoding it
+#
+# todo: use stub and idx_upstream passed by the user
+# def grad(stub, idx_upstream):
+
+#     def inner(kernel):
+#         kernel.add_pre_run_hook(shape_track_hook)
+
+#         # todo: add a hook to a specific instance of a JITFunction
+#         # Assign the hook to JITFunction's compiled_hook
+
+#         triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
+#         return kernel
+
+#     return inner
+
+kernel.add_pre_run_hook(shape_track_hook)
+triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
+
+
+
+
+class DifferentiatedCompiledKernel(torch.autograd.Function):
+
+    # question-now:
+    #   bwd_stub really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
+    #   seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
+
+    @staticmethod
+    def forward(ctx, stub, bwd_stub, *stub_inputs):
+        print("Op.forward")
+
+        # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
+        #   ==> can overload kernel pre-hook to get access to them
+        with StashArgsCtx() as arg_ctx:
+            print("[op fwd] stub_inputs:", stub_inputs)
+            outs = stub(*stub_inputs)
+        # now executing the stub should populate FWD_ARGS (bc we registered pre-hook on the kernel, and that kernel was called inside the stub)
+
+        # todo:
+        # note the execution of the kernel might have over-written zeroed out output buffers (initialized in the stub) with actual kernel outputs
+
+        kernel_inputs = arg_ctx.args
+        # print("saving for bwd: ", kernel_inputs)
+
+        # note stashing kernel inputs, not stub inputs
+        ctx.save_for_backward(*kernel_inputs)
+        # assign to cxt to extract from .backward
+        ctx.bwd_stub = bwd_stub
+        return outs
+
+
+    @staticmethod
+    def backward(ctx, upstream):
+        print("Op.backward")
+
+        fwd_kernel_inputs = ctx.saved_tensors
+
+        # todo: don't hardcode idx
+        # IOW: create_grad_inputs
+        grads = ctx.bwd_stub(fwd_kernel_inputs, upstream, idx_upstream=2)
+        print("[Op.backward] grads", grads)
+
+        # todo-now:
+        #   capture stub and bwd_stub by closure -- instead of passing them as inputs to forward() -- otherwise autograd requres to return same numebr of grads
+        #   cannot just pass "def forward(ctx, stub, bwd_stub, *stub_inputs)" and later bind stub and bwd_stub -- bc even if bind and thus won't need to feed them them at runtime, autograd still sees 4 argueets and therefore will err when by bwd retunrs only 2 grads (wrt to the 2 args) -- it would expect I should return 4 args (as the number of args to autograd.Fcutnion.forward)
+        return (None, None, *grads,)
+
+
+
+bwd_stub = partial(bwd_stub, bwd_kernel)
+my_op = partial(DifferentiatedCompiledKernel.apply, stub, bwd_stub)
 
 
 
@@ -256,48 +394,27 @@ upstream = torch.ones_like(a)
 
 
 
-
-class Op(torch.autograd.Function):
-
-
-    # question-now: bwd_stub really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
-    #   seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
-    @staticmethod
-    def forward(ctx, *stub_inputs):
-        # ctx is a context object that can be used to stash information for backward computation. You can cache arbitrary
-        # objects for use in the backward pass using the ctx.save_for_backward method.
-
-        # now executing the stub should populate FWD_ARGS (bc we registered pre-hook on the kernel, and that kernel was called inside the stub)
-        with StashArgsCtx() as arg_ctx:
-            outs = stub(*stub_inputs)
-
-        # answer-now:
-        # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
-        #   ==> can overload kernel pre-hook to get access to them
-        # todo:
-        # note the execution of the kernel might have  over-written zeroed out output buffers (initialized in the stub) with actual kernel outputs
-
-        kernel_inputs = arg_ctx.args
-        print("saving for bwd: ", kernel_inputs)
-
-        # note stashing kernel inputs, not stub inputs
-        ctx.save_for_backward(*kernel_inputs)
-        return outs
-
-    @staticmethod
-    def backward(ctx, upstream):
-        inputs = ctx.saved_tensors
-        # returns grads wrt all inputs
-        # todo: don't hardcode idx
-        return stub_bwd(inputs, upstream, idx_upstream=2)
-
-
-
-my_op = Op.apply
-
 my_out = my_op(a, b)
-my_out.backward(upstream)
+print("my_out: ", my_out)
 
+
+
+# let bwd kernel generate autodiffed version -- once
+# running once to let my hook trigger and create bwd CompiledKernel, otherwise errs bc the bwd_stub tries to pass more args to the bwd_kernel at which time the compile hook hasn't triggered yet, thus hasn't modifed signature yet (to expect 6 args) -- thus passing more args failed
+# you need to call the backward function once with original inputs just to let it create compileKernel and trigger post hook to replace taht compiledKernel with the differned compiledKernel
+
+# bc my hook runs after the first comaplation, first call to the stub return original result (does not call my DifferenciatedCompiledKernel)
+bwd_kernel[1, 1, 1](a, b, torch.zeros_like(a)) # , BLOCK_SIZE=4
+
+
+my_out.backward(upstream)
+print(a.grad)
+print(b.grad)
+
+
+# device = driver.active.get_current_device()
+# kernel_cache, target, backend, _binder = bwd_kernel.device_caches[device]
+# print("kernel_cache", kernel_cache)
 
 
 
@@ -307,18 +424,16 @@ my_out.backward(upstream)
 
 torch_a = torch.clone(a).detach().requires_grad_().to(device='cuda:0')
 torch_b = torch.clone(b).detach().requires_grad_().to(device='cuda:0')
-# torch_a.requires_grad = True
-# torch_b.requires_grad = True
 
 torch_out = (torch_a + 0.5) * torch_b
 torch_out.backward(torch.ones_like(torch_out))
 
-if torch.allclose(a.grad, torch_a.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(a.grad, torch_a.grad, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
-if torch.allclose(b.grad, torch_b.grad.to(dtype=torch.float32), atol=1e-2, rtol=0):
+if torch.allclose(b.grad, torch_b.grad, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
