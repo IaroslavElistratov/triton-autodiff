@@ -148,6 +148,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             print("post hook triggered on the bwd!")
 
         compile_dict = compile
+
         print(f"Kernel {fn.name} just finished executing!")
         print(f"Representation: {repr}")
 
@@ -209,18 +210,53 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # jit_fn.device_caches[device][0][key]
         # > triton.compiler.compiler.CompiledKernel
 
+        def create_new_key():
 
-        # ---- splice everything back into the device cache ---------------
+            # can't run the binder to automatically create specialization and options (both needed to create key)
+            # bc here is that I don't have acces to *arg, **kwargs from inside the compile_hook
+            # there doesn't seem to be a direct way to extract the full args and kwargs from the compile hook
+            # -- thus doing the appraoch below
+            # # _bound_args, specialization, options = binder(*args, **kwargs)
 
-        # todo-now: don't harcode
-        new_key = str([('*fp32','D')]*6) + "{'debug': False}"   # or call jit_fn.make_cache_key(...)
-        # print("key", key)
-        # print("new key", new_key)
+            print("key: ", key)
+            # key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
+
+            split = key.split("]")
+            print("split: ", split)
+            # split:  ["[('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')", "{'debug': False}"]
+
+            new_key = split[0] + ", "
+            for name, str_type in compile_dict["signature"].items():
+                if "*" in str_type:
+                    # todo-low: don't hardcode D
+                    # Right now Triton only seem to define two single‑letter tags 
+                    # D	-- BaseBackend.get_arg_specialization – given to any int or tensor pointer whose value / address is divisible by 16 when align=True is in force. Produces tt.divisibility = 16, i.e. the backend may assume 16‑byte alignment.
+                    # S	-- HIPBackend.get_arg_specialization (AMD GPUs) when buffer‑ops are on and the tensor’s storage fits in ±2 GB. Adds tt.pointer_range = 32, telling the compiler it can emit 32‑bit (small) addresses.
+                    new_key += f"('{str_type}', 'D'), "
+            # cut ", "
+            new_key = new_key[:len(new_key)-2]
+            # add what I split by
+            new_key += "]"
+            new_key += split[1]
+
+
+            print("new_key: ", new_key)
+            # new_key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*f32', 'D'), ('*f32', 'D'), ('*f32', 'D')]{'debug': False}
+            return new_key
+
+        new_key, num_added_args = create_new_key()
         # key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
         # new key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 
+        num_fwd_args = len(fwd_compiled_kernel.src.signature)
+        num_bwd_args = len(bwd_compiled_kernel.src.signature)
+        num_added_args = num_bwd_args - num_fwd_args
+
+        new_binder = rebuild_binder(fn, num_added_args, backend)
+        print("new_binder: ", new_binder)
+
         del jit_fn.device_caches[device][0][key]
-        # previsoly I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
+        # peevishly I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
         # key on a new_key (containing added args) not on the old key, otherwise:
         #   when you pass 6 args to the bwd JITFunction on the next call, it checks the cache for CompiledKernel with signature which has 6 args -- didn't find one (bc here you're storing the bwd CompiledKernel under the *original key* which only has 3 args) and thus re-compiles
         #   JITFunction looking for key: [('*fp32','D'), … 6 items …]{'debug':False}
@@ -229,24 +265,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         #   no actually it was re-wrapping bc previously (in my post hook) I saved bwd graph while key'ing on the original signature (3 args). But now when passing 6 args -- it fails to find compiledKerenl with a key which has 6 args and thus re-compiles
         kernel_cache[new_key] = bwd_compiled_kernel
         print("kernel_cache[new_key]: ", kernel_cache[new_key])
-
-        # work out how many *runtime* args were added
-        # nargs_old = len(fwd_compiled_kernel.metadata.arg_types)           # CUDA/AMDGPU
-        # nargs_new = len(bwd_compiled_kernel.metadata.arg_types)
-        # delta     = nargs_new - nargs_old
-
-        # todo-now: don't hardcode
-        delta = 3 # bwd_compiled_kernel.num_wargs - fwd_compiled_kernel.num_wargs
-
-
-        s = fn.jit_function # RM
-
-        new_binder = rebuild_binder(fn, delta, backend)
-        print("new_binder: ", new_binder)
-        # s.device_caches = defaultdict(s.create_binder) # RM
-        # s.device_caches = defaultdict() # RM
         fn.jit_function.device_caches[device] = (kernel_cache, target, backend, new_binder)
 
+        # s = fn.jit_function # RM
+        # s.device_caches = defaultdict(s.create_binder) # RM
+        # s.device_caches = defaultdict() # RM
 
         # # question-now: does recomputing them help?
         # s.non_constexpr_indices = [i for (i, p) in enumerate(s.params) if not p.is_constexpr] # RM
@@ -293,6 +316,7 @@ def rebuild_binder(fn, delta, backend):
         fn.jit_function.params.append(KernelParam(len(fn.jit_function.params), p, False, False)) # dns= dns_oa= , annotation="tl.float16*"
         sig_params.append(p)
     print("fn.jit_function.signature: ", fn.jit_function.signature)
+    print("fn.jit_function self.params:", fn.jit_function.params)
     fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
 
     # 2. build a fresh binder
@@ -302,7 +326,6 @@ def rebuild_binder(fn, delta, backend):
                     backend)
 
     return new_binder
-
 
 
 
