@@ -8,8 +8,8 @@ import triton
 import triton.language as tl
 
 
-import api
-from api import clone_jit_function, shape_track_hook, my_post_hook, bwd_stub, DifferentiatedCompiledKernel
+from api import autodiff
+
 
 
 
@@ -44,23 +44,6 @@ def kernel(
 
 
 
-
-bwd_kernel = clone_jit_function(kernel)
-api.bwd_kernel = bwd_kernel
-
-
-
-kernel.add_pre_run_hook(shape_track_hook)
-triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
-
-
-
-
-bwd_stub = partial(bwd_stub, bwd_kernel)
-my_op = partial(DifferentiatedCompiledKernel.apply, stub, bwd_stub)
-
-
-
 size = 4
 a = torch.rand(size, device=DEVICE)
 b = torch.rand(size, device=DEVICE)
@@ -70,6 +53,7 @@ upstream = torch.ones_like(a)
 
 
 
+my_op, bwd_kernel = autodiff(kernel, stub)
 my_out = my_op(a, b)
 print("my_out: ", my_out)
 

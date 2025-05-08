@@ -16,6 +16,7 @@ from triton.runtime.jit import JITFunction
 from run_all_tests import main
 
 
+bwd_kernel = None
 
 class StashArgsCtx:
     _active_instance = None
@@ -349,4 +350,19 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         #   capture stub and bwd_stub by closure -- instead of passing them as inputs to forward() -- otherwise autograd requres to return same numebr of grads
         #   cannot just pass "def forward(ctx, stub, bwd_stub, *stub_inputs)" and later bind stub and bwd_stub -- bc even if bind and thus won't need to feed them them at runtime, autograd still sees 4 argueets and therefore will err when by bwd retunrs only 2 grads (wrt to the 2 args) -- it would expect I should return 4 args (as the number of args to autograd.Fcutnion.forward)
         return (None, None, *grads,)
+
+
+
+def autodiff(kernel, stub):
+
+    global bwd_kernel
+    bwd_kernel = clone_jit_function(kernel)
+
+    kernel.add_pre_run_hook(shape_track_hook)
+    triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
+
+    global bwd_stub
+    bwd_stub = partial(bwd_stub, bwd_kernel)
+    my_op = partial(DifferentiatedCompiledKernel.apply, stub, bwd_stub)
+    return my_op, bwd_kernel
 
