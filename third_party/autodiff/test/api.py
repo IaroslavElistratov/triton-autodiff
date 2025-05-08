@@ -64,7 +64,7 @@ def clone_jit_function(jit_func):
 
 
 # todo-low: it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def bwd_stub(bwd_kernel, kernel_inputs, upstream, idx_upstream):
+def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
 
     # todo: extract this from the kernel
     grid = (1, 1, 1)
@@ -289,7 +289,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 # and I want make user pass the stub here -- bc need some generic way for usr
 # to specify what their stub fn is wt me hardcoding it
 #
-# todo: use stub and idx_upstream passed by the user
 # def grad(stub, idx_upstream):
 
 #     def inner(kernel):
@@ -343,7 +342,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
         # todo: don't hardcode idx
         # IOW: create_grad_inputs
-        grads = ctx.bwd_stub(fwd_kernel_inputs, upstream, idx_upstream=2)
+        grads = ctx.bwd_stub(fwd_kernel_inputs, upstream)
         print("[Op.backward] grads", grads)
 
         # todo-now:
@@ -353,7 +352,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
 
 
-def autodiff(kernel, stub):
+def autodiff(kernel, stub, idx_upstream):
 
     global bwd_kernel
     bwd_kernel = clone_jit_function(kernel)
@@ -362,7 +361,7 @@ def autodiff(kernel, stub):
     triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 
     global bwd_stub
-    bwd_stub = partial(bwd_stub, bwd_kernel)
+    bwd_stub = partial(bwd_stub, bwd_kernel, idx_upstream)
     my_op = partial(DifferentiatedCompiledKernel.apply, stub, bwd_stub)
     return my_op, bwd_kernel
 

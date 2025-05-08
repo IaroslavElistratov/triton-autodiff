@@ -53,7 +53,7 @@ upstream = torch.ones_like(a)
 
 
 
-my_op, bwd_kernel = autodiff(kernel, stub)
+my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=2)
 my_out = my_op(a, b)
 print("my_out: ", my_out)
 
