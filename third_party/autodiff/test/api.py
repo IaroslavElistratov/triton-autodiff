@@ -240,16 +240,49 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # jit_fn.device_caches[device][0][key]
         # > triton.compiler.compiler.CompiledKernel
 
+        print("[my hook] jit_fn.params:", [(p.is_constexpr, p.default) for p in jit_fn.params])
+
         new_key = create_new_key()
         # key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
         # new key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 
+        # remove constexpr -- bc backward signature or key should not have them (bc they will NOT be provided to the bwd kernel)
+        # remove ", ('constexpr', 4)"
+        new_key = new_key.replace(", ('constexpr', 4)", "")
+        print("new_key: ", new_key)
+        # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
+        #   > inf JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
+        print("fn.jit_function.signature:", fn.jit_function.signature)
+        print("fn.jit_function.params:", fn.jit_function.params)
+
+        # 1. extend the Python signature *before* we rebuild the binder
+        idx_const = 2 # compile_dict['constants']
+        sig_params = list(fn.jit_function.signature.parameters.values())
+        # for i, p in enumerate(sig_params):
+        #     if i == idx_const:
+        #         fn.jit_function.params.pop(i)
+        fn.jit_function.params.pop(idx_const)
+        sig_params.pop(idx_const)
+        fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
+        print("fn.jit_function.signature: ", fn.jit_function.signature)
+        print("fn.jit_function self.params:", fn.jit_function.params)
+
+
+        # todo-now: this may not correctly count differences in args, bc fwd_compiled_kernel has constexprs (in its siganutre) while bwd_compiled_kernel does not!
+        print("fwd_compiled_kernel.src.signature: ", fwd_compiled_kernel.src.signature)
+        print("bwd_compiled_kernel.src.signature: ", bwd_compiled_kernel.src.signature)
+        # >> fwd_compiled_kernel.src.signature:  {'x_ptr': '*fp32', 'output_ptr': '*fp32', 'BLOCK_SIZE': 'constexpr'}
+        # >> bwd_compiled_kernel.src.signature:  {0: '*f32', 1: '*f32', 2: '*f32', 3: '*f32'}
         num_fwd_args = len(fwd_compiled_kernel.src.signature)
         num_bwd_args = len(bwd_compiled_kernel.src.signature)
-        num_added_args = num_bwd_args - num_fwd_args
+        num_added_args = 2 # num_bwd_args - num_fwd_args
+        print(f"adding {num_added_args} args")
 
         new_binder = rebuild_binder(fn, num_added_args, backend)
         print("new_binder: ", new_binder)
+
+        print("fn.jit_function.signature:", fn.jit_function.signature)
+        print("fn.jit_function.params:", fn.jit_function.params)
 
         del jit_fn.device_caches[device][0][key]
         # peevishly I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
@@ -281,6 +314,9 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # quick sanity check
         # assert len(fwd_compiled_kernel.metadata.arg_types) == bwd_compiled_kernel.metadata.arg_types
 
+        print("[my_hook] compile_dict['signature']", compile_dict["signature"])
+        print("[my_hook] compile_dict['constants']", compile_dict["constants"])
+        print("[my hook] jit_fn.params:", jit_fn.params)
 
     return False
 
@@ -315,7 +351,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, stub, bwd_stub, *stub_inputs):
-        print("Op.forward")
+        print("\n"*3, "Op.forward")
 
         # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
         #   ==> can overload kernel pre-hook to get access to them
@@ -339,12 +375,13 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, upstream):
-        print("Op.backward")
+        print("\n"*3, "Op.backward")
 
         fwd_kernel_inputs = ctx.saved_tensors
 
         # todo: don't hardcode idx
         # IOW: create_grad_inputs
+        print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
         grads = ctx.bwd_stub(fwd_kernel_inputs, upstream)
         print("[Op.backward] grads", grads)
 
