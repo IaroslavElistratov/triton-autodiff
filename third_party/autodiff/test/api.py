@@ -63,8 +63,8 @@ def clone_jit_function(jit_func):
     return cloned
 
 
-# todo-low: it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
+# it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
+def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, kernel_inputs, upstream):
 
     # todo: add input checks
     # assert a.device == DEVICE and b.device == DEVICE and upstream.device == DEVICE
@@ -80,11 +80,11 @@ def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
         if isinstance(arg, torch.Tensor):
             bwd_args.append(torch.zeros_like(arg))
 
-    # # print("[bwd_stub] kernel_inputs:", kernel_inputs)
-    print("[bwd_stub] fwd_args:", kernel_inputs)
-    print("[bwd_stub] bwd_args:", bwd_args)
+    # # print("[create_bwd_kernel_inputs] kernel_inputs:", kernel_inputs)
+    print("[create_bwd_kernel_inputs] fwd_args:", kernel_inputs)
+    print("[create_bwd_kernel_inputs] bwd_args:", bwd_args)
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
-    print("[bwd_stub] grads", bwd_args)
+    print("[create_bwd_kernel_inputs] grads", bwd_args)
 
     # [orig_arg, orig_arg, orig_arg_OUT, grad, grad, grad_OUT,]
     # num_args = len([*kernel_inputs, *bwd_args])
@@ -365,11 +365,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     # question-now:
-    #   bwd_stub really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
+    #   create_bwd_kernel_inputs really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
     #   seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
 
     @staticmethod
-    def forward(ctx, stub, bwd_stub, *stub_inputs):
+    def forward(ctx, stub, create_bwd_kernel_inputs, *stub_inputs):
         print("\n"*3, "Op.forward")
 
         # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
@@ -388,7 +388,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         # note stashing kernel inputs, not stub inputs
         ctx.save_for_backward(*kernel_inputs)
         # assign to cxt to extract from .backward
-        ctx.bwd_stub = bwd_stub
+        ctx.create_bwd_kernel_inputs = create_bwd_kernel_inputs
         return outs
 
 
@@ -401,12 +401,12 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         # todo: don't hardcode idx
         # IOW: create_grad_inputs
         print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
-        grads = ctx.bwd_stub(fwd_kernel_inputs, upstream)
+        grads = ctx.create_bwd_kernel_inputs(fwd_kernel_inputs, upstream)
         print("[Op.backward] grads", grads)
 
         # todo-now:
-        #   capture stub and bwd_stub by closure -- instead of passing them as inputs to forward() -- otherwise autograd requres to return same numebr of grads
-        #   cannot just pass "def forward(ctx, stub, bwd_stub, *stub_inputs)" and later bind stub and bwd_stub -- bc even if bind and thus won't need to feed them them at runtime, autograd still sees 4 argueets and therefore will err when by bwd retunrs only 2 grads (wrt to the 2 args) -- it would expect I should return 4 args (as the number of args to autograd.Fcutnion.forward)
+        #   capture stub and create_bwd_kernel_inputs by closure -- instead of passing them as inputs to forward() -- otherwise autograd requres to return same numebr of grads
+        #   cannot just pass "def forward(ctx, stub, create_bwd_kernel_inputs, *stub_inputs)" and later bind stub and create_bwd_kernel_inputs -- bc even if bind and thus won't need to feed them them at runtime, autograd still sees 4 argueets and therefore will err when by bwd retunrs only 2 grads (wrt to the 2 args) -- it would expect I should return 4 args (as the number of args to autograd.Fcutnion.forward)
         return (None, None, *grads,)
 
 
@@ -419,8 +419,9 @@ def autodiff(kernel, stub, idx_upstream):
     kernel.add_pre_run_hook(shape_track_hook)
     triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 
-    global bwd_stub
-    bwd_stub = partial(bwd_stub, bwd_kernel, idx_upstream)
-    my_op = partial(DifferentiatedCompiledKernel.apply, stub, bwd_stub)
+    global create_bwd_kernel_inputs
+    create_bwd_kernel_inputs = partial(create_bwd_kernel_inputs, bwd_kernel, idx_upstream)
+    fwd_stub = partial(stub, kernel)
+    my_op = partial(DifferentiatedCompiledKernel.apply, fwd_stub, create_bwd_kernel_inputs)
     return my_op, bwd_kernel
 

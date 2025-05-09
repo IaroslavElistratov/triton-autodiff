@@ -24,7 +24,7 @@ def kernel(
     # Write x + y back to DRAM.
     tl.store(output_ptr + offsets, output)
 
-def stub(x: torch.Tensor):
+def stub(kernel, x):
     # We need to preallocate the output.
     output = torch.empty_like(x)
     assert x.device == DEVICE and output.device == DEVICE
@@ -52,7 +52,7 @@ def torch_fn(a):
     return a + 42
 
 output_torch = torch_fn(a)
-output_triton = stub(a)
+output_triton = stub(kernel, a)
 # print(output_torch)
 # print(output_triton)
 
@@ -77,9 +77,9 @@ from triton.backends.api import autodiff
 my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=1)
 
 # todo: rm warmup
-print("\n" * 3)
-print("bwd_kernel warmup")
-bwd_kernel[1, 1, 1](a, upstream, BLOCK_SIZE=4)
+print("\n" * 3, "bwd_kernel warmup")
+stub(bwd_kernel, a)
+
 my_out = my_op(a)
 my_out.backward(upstream)
 print("grad a: ", a.grad)

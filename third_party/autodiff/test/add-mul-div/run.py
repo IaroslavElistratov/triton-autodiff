@@ -29,7 +29,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, z)
 
-def stub(a, b, c):
+def stub(kernel, a, b, c):
     output = torch.empty_like(a)
     grid = (1, 1, 1)
     kernel[grid](a, b, c, output)
@@ -48,7 +48,7 @@ def torch_fn(a, b, c):
     return z
 
 output_torch = torch_fn(a, b, c)
-output_triton = stub(a, b, c)
+output_triton = stub(kernel, a, b, c)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print(output_torch)
@@ -77,7 +77,8 @@ from triton.backends.api import autodiff
 my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=3)
 
 # todo: rm warmup
-bwd_kernel[1, 1, 1](a, b, c, torch.ones_like(a))
+stub(bwd_kernel, a, b, c)
+
 my_out = my_op(a, b, c)
 my_out.backward(upstream)
 

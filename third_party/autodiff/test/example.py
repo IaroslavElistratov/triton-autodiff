@@ -12,8 +12,8 @@ from api import autodiff
 
 
 
-
-def stub(a, b):
+# note: user's stub must expect kernel that it calls as the 1st argument
+def stub(kernel, a, b):
     output = torch.empty_like(a)
     assert a.device == DEVICE and output.device == DEVICE
     n_elements = output.numel()
@@ -52,7 +52,6 @@ b.requires_grad = True
 upstream = torch.ones_like(a)
 
 
-
 my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=2)
 my_out = my_op(a, b)
 print("my_out: ", my_out)
@@ -63,8 +62,10 @@ print("my_out: ", my_out)
 # running once to let my hook trigger and create bwd CompiledKernel, otherwise errs bc the bwd_stub tries to pass more args to the bwd_kernel at which time the compile hook hasn't triggered yet, thus hasn't modifed signature yet (to expect 6 args) -- thus passing more args failed
 # you need to call the backward function once with original inputs just to let it create compileKernel and trigger post hook to replace taht compiledKernel with the differned compiledKernel
 
+# todo-now: put these warmup steps into the Autograd.backward? E.g. on each exectuion, check if the signature is cache, if not, before calling bwd_sub, call bwd_kernel once on stashed fwd inputs
 # bc my hook runs after the first comaplation, first call to the stub return original result (does not call my DifferenciatedCompiledKernel)
-bwd_kernel[1, 1, 1](a, b, torch.zeros_like(a)) # , BLOCK_SIZE=4
+stub(bwd_kernel, a, b)
+
 
 
 my_out.backward(upstream)

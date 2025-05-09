@@ -26,7 +26,7 @@ def kernel(
     l = tl.dot(a, b)
     tl.store(output_ptr + offsets_2d, l)
 
-def stub(a, b):
+def stub(kernel, a, b):
     output = torch.empty(a.shape[0], b.shape[1]).to(dtype=torch.float32, device='cuda:0')
     # grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
     grid = (1, 1, 1)
@@ -47,13 +47,14 @@ def torch_fn(a, b):
 #### test forward ####
 
 output_torch = torch_fn(a, b)
-output_triton = stub(a, b)
+output_triton = stub(kernel, a, b)
+max_difference = torch.max(torch.abs(output_torch - output_triton))
+
 # print("output_torch:", output_torch[:3, :3])
 # print("output_triton:", output_triton[:3, :3])
-
-max_difference = torch.max(torch.abs(output_torch - output_triton))
 # print(f'The maximum difference between torch and triton is '
 #       f'{max_difference}')
+
 # assert max_difference == 0.0
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
@@ -72,7 +73,7 @@ from triton.backends.api import autodiff
 my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=2)
 
 # todo: rm warmup
-bwd_kernel[1, 1, 1](a, b, torch.ones_like(a)) # , BLOCK_SIZE=4
+stub(bwd_kernel, a, b)
 my_out = my_op(a, b)
 my_out.backward(upstream)
 print("grad a[:3, :3]: ", a.grad[:3, :3])
