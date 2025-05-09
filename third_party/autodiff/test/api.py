@@ -81,6 +81,7 @@ def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
             bwd_args.append(torch.zeros_like(arg))
 
     # # print("[bwd_stub] kernel_inputs:", kernel_inputs)
+    print("[bwd_stub] fwd_args:", kernel_inputs)
     print("[bwd_stub] bwd_args:", bwd_args)
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
     print("[bwd_stub] grads", bwd_args)
@@ -97,7 +98,7 @@ def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
 # def my_post_hook(stub):
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
-    def create_new_key():
+    def create_new_key(key):
 
         # can't run the binder to automatically create specialization and options (both needed to create key)
         # bc here is that I don't have acces to *arg, **kwargs from inside the compile_hook
@@ -144,6 +145,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             create_function_from_signature,     # binder factory
         )
 
+        print(f"adding {delta} args")
 
         # 1. extend the Python signature *before* we rebuild the binder
         sig_params = list(fn.jit_function.signature.parameters.values())
@@ -236,53 +238,70 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # print(dir(jit_fn.device_caches[device][0][key]))
         # '_init_handles', 'asm', 'function', 'hash', 'kernel', 'launch_enter_hook', 'launch_exit_hook', 'launch_metadata', 'metadata', 'module', 'name', 'packed_metadata', 'src'
 
-        # print(jit_fn.device_caches[device][0][key])
-        # jit_fn.device_caches[device][0][key]
-        # > triton.compiler.compiler.CompiledKernel
+        #   5.1. remove constexpr form: key, signature, params
 
-        print("[my hook] jit_fn.params:", [(p.is_constexpr, p.default) for p in jit_fn.params])
+        def remove_constexpr(key):
+            print("key: ", key)
+            # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
+            #   > inf JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
+            print("fn.jit_function.signature:", fn.jit_function.signature)
+            print("fn.jit_function.params:", fn.jit_function.params)
 
-        new_key = create_new_key()
+            # remove constexpr -- bc backward signature or key should not have them (bc they will NOT be provided to the bwd kernel)
+            # remove ", ('constexpr', 4)"
+            # key = key.replace(", ('constexpr', 4)", "")
+            # replaces all occurrences of , ('constexpr', [some integer]) in the string
+
+            sub_strs = key.split("[")[1].split("]")[0].split("), (")
+            # print('sub_strs: ', sub_strs)
+            # >>> sub_strs:  ["('*fp32', 'D'", "'*fp32', 'D'", "'constexpr', 4", "'*fp32', 'D'", "'*fp32', 'D')"]
+
+            # iterate over dict whose keys are tuples of ints, and extract all ints from all keys into a single list
+            idx_const_ints = [i for key in compile_dict['constants'].keys() for i in key]
+            num_const_args = len(idx_const_ints)
+            print("idx_const_ints", idx_const_ints)
+
+            sig_params = list(fn.jit_function.signature.parameters.values())
+            for i, s in enumerate(sub_strs):
+                if i in idx_const_ints:
+                    sub_strs.pop(i)
+                    sig_params.pop(i)
+                    fn.jit_function.params.pop(i)
+            new_key = "[" + "), (".join(sub_strs)
+            new_key += "]" if new_key[-1] == ")" else ")]"
+            new_key += key.split("]")[1]
+            print("new_key", new_key)
+            fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
+            print("fn.jit_function.signature: ", fn.jit_function.signature)
+            print("fn.jit_function self.params:", fn.jit_function.params)
+
+            return new_key, num_const_args
+
+        new_key, num_const_args = remove_constexpr(key)
+
+        #   5.2. add new args to: key, signature, params
+
+        # add new args to key
+        new_key = create_new_key(new_key)
         # key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
         # new key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 
-        # remove constexpr -- bc backward signature or key should not have them (bc they will NOT be provided to the bwd kernel)
-        # remove ", ('constexpr', 4)"
-        new_key = new_key.replace(", ('constexpr', 4)", "")
-        print("new_key: ", new_key)
-        # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
-        #   > inf JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
-        print("fn.jit_function.signature:", fn.jit_function.signature)
-        print("fn.jit_function.params:", fn.jit_function.params)
+        # need to account for, otherwise may not correctly count differences in args, bc fwd_compiled_kernel has constexprs (in its signature) while bwd_compiled_kernel does not!
+        #   >> fwd_compiled_kernel.src.signature:  {'x_ptr': '*fp32', 'output_ptr': '*fp32', 'BLOCK_SIZE': 'constexpr'}
+        #   >> bwd_compiled_kernel.src.signature:  {0: '*f32', 1: '*f32', 2: '*f32', 3: '*f32'}
 
-        # 1. extend the Python signature *before* we rebuild the binder
-        idx_const = 2 # compile_dict['constants']
-        sig_params = list(fn.jit_function.signature.parameters.values())
-        # for i, p in enumerate(sig_params):
-        #     if i == idx_const:
-        #         fn.jit_function.params.pop(i)
-        fn.jit_function.params.pop(idx_const)
-        sig_params.pop(idx_const)
-        fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
-        print("fn.jit_function.signature: ", fn.jit_function.signature)
-        print("fn.jit_function self.params:", fn.jit_function.params)
-
-
-        # todo-now: this may not correctly count differences in args, bc fwd_compiled_kernel has constexprs (in its siganutre) while bwd_compiled_kernel does not!
-        print("fwd_compiled_kernel.src.signature: ", fwd_compiled_kernel.src.signature)
-        print("bwd_compiled_kernel.src.signature: ", bwd_compiled_kernel.src.signature)
-        # >> fwd_compiled_kernel.src.signature:  {'x_ptr': '*fp32', 'output_ptr': '*fp32', 'BLOCK_SIZE': 'constexpr'}
-        # >> bwd_compiled_kernel.src.signature:  {0: '*f32', 1: '*f32', 2: '*f32', 3: '*f32'}
-        num_fwd_args = len(fwd_compiled_kernel.src.signature)
+        num_fwd_args = len(fwd_compiled_kernel.src.signature) - num_const_args
         num_bwd_args = len(bwd_compiled_kernel.src.signature)
-        num_added_args = 2 # num_bwd_args - num_fwd_args
-        print(f"adding {num_added_args} args")
+        num_added_args = num_bwd_args - num_fwd_args
 
         new_binder = rebuild_binder(fn, num_added_args, backend)
         print("new_binder: ", new_binder)
 
         print("fn.jit_function.signature:", fn.jit_function.signature)
         print("fn.jit_function.params:", fn.jit_function.params)
+
+
+        #   5.3. add to bwd CompiledKernel into the cache
 
         del jit_fn.device_caches[device][0][key]
         # peevishly I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
