@@ -124,8 +124,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
-
-
 # answer-now: added do not specilize, other wise trtion adds them as constants as oppose to arguments -- and this is different from my causal=True case -- thus to avoid chaning what params I pass to the bwd kenrel in my bwd.py every time I filp "causal" flag -- thus here I just specialized them
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H", "N_CTX"])
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
@@ -213,102 +211,91 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 
 _COMPILED_KERNEL = None
 
-class _attention(torch.autograd.Function):
 
-    @staticmethod
-    def forward(ctx, q, k, v, causal, sm_scale):
-        # shape constraints
-        HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
-        # when v is in float8_e5m2 it is transposed.
-        HEAD_DIM_V = v.shape[-1]
-        assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
-        assert HEAD_DIM_K in {16, 32, 64, 128, 256}
-        o = torch.empty_like(q)
-        stage = 3 if causal else 1
-        print("stage: ", stage)
+def stub(q, k, v, causal, sm_scale):
+    # shape constraints
+    HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
+    # when v is in float8_e5m2 it is transposed.
+    HEAD_DIM_V = v.shape[-1]
+    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
+    assert HEAD_DIM_K in {16, 32, 64, 128, 256}
+    o = torch.empty_like(q)
+    stage = 3 if causal else 1
+    print("stage: ", stage)
 
-        # answer-now: lauch only one block in PID-1 -- to make loops unrollable
-        # assert q.shape[2] / args["BLOCK_M"] == 1
-        grid = lambda args: (1, q.shape[0] * q.shape[1], 1)
+    # answer-now: lauch only one block in PID-1 -- to make loops unrollable
+    # assert q.shape[2] / args["BLOCK_M"] == 1
+    grid = lambda args: (1, q.shape[0] * q.shape[1], 1)
 
-        # answer-now: this works but unrolls the loop 128 times! 5500 lines in the IR
-        # BLOCK_M = 128
-        # BLOCK_N = 64
+    # answer-now: this works but unrolls the loop 128 times! 5500 lines in the IR
+    # BLOCK_M = 128
+    # BLOCK_N = 64
 
-        BLOCK_M = 16
-        BLOCK_N = 16
+    BLOCK_M = 16
+    BLOCK_N = 16
 
-        # assert q.shape[2] / BLOCK_M == 1
-        assert q.shape[2] == BLOCK_M
-        M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-        global _COMPILED_KERNEL
-        _COMPILED_KERNEL = _attn_fwd[grid](
-            q, k, v, sm_scale, M, o,  #
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-            # k.stride(0), k.stride(1), 
-            k.stride(2), k.stride(3),  #
-            # v.stride(0), v.stride(1), 
-            v.stride(2), v.stride(3),  #
-            # o.stride(0), o.stride(1),
-            o.stride(2), o.stride(3),  #
-            q.shape[0], q.shape[1],  #
-            N_CTX=q.shape[2],  #
-            HEAD_DIM=HEAD_DIM_K,  #
-            STAGE=stage,  #
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
+    # assert q.shape[2] / BLOCK_M == 1
+    assert q.shape[2] == BLOCK_M
+    M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
+    global _COMPILED_KERNEL
+    _COMPILED_KERNEL = _attn_fwd[grid](
+        q, k, v, sm_scale, M, o,  #
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
+        # k.stride(0), k.stride(1), 
+        k.stride(2), k.stride(3),  #
+        # v.stride(0), v.stride(1), 
+        v.stride(2), v.stride(3),  #
+        # o.stride(0), o.stride(1),
+        o.stride(2), o.stride(3),  #
+        q.shape[0], q.shape[1],  #
+        N_CTX=q.shape[2],  #
+        HEAD_DIM=HEAD_DIM_K,  #
+        STAGE=stage,  #
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
 
-        # comment: these are the args passed to the fwd kerenl -- unlike in all my preivous kernel I actually want to try to pass all the ints valeus to bwd kenrel as well (instead of hardcoding them)
-        # (Q, K, V, sm_scale: tl.constexpr, M, Out,  #
-        # stride_qz, stride_qh, stride_qm, stride_qk,  #
-        # stride_kz, stride_kh, stride_kn, stride_kk,  #
-        # stride_vz, stride_vh, stride_vk, stride_vn,  #
-        # stride_oz, stride_oh, stride_om, stride_on,  #
-        # Z, H, N_CTX,  #
-        # HEAD_DIM: tl.constexpr,  #
-        # BLOCK_M: tl.constexpr,  #
-        # BLOCK_N: tl.constexpr,  #
-        # STAGE: tl.constexpr  #
-        # )
+    # comment: these are the args passed to the fwd kerenl -- unlike in all my preivous kernel I actually want to try to pass all the ints valeus to bwd kenrel as well (instead of hardcoding them)
+    # (Q, K, V, sm_scale: tl.constexpr, M, Out,  #
+    # stride_qz, stride_qh, stride_qm, stride_qk,  #
+    # stride_kz, stride_kh, stride_kn, stride_kk,  #
+    # stride_vz, stride_vh, stride_vk, stride_vn,  #
+    # stride_oz, stride_oh, stride_om, stride_on,  #
+    # Z, H, N_CTX,  #
+    # HEAD_DIM: tl.constexpr,  #
+    # BLOCK_M: tl.constexpr,  #
+    # BLOCK_N: tl.constexpr,  #
+    # STAGE: tl.constexpr  #
+    # )
 
-        # print("q")
-        # print("k")
-        # print("v")
-        # print("sm_scale", sm_scale)
-        # print("M")
-        # print("o")
-        # print("q.stride(0)", q.stride(0))
-        # print("q.stride(1)", q.stride(1))
-        # print("q.stride(2)", q.stride(2))
-        # print("q.stride(3)", q.stride(3))
-        # print("k.stride(0)", k.stride(0))
-        # print("k.stride(1)", k.stride(1))
-        # print("k.stride(2)", k.stride(2))
-        # print("k.stride(3)", k.stride(3))
-        # print("v.stride(0)", v.stride(0))
-        # print("v.stride(1)", v.stride(1))
-        # print("v.stride(2)", v.stride(2))
-        # print("v.stride(3)", v.stride(3))
-        # print("o.stride(0)", o.stride(0))
-        # print("o.stride(1)", o.stride(1))
-        # print("o.stride(2)", o.stride(2))
-        # print("o.stride(3)", o.stride(3))
-        # print("q.shape[0]", q.shape[0])
-        # print("q.shape[1]", q.shape[1])
+    # print("q")
+    # print("k")
+    # print("v")
+    # print("sm_scale", sm_scale)
+    # print("M")
+    # print("o")
+    # print("q.stride(0)", q.stride(0))
+    # print("q.stride(1)", q.stride(1))
+    # print("q.stride(2)", q.stride(2))
+    # print("q.stride(3)", q.stride(3))
+    # print("k.stride(0)", k.stride(0))
+    # print("k.stride(1)", k.stride(1))
+    # print("k.stride(2)", k.stride(2))
+    # print("k.stride(3)", k.stride(3))
+    # print("v.stride(0)", v.stride(0))
+    # print("v.stride(1)", v.stride(1))
+    # print("v.stride(2)", v.stride(2))
+    # print("v.stride(3)", v.stride(3))
+    # print("o.stride(0)", o.stride(0))
+    # print("o.stride(1)", o.stride(1))
+    # print("o.stride(2)", o.stride(2))
+    # print("o.stride(3)", o.stride(3))
+    # print("q.shape[0]", q.shape[0])
+    # print("q.shape[1]", q.shape[1])
 
-        ctx.save_for_backward(q, k, v, o, M)
-        ctx.grid = grid
-        ctx.sm_scale = sm_scale
-        ctx.HEAD_DIM = HEAD_DIM_K
-        ctx.causal = causal
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        return None, None, None, None, None
+    return o # , M
 
 
-attention = _attention.apply
-
+kernel = _attn_fwd
+attention = stub
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 128, 64)])
 @pytest.mark.parametrize("causal", [True])
@@ -373,6 +360,3 @@ tri_out, ref_out = test_op(1, 1, 16, 16, False)
 
 # %%
 # print("IR", _COMPILED_KERNEL.asm['ttir']) # triton IR
-
-with open("inp.ttir", "w") as f:
-    f.write(_COMPILED_KERNEL.asm['ttir'])
