@@ -13,7 +13,7 @@ import triton.language as tl
 from triton.runtime import driver
 from triton.runtime.jit import JITFunction
 
-from run_all_tests import main
+from triton.backends.run_all_tests import main
 
 
 bwd_kernel = None
@@ -66,6 +66,9 @@ def clone_jit_function(jit_func):
 # todo-low: it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
 def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
 
+    # todo: add input checks
+    # assert a.device == DEVICE and b.device == DEVICE and upstream.device == DEVICE
+
     # todo: extract this from the kernel
     grid = (1, 1, 1)
 
@@ -95,6 +98,7 @@ def bwd_stub(bwd_kernel, idx_upstream, kernel_inputs, upstream):
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
     def create_new_key():
+
         # can't run the binder to automatically create specialization and options (both needed to create key)
         # bc here is that I don't have acces to *arg, **kwargs from inside the compile_hook
         # there doesn't seem to be a direct way to extract the full args and kwargs from the compile hook
@@ -121,7 +125,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # add what I split by
         new_key += "]"
         new_key += split[1]
-
 
         print("new_key: ", new_key)
         # new_key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*f32', 'D'), ('*f32', 'D'), ('*f32', 'D')]{'debug': False}
@@ -200,19 +203,19 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         print("dir_name: ", dir_name)
 
         # 2) write fwd IR
-        os.makedirs(dir_name, exist_ok=True)
-        with open(f"{dir_name}/inp.ttir", "w") as f:
+        os.makedirs(f"generated/{dir_name}", exist_ok=True)
+        with open(f"generated/{dir_name}/inp.ttir", "w") as f:
           f.write(fwd_compiled_kernel.asm['ttir'])
 
         # 3) autodiff
-        main(f"{dir_name}", run_py=False)
+        main(f"generated/{dir_name}", run_py=False)
 
         # 4) create executable python fn for bwd
         from triton.compiler import compile
         from triton.backends.compiler import GPUTarget
 
         bwd_compiled_kernel = compile(
-            f"{dir_name}/out.ttir",
+            f"generated/{dir_name}/out.ttir",
             target=target,
             # preserve the original CompiledKernel.options so Triton does not pick a different PTX flavour
             # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
