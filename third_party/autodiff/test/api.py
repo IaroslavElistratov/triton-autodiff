@@ -385,12 +385,18 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         # todo:
         # note the execution of the kernel might have over-written zeroed out output buffers (initialized in the stub) with actual kernel outputs
 
+        # note: you assume nothing modifies these arg in the StashArgsCtx before Function.backward is called (between Function.fwd and Function.bwd)
         kernel_inputs = arg_ctx.args
         # print("saving for bwd: ", kernel_inputs)
+        # print("kernel_inputs: ", len(kernel_inputs))
 
+        # ugly workaround for the fact that save_for_backward only works for tensor inputs
         # note stashing kernel inputs, not stub inputs
-        ctx.save_for_backward(*kernel_inputs)
+        ctx.save_for_backward(*[a for a in kernel_inputs if isinstance(a, torch.Tensor)])
         # assign to cxt to extract from .backward
+        ctx.non_tensor_inputs = [a for a in kernel_inputs if not isinstance(a, torch.Tensor)]
+        ctx.arg_types = [isinstance(a, torch.Tensor) for a in kernel_inputs]
+
         ctx.create_bwd_kernel_inputs = create_bwd_kernel_inputs
         return outs
 
@@ -399,13 +405,23 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
     def backward(ctx, upstream):
         print("\n"*3, "Op.backward")
 
-        fwd_kernel_inputs = ctx.saved_tensors
+        # reconstruct all fwd kernel args
+        fwd_kernel_inputs = []
+        tensor_idx = 0
+        non_tensor_idx = 0
+        for is_tensor in ctx.arg_types:
+            if is_tensor:
+                fwd_kernel_inputs.append(ctx.saved_tensors[tensor_idx])
+                tensor_idx += 1
+            else:
+                fwd_kernel_inputs.append(ctx.non_tensor_inputs[non_tensor_idx])
+                non_tensor_idx += 1
 
         # todo: don't hardcode idx
         # IOW: create_grad_inputs
-        print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
+        # print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
         grads = ctx.create_bwd_kernel_inputs(fwd_kernel_inputs, upstream)
-        print("[Op.backward] grads", grads)
+        # print("[Op.backward] grads", grads)
 
         # todo-now:
         #   capture stub and create_bwd_kernel_inputs by closure -- instead of passing them as inputs to forward() -- otherwise autograd requres to return same numebr of grads
