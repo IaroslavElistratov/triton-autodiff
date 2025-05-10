@@ -39,6 +39,7 @@ def shape_track_hook(*args, **kwargs):
     ctx = StashArgsCtx._active_instance
     if ctx is not None:
         ctx.args = args # [weakref.ref(arg) for arg in args]
+        # todo-now: you're just ignoring kwargs
 
 
 
@@ -98,7 +99,7 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, kernel_inputs, upstream):
 # def my_post_hook(stub):
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
-    def create_new_key(key):
+    def key_add_args(key):
 
         # can't run the binder to automatically create specialization and options (both needed to create key)
         # bc here is that I don't have acces to *arg, **kwargs from inside the compile_hook
@@ -106,11 +107,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # -- thus doing the appraoch below
         # # _bound_args, specialization, options = binder(*args, **kwargs)
 
-        print("key: ", key)
+        print("[key_add_args] key: ", key)
         # key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 
         split = key.split("]")
-        print("split: ", split)
+        print("[key_add_args] split: ", split)
         # split:  ["[('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')", "{'debug': False}"]
 
         new_key = split[0] + ", "
@@ -127,7 +128,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         new_key += "]"
         new_key += split[1]
 
-        print("new_key: ", new_key)
+        print("[key_add_args] new_key: ", new_key)
         # new_key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*f32', 'D'), ('*f32', 'D'), ('*f32', 'D')]{'debug': False}
         return new_key
 
@@ -241,11 +242,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         #   5.1. remove constexpr form: key, signature, params
 
         def remove_constexpr(key):
-            print("key: ", key)
+            print("[remove_constexpr] key: ", key)
             # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
             #   > inf JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
-            print("fn.jit_function.signature:", fn.jit_function.signature)
-            print("fn.jit_function.params:", fn.jit_function.params)
+            print("[remove_constexpr] fn.jit_function.signature:", fn.jit_function.signature)
+            print("[remove_constexpr] fn.jit_function.params:", fn.jit_function.params)
 
             # remove constexpr -- bc backward signature or key should not have them (bc they will NOT be provided to the bwd kernel)
             # remove ", ('constexpr', 4)"
@@ -259,10 +260,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # iterate over dict whose keys are tuples of ints, and extract all ints from all keys into a single list
             idx_const_ints = [i for key in compile_dict['constants'].keys() for i in key]
             num_const_args = len(idx_const_ints)
-            print("idx_const_ints", idx_const_ints)
+            print("[remove_constexpr] idx_const_ints", idx_const_ints)
 
             sig_params = list(fn.jit_function.signature.parameters.values())
-            for i, s in enumerate(sub_strs):
+            # reverse to avoid shifting issues
+            for i, s in reversed(list(enumerate(sig_params))):
                 if i in idx_const_ints:
                     sub_strs.pop(i)
                     sig_params.pop(i)
@@ -270,10 +272,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             new_key = "[" + "), (".join(sub_strs)
             new_key += "]" if new_key[-1] == ")" else ")]"
             new_key += key.split("]")[1]
-            print("new_key", new_key)
+            print("[remove_constexpr] new_key", new_key)
             fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
-            print("fn.jit_function.signature: ", fn.jit_function.signature)
-            print("fn.jit_function self.params:", fn.jit_function.params)
+            print("[remove_constexpr] fn.jit_function.signature: ", fn.jit_function.signature)
+            print("[remove_constexpr] fn.jit_function self.params:", fn.jit_function.params)
 
             return new_key, num_const_args
 
@@ -282,7 +284,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         #   5.2. add new args to: key, signature, params
 
         # add new args to key
-        new_key = create_new_key(new_key)
+        new_key = key_add_args(new_key)
         # key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
         # new key [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 
@@ -336,6 +338,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         print("[my_hook] compile_dict['signature']", compile_dict["signature"])
         print("[my_hook] compile_dict['constants']", compile_dict["constants"])
         print("[my hook] jit_fn.params:", jit_fn.params)
+        print("fn.jit_function.signature.parameters", fn.jit_function.signature.parameters)
 
     return False
 
@@ -375,7 +378,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
         #   ==> can overload kernel pre-hook to get access to them
         with StashArgsCtx() as arg_ctx:
-            print("[op fwd] stub_inputs:", stub_inputs)
+            # print("[op fwd] stub_inputs:", stub_inputs)
             outs = stub(*stub_inputs)
         # now executing the stub should populate FWD_ARGS (bc we registered pre-hook on the kernel, and that kernel was called inside the stub)
 
