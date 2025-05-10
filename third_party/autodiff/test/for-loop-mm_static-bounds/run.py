@@ -79,11 +79,12 @@ def kernel(
     tl.store(c_ptrs, c)
 
 def stub(
-      a,
-      b,
-      BLOCK_SIZE_M=16,
-      BLOCK_SIZE_N=16,
-      BLOCK_SIZE_K=16
+        kernel,
+        a,
+        b,
+        BLOCK_SIZE_M=16,
+        BLOCK_SIZE_N=16,
+        BLOCK_SIZE_K=16
     ):
 
     # Check constraints.
@@ -96,7 +97,7 @@ def stub(
     # 1D launch kernel where each block gets its own program.
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
     print("grid: ", grid)
-    _compiled_kernel = kernel[grid](
+    kernel[grid](
         a, b, c,
         M, N, K,
         a.stride(0), a.stride(1),
@@ -107,14 +108,17 @@ def stub(
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
     )
-    return _compiled_kernel, c
+    return c
 
 torch.manual_seed(0)
 a = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
 b = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
 
-_compiled_kernel, triton_output = stub(a, b)
-torch_output = torch.matmul(a, b)
+def torch_fn(a, b):
+    return torch.matmul(a, b)
+
+triton_output = stub(kernel, a, b)
+torch_output = torch_fn(a, b)
 # print(f"triton_output_with_fp16_inputs={triton_output[:4, :4]}")
 # print(f"torch_output_with_fp16_inputs={torch_output[:4, :4]}")
 
@@ -124,5 +128,47 @@ else:
     print("❌ Triton and Torch differ")
 
 
-with open("inp.ttir", "w") as f:
-  f.write(_compiled_kernel.asm['ttir'])
+#### test backward ####
+
+from triton.backends.api import autodiff
+
+# todo: passing grid with meta args isn't supported yet
+my_op, bwd_kernel = autodiff(kernel, stub, grid=(4, 1, 1), idx_upstream=2)
+
+upstream = torch.randn_like(torch_output)
+a.requires_grad = True
+b.requires_grad = True
+
+stub(bwd_kernel, a, b)
+my_out = my_op(a, b)
+my_out.backward(upstream)
+print("grad a: ", a.grad)
+print("grad b: ", b.grad)
+print()
+
+# compare with pytorch
+
+torch_a = a.clone().detach().requires_grad_(True)
+torch_b = b.clone().detach().requires_grad_(True)
+
+torch_output = torch_fn(torch_a, torch_b)
+torch_output.backward(upstream)
+print("torch grad a: ", torch_a.grad)
+print("torch grad b: ", torch_b.grad)
+print()
+
+print("abs diff a.grad", torch.abs(a.grad - torch_a.grad).mean())
+print("abs diff b.grad", torch.abs(b.grad - torch_b.grad).mean())
+print()
+
+
+if torch.allclose(a.grad, torch_a.grad, atol=1e-2, rtol=0.001):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
+
+
+if torch.allclose(b.grad, torch_b.grad, atol=1e-2, rtol=0.001):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")

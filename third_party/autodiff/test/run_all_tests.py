@@ -34,48 +34,49 @@ def draw_dot(path, mode):
   with open(f"{vis_dir}/{mode}_grouped.svg", "w") as f:
     subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}_grouped.dot"], stdout=f)
 
-  os.remove(f"{vis_dir}/{mode}.dot")
-  os.remove(f"{vis_dir}/{mode}_grouped.dot")
+  # todo: fails when running be tests (from another dir)
+  # os.remove(f"{vis_dir}/{mode}.dot")
+  # os.remove(f"{vis_dir}/{mode}_grouped.dot")
 
 
 
-def main(path, run_py=True):
+def main(path, run_py=True, debug_info=True):
 
   os.makedirs(path, exist_ok=True)
 
   # todo: rm this flag (not needed when extracting directly in the hook)
   if run_py:
-    # 1. produce fwd ttir
-    subprocess.run([sys.executable, f"{path}/fwd.py"], cwd=path)
+    # produce fwd and bwd ttir; and compare outs and grads with torch
+    subprocess.run([sys.executable, f"{path}/run.py"], cwd=path)
 
-  # 2. optionally, produce readable fwd ttir
+  else:
 
-  # with open(f"{path}/_inp_readable.ttir", "w") as f:
-  #   subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+    # produce bwd ttir
+    with open(f"{path}/out.ttir", "w") as f:
+      subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
 
-  # this is a bit ugly but needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
-  # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix" on it and write
-  # to the same files to avoid creating redundant files
-  with open(f"{path}/inp.ttir", "r+") as f:
-      content = f.read()         # Read existing content
-      f.seek(0)                  # Move cursor to the beginning
-      # Overwrite from the start
-      subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
-      f.truncate()               # Remove remaining old content
+    if debug_info:
 
-  # 3. optionally, produce vis dot
-  draw_dot(path, mode="fwd")
+      # optionally, produce readable fwd ttir
 
-  # 4. produce bwd ttir
-  with open(f"{path}/out.ttir", "w") as f:
-    subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+      # with open(f"{path}/_inp_readable.ttir", "w") as f:
+      #   subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
 
-  if run_py:
-    # 5. run bwd ttir
-    subprocess.run([sys.executable, f"{path}/bwd.py"], cwd=path)
+      # this is a bit ugly but needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
+      # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix" on it and write
+      # to the same files to avoid creating redundant files
+      with open(f"{path}/inp.ttir", "r+") as f:
+          content = f.read()         # Read existing content
+          f.seek(0)                  # Move cursor to the beginning
+          # Overwrite from the start
+          subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+          f.truncate()               # Remove remaining old content
 
-    # 6. optionally, produce vis dot
-    draw_dot(path, mode="bwd")
+      # optionally, produce vis dot
+      draw_dot(path, mode="fwd")
+
+      # optionally, produce vis dot
+      draw_dot(path, mode="bwd")
 
 
 if __name__ == "__main__":

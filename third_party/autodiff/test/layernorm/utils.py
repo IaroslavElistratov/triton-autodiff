@@ -3,7 +3,6 @@ import torch
 import triton
 import triton.language as tl
 
-HAS_APEX = False
 DEVICE = torch.device("cuda:0")
 
 
@@ -56,27 +55,11 @@ def _layer_norm_fwd_fused(
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
-# M = 256
-# N = 256
-
-M = 1151
-N = 8192
-dtype = torch.float16
-device = DEVICE
-
-# create data
-x_shape = (M, N)
-w_shape = (x_shape[-1], )
-weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
-dy = .1 * torch.randn_like(x)
-x.requires_grad_(True)
-quantiles = [0.5, 0.2, 0.8]
+kernel = _layer_norm_fwd_fused
 
 # answer-now:
 # copy of LayerNorm.FORWARD
-def forward(x, weight, bias, eps=1e-5):
+def stub(kernel, x, weight, bias, eps=1e-5):
     # allocate output
     y = torch.empty_like(x)
     # reshape input data into 2D tensor
@@ -93,17 +76,17 @@ def forward(x, weight, bias, eps=1e-5):
     # heuristics for number of warps
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
     # enqueue kernel
-    compiled_kernel = _layer_norm_fwd_fused[(M, )](  #
+    grid = (M, )
+    print("grid:", grid)
+    kernel[grid](  #
         x_arg, y, weight, bias, mean, rstd,  #
         x_arg.stride(0), N, eps,  #
-        BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_ctas=1)
+        # todo-now: commenting out "num_warps=num_warps, num_ctas=1" solves the error!
+        BLOCK_SIZE=BLOCK_SIZE #, num_warps=num_warps, num_ctas=1
+    )
     # ctx.save_for_backward(x, weight, bias, mean, rstd)
     # ctx.BLOCK_SIZE = BLOCK_SIZE
     # ctx.num_warps = num_warps
     # ctx.eps = eps
-    return compiled_kernel, y
+    return y
 
-_compiled_kernel, out = forward(x, weight, bias)
-
-with open("inp.ttir", "w") as f:
-    f.write(_compiled_kernel.asm['ttir'])

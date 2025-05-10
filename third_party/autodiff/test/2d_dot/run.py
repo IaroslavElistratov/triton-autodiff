@@ -64,13 +64,13 @@ else:
 
 #### test backward ####
 
-upstream = torch.randn(a.shape[0], b.shape[1]).to(dtype=torch.float32, device='cuda:0')
+upstream = torch.randn_like(output_torch)
 a.requires_grad = True
 b.requires_grad = True
 
 from triton.backends.api import autodiff
 
-my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=2)
+my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=2)
 
 # todo: rm warmup
 stub(bwd_kernel, a, b)

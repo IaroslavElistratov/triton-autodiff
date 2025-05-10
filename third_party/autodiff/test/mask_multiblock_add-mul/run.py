@@ -1,3 +1,4 @@
+# 5) masked and multi-block: Add + Mull
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
@@ -14,41 +15,51 @@ DEVICE = torch.device("cuda:0")
 def kernel(
         a_ptr,
         b_ptr,
-        c_ptr,
         output_ptr,
+        BLOCK_SIZE: tl.constexpr,
     ):
-    offsets = tl.arange(0, 4)
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
-    a = tl.load(a_ptr + offsets)
-    b = tl.load(b_ptr + offsets)
-    c = tl.load(c_ptr + offsets)
+    # 10 here is numel in the input;
+    # because I'm launching ceil(10, 4) -- 3 instances of this fn
+    # because each fn processes 4 elements, 3 instances will process 3*4=12
+    # elements. But the input only has 10 elements.
+    # So for the 3rd instance need to mask of last two elements
+    a = tl.load(a_ptr + offsets, mask=offsets<10)
+    b = tl.load(b_ptr + offsets, mask=offsets<10)
 
     x = a + 0.5
     y = x * b
-    z = y / c
 
-    tl.store(output_ptr + offsets, z)
+    tl.store(output_ptr + offsets, y, mask=offsets<10)
 
-def stub(kernel, a, b, c):
+def stub(kernel, a, b, BLOCK_SIZE=4):
     output = torch.empty_like(a)
-    grid = (1, 1, 1)
-    kernel[grid](a, b, c, output)
+    assert a.device == DEVICE and output.device == DEVICE
+    n_elements = output.numel()
+    # note: this launches cdiv(10, 3) --> 3 fn instances
+    grid = (triton.cdiv(n_elements, BLOCK_SIZE), 1, 1)
+    # grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    print("grid: ", grid)
+    kernel[grid](a, b, output, BLOCK_SIZE)
     return output
 
+
 torch.manual_seed(0)
-size = 4
+
+size = 10
 a = torch.rand(size, device=DEVICE)
 b = torch.rand(size, device=DEVICE)
-c = torch.rand(size, device=DEVICE)
+# print("a: ", a)
+# print("b: ", b)
 
-def torch_fn(a, b, c):
-    x = a + 0.5
-    y = x * b
-    z = y / c
-    return z
+def torch_fn(torch_a, torch_b):
+    return (torch_a + 0.5) * torch_b
 
-output_torch = torch_fn(a, b, c)
-output_triton = stub(kernel, a, b, c)
+output_torch = torch_fn(a, b)
+output_triton = stub(kernel, a, b)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print(output_torch)
@@ -63,37 +74,35 @@ else:
     print("❌ Triton and Torch differ")
 
 
-
-
 #### test backward ####
 
 upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
-c.requires_grad = True
 
 from triton.backends.api import autodiff
 
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=3)
+my_op, bwd_kernel = autodiff(kernel, stub, grid=(3, 1, 1), idx_upstream=2)
 
 # todo: rm warmup
-stub(bwd_kernel, a, b, c)
-
-my_out = my_op(a, b, c)
+stub(bwd_kernel, a, b)
+my_out = my_op(a, b)
 my_out.backward(upstream)
 
+# print("grad a: ", grad_a)
+# print("grad b: ", grad_b)
+# print()
 
 # compare with pytorch
 
 torch_a = a.clone().detach().requires_grad_(True)
 torch_b = b.clone().detach().requires_grad_(True)
-torch_c = c.clone().detach().requires_grad_(True)
 
-torch_output = torch_fn(torch_a, torch_b, torch_c)
+torch_output = torch_fn(torch_a, torch_b)
 torch_output.backward(upstream)
+
 # print("torch grad a: ", torch_a.grad)
 # print("torch grad b: ", torch_b.grad)
-# print("torch grad c: ", torch_c.grad)
 # print()
 
 
@@ -103,11 +112,6 @@ else:
     print("❌ Triton and Torch differ")
 
 if torch.allclose(b.grad, torch_b.grad, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
-else:
-    print("❌ Triton and Torch differ")
-
-if torch.allclose(c.grad, torch_c.grad, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")

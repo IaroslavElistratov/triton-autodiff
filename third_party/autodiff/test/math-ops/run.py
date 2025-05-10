@@ -26,11 +26,21 @@ def kernel(
     x = a + 0.5
     y = x * b
     z = y / c
+    e = tl.cos(z)
+    q = tl.sin(e)
+    u = tl.sqrt(q)
+    t = tl.log(u)
+    l = tl.exp(t)
 
-    tl.store(output_ptr + offsets, z)
+    # todo-high: decomposes into multiple ops
+    # o = tl.sigmoid(l)
+    # o = tl.softmax(l)
+
+    tl.store(output_ptr + offsets, l)
 
 def stub(kernel, a, b, c):
     output = torch.empty_like(a)
+    # grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
     grid = (1, 1, 1)
     kernel[grid](a, b, c, output)
     return output
@@ -40,12 +50,23 @@ size = 4
 a = torch.rand(size, device=DEVICE)
 b = torch.rand(size, device=DEVICE)
 c = torch.rand(size, device=DEVICE)
+# print("a: ", a)
+# print("b: ", b)
+# print("c: ", c)
+# print()
 
 def torch_fn(a, b, c):
     x = a + 0.5
     y = x * b
     z = y / c
-    return z
+    e = torch.cos(z)
+    q = torch.sin(e)
+    u = torch.sqrt(q)
+    t = torch.log(u)
+    l = torch.exp(t)
+    # o = tl.sigmoid(l)
+    return l
+
 
 output_torch = torch_fn(a, b, c)
 output_triton = stub(kernel, a, b, c)
@@ -63,14 +84,12 @@ else:
     print("❌ Triton and Torch differ")
 
 
-
-
-#### test backward ####
+# Backward
 
 upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
-c.requires_grad = True
+
 
 from triton.backends.api import autodiff
 
@@ -78,10 +97,13 @@ my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=3)
 
 # todo: rm warmup
 stub(bwd_kernel, a, b, c)
-
 my_out = my_op(a, b, c)
 my_out.backward(upstream)
 
+# print("grad a: ", a.grad)
+# print("grad b: ", b.grad)
+# print("grad c: ", c.grad)
+# print()
 
 # compare with pytorch
 

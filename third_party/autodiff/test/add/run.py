@@ -74,7 +74,7 @@ a.requires_grad = True
 
 from triton.backends.api import autodiff
 
-my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=1)
+my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=1)
 
 # todo: rm warmup
 print("\n" * 3, "bwd_kernel warmup")
