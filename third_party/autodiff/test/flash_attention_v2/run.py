@@ -92,7 +92,7 @@ stub = right_partial(stub, causal, sm_scale)
 
 # now this uses the stub which only needs grad args (non grad args have been bound)
 # todo-now: the inex of output in original kernel inputs is 5 (not 4), but bc I removed a constexpr  from inputs (in this specific case happened to extract) 1 arg before original_idx_upstream=5 so it's actually should be 4 now
-my_op, bwd_kernel = autodiff(kernel, stub, grid, idx_upstream=4)
+my_op, bwd_kernel = autodiff(kernel, stub, grid, idx_upstream=5, non_stub_args_idxs=[3])
 
 # todo-now: to do the warmup you need to somehow get all the args -- this requires replicating logic of the entire stub
 # todo: rm warmup

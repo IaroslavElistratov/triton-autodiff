@@ -38,8 +38,11 @@ def shape_track_hook(*args, **kwargs):
 
     ctx = StashArgsCtx._active_instance
     if ctx is not None:
-        ctx.args = args # [weakref.ref(arg) for arg in args]
-        # todo-now: you're just ignoring kwargs
+        _kwargs = kwargs.copy()
+        # this one kwarg is injected automatically
+        _kwargs.pop("debug")
+        ctx.args = [*args, *_kwargs] # [weakref.ref(arg) for arg in args]
+        # print("[shape_track_hook] kwargs", _kwargs)
 
 
 
@@ -58,6 +61,8 @@ def clone_jit_function(jit_func):
         launch_metadata=jit_func.launch_metadata
     )
 
+    cloned._autodiff_info = []
+
     # Copy any pre-run hooks
     cloned.pre_run_hooks = list(jit_func.pre_run_hooks)
 
@@ -65,41 +70,49 @@ def clone_jit_function(jit_func):
 
 
 # it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, kernel_inputs, upstream):
+def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs, kernel_inputs, upstream):
 
     # todo: add input checks
     # assert a.device == DEVICE and b.device == DEVICE and upstream.device == DEVICE
 
-    # fwd specializes away some arguments (so that they aren't arguments in the fwd TTIR, and thus not arguments in bwd TTIR as well) -- so don't pass them bwd TTIR
-    idx_folded = [3]
-    num_folded_args_before_upstream = 0
-    for i in idx_folded:
+    # fwd specializes away some arguments (so that they aren't arguments in the fwd TTIR,
+    # and thus not arguments in bwd TTIR as well) -- so don't pass them bwd TTIR
+    idx_folded = bwd_kernel._autodiff_info[-1]
+    # user provided idx of output (idx_upstream) in terms of all args to fwd python kernel
+    # (JITFunction), when it compiled, some of the args potentially got specialized away.
+    # Thus here need to shift that user specified index to account for these args (that got
+    # specialized away) if they were located before the user provided idx_upstream
+    num_folded_before_upstream = 0
+    # reverse to prevent shifting issues when popping
+    for i in reversed(idx_folded):
         kernel_inputs.pop(i)
-        num_folded_args_before_upstream += 1
+        if i < idx_upstream:
+            num_folded_before_upstream += 1
+
+    # print("[create_bwd_kernel_inputs] idx_folded", idx_folded)
+    # print("num_folded_before_upstream:", num_folded_before_upstream)
 
     bwd_args = []
     for i, arg in enumerate(kernel_inputs):
-        if i == idx_upstream:
+        if i == (idx_upstream - num_folded_before_upstream):
             bwd_args.append(upstream)
             continue
         if isinstance(arg, torch.Tensor):
             bwd_args.append(torch.zeros_like(arg))
 
-    # # print("[create_bwd_kernel_inputs] kernel_inputs:", kernel_inputs)
     # print("[create_bwd_kernel_inputs] fwd_args:", kernel_inputs)
     # print("[create_bwd_kernel_inputs] bwd_args:", bwd_args)
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
     # print("[create_bwd_kernel_inputs] grads", bwd_args)
 
-    # [orig_arg, orig_arg, orig_arg_OUT, grad, grad, grad_OUT,]
-    # num_args = len([*kernel_inputs, *bwd_args])
-
-    # todo-now: this assumes all args are tensors -- but it's not the case, so this causes idx (in terms of fwd args) not match idx (in terms of grad args)
     # remove upstream grad
-    bwd_args.pop(idx_upstream - num_folded_args_before_upstream)
+    # Use num_folded_before_upstream, otherwise assumes all args are tensors (IOW: grad inputs are 1:1 with
+    # inputs) -- but it's not always the case, so this causes idx (in terms of fwd args) not match idx (in terms of
+    # grad args)
+    bwd_args.pop(idx_upstream - num_folded_before_upstream)
 
 
-    # todo-now:
+    # todo-now: an automatic way of solving this seems would require a new implementation of python API (V3)
     #   create_bwd_kernel_inputs really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
     #       seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
     #
@@ -109,8 +122,7 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, kernel_inputs, upst
     #       but kernel actually sees (q, k, v, M, OUT, [other non-tensor arguments]) -- and your create_bwd_kernel_inputs creates grad tensors for all tensor arguments (to feed to bwd_kernel) and then returns all added grad_tensor arguments
     #       (which would also contain grad_M, grad_OUT) but because these M or OUT weren't passed to the autograd.Function.forwad, in autograd.Function.backward, it's incorrect to return grads wrt these values
     #       so need so way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
-    non_stub_idxs = [3] # remove M
-    for i in non_stub_idxs:
+    for i in non_stub_args_idxs:
         bwd_args.pop(i)
 
     # unpack list
@@ -361,6 +373,16 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         print("[my hook] jit_fn.params:", jit_fn.params)
         print("fn.jit_function.signature.parameters", fn.jit_function.signature.parameters)
 
+
+        # recover all arguments that have been folded into the CompiledKernel (need for later removal
+        # of these folded args from fwd_kernel_args inside create_bwd_kernel_inputs before passing them bwd_kernel);
+        # includes compile‑time constants (declared `constexpr`) AND automatically specialised (ints/bools/tuples …)
+        folded = list(p[0] for p in compile_dict["constants"])
+        names = [fn.jit_function.arg_names[i] for i in folded]
+        # print("Hard‑coded parameter indices:", sorted(folded))
+        # print("Hard‑coded parameter names:  ", names)
+        fn.jit_function._autodiff_info.append(folded)
+
     return False
 
 
@@ -443,7 +465,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
 
 
-def autodiff(kernel, stub, grid, idx_upstream):
+def autodiff(kernel, stub, grid, idx_upstream, non_stub_args_idxs=None):
 
     global bwd_kernel
     bwd_kernel = clone_jit_function(kernel)
@@ -452,7 +474,7 @@ def autodiff(kernel, stub, grid, idx_upstream):
     triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 
     global create_bwd_kernel_inputs
-    create_bwd_kernel_inputs = partial(create_bwd_kernel_inputs, bwd_kernel, idx_upstream, grid)
+    create_bwd_kernel_inputs = partial(create_bwd_kernel_inputs, bwd_kernel, idx_upstream, grid, non_stub_args_idxs)
     fwd_stub = partial(stub, kernel)
     my_op = partial(DifferentiatedCompiledKernel.apply, fwd_stub, create_bwd_kernel_inputs)
     return my_op, bwd_kernel

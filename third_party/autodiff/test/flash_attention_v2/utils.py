@@ -269,12 +269,12 @@ def stub(kernel, q, k, v, causal, sm_scale):
     # STAGE: tl.constexpr  #
     # )
 
-    # print("q")
-    # print("k")
-    # print("v")
+    # print("q", id(q))
+    # print("k", id(k))
+    # print("v", id(v))
     # print("sm_scale", sm_scale)
-    # print("M")
-    # print("o")
+    # print("M", id(M))
+    # print("o", id(o))
     # print("q.stride(0)", q.stride(0))
     # print("q.stride(1)", q.stride(1))
     # print("q.stride(2)", q.stride(2))
@@ -293,6 +293,12 @@ def stub(kernel, q, k, v, causal, sm_scale):
     # print("o.stride(3)", o.stride(3))
     # print("q.shape[0]", q.shape[0])
     # print("q.shape[1]", q.shape[1])
+    # print("N_CTX", q.shape[2])
+    # print("HEAD_DIM", HEAD_DIM_K)
+    # print("STAGE", stage)
+    # print("BLOCK_M", BLOCK_M)
+    # print("BLOCK_N", BLOCK_N)
+
 
     return o # , M
 
