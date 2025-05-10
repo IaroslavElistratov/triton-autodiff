@@ -125,13 +125,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
 
 
 # answer-now: added do not specilize, other wise trtion adds them as constants as oppose to arguments -- and this is different from my causal=True case -- thus to avoid chaning what params I pass to the bwd kenrel in my bwd.py every time I filp "causal" flag -- thus here I just specialized them
-@triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H", "N_CTX"])
+@triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
               stride_qz, stride_qh, stride_qm, stride_qk,  # 
               stride_kn, stride_kk,  # 
               stride_vk, stride_vn,  # 
               stride_om, stride_on,  #
-              Z, H, N_CTX,  #
+              Z, H, N_CTX: tl.constexpr,  #,  #
               HEAD_DIM: tl.constexpr,  #
               BLOCK_M: tl.constexpr,  #
               BLOCK_N: tl.constexpr,  #
@@ -212,7 +212,7 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 _COMPILED_KERNEL = None
 
 
-def stub(q, k, v, causal, sm_scale):
+def stub(kernel, q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
     # when v is in float8_e5m2 it is transposed.
@@ -238,7 +238,7 @@ def stub(q, k, v, causal, sm_scale):
     assert q.shape[2] == BLOCK_M
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
     global _COMPILED_KERNEL
-    _COMPILED_KERNEL = _attn_fwd[grid](
+    _COMPILED_KERNEL = kernel[grid](
         q, k, v, sm_scale, M, o,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
         # k.stride(0), k.stride(1), 
@@ -247,11 +247,14 @@ def stub(q, k, v, causal, sm_scale):
         v.stride(2), v.stride(3),  #
         # o.stride(0), o.stride(1),
         o.stride(2), o.stride(3),  #
-        q.shape[0], q.shape[1],  #
+
+        q.shape[0],  # Z
+        q.shape[1],  # H
         N_CTX=q.shape[2],  #
         HEAD_DIM=HEAD_DIM_K,  #
         STAGE=stage,  #
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N)
 
     # comment: these are the args passed to the fwd kerenl -- unlike in all my preivous kernel I actually want to try to pass all the ints valeus to bwd kenrel as well (instead of hardcoding them)
     # (Q, K, V, sm_scale: tl.constexpr, M, Out,  #
@@ -321,7 +324,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     ref_dq, q.grad = q.grad.clone(), None
 
     # triton implementation
-    tri_out = attention(q, k, v, causal, sm_scale).half()
+    tri_out = attention(kernel, q, k, v, causal, sm_scale).half()
     # comment: commented this out bc I'm using smaller shapes now but the bwd has this assert (requries a larger shape)
     #    PRE_BLOCK = 128
     #    assert N_CTX % PRE_BLOCK == 0

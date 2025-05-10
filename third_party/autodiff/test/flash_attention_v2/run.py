@@ -53,9 +53,9 @@ def torch_fn(q, k, v, causal, sm_scale):
 
 
 #### test forward ####
-
+print("\n" * 4, "forward:")
 output_torch = torch_fn(q, k, v, causal, sm_scale)
-output_triton = stub(q, k, v, causal, sm_scale)
+output_triton = stub(kernel, q, k, v, causal, sm_scale)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print("output_torch:", output_torch[:3, :3])
@@ -72,6 +72,7 @@ else:
 
 
 #### test backward ####
+print("\n" * 4, "backward warmup:")
 
 upstream = torch.randn_like(q)
 q.requires_grad = True
@@ -87,19 +88,26 @@ from functools import partial
 # here binding trailing arguments (not begging arguments), bc kernel happen to have these at the end
 def right_partial(func, *args):
     return lambda *fargs: func(*fargs, *args)
-stub = right_partial(stub, causal, sm_scale))
+stub = right_partial(stub, causal, sm_scale)
 
 # now this uses the stub which only needs grad args (non grad args have been bound)
-my_op, bwd_kernel = autodiff(kernel, stub, idx_upstream=5)
+# todo-now: the inex of output in original kernel inputs is 5 (not 4), but bc I removed a constexpr  from inputs (in this specific case happened to extract) 1 arg before original_idx_upstream=5 so it's actually should be 4 now
+my_op, bwd_kernel = autodiff(kernel, stub, grid, idx_upstream=4)
 
-# todo-now: to do the warmup you need to somehow get all the args -- this requires replicating logic of the enitre stub
+# todo-now: to do the warmup you need to somehow get all the args -- this requires replicating logic of the entire stub
 # todo: rm warmup
-bwd_kernel[grid](a, b, torch.ones_like(a))
-my_out = my_op(q, k, v, causal, sm_scale)
+stub(bwd_kernel, q, k, v)
+
+print("\n" * 4, "backward:")
+
+my_out = my_op(q, k, v)
 my_out.backward(upstream)
-print("grad a[:3, :3]: ", a.grad[:3, :3])
-print("grad b[:3, :3]: ", b.grad[:3, :3])
+print("grad q[0, 0, :4, :4]: ", q.grad[0, 0, :4, :4])
+print("grad k[0, 0, :4, :4]: ", k.grad[0, 0, :4, :4])
+print("grad v[0, 0, :4, :4]: ", v.grad[0, 0, :4, :4])
 print()
+
+
 
 
 # # NOTE: this works but unrolls for 128 times -- so try smaller shapes
@@ -112,92 +120,90 @@ print()
 # print("grad_v", grad_v[0, 0, :4, :4])
 
 
+torch_q = q.clone().detach().requires_grad_(True)
+torch_k = k.clone().detach().requires_grad_(True)
+torch_v = v.clone().detach().requires_grad_(True)
+
+torch_out = torch_fn(torch_q, torch_k, torch_v, causal, sm_scale)
+torch_out.backward(upstream)
+
+# print("torch_out", torch_out[0, 0, :4, :4])
+print("torch_grad_q", q.grad[0, 0, :4, :4])
+print("torch_grad_k", k.grad[0, 0, :4, :4])
+print("torch_grad_v", v.grad[0, 0, :4, :4])
+
+# torch_dv, v.grad = v.grad.clone(), None
+# torch_dk, k.grad = k.grad.clone(), None
+# torch_dq, q.grad = q.grad.clone(), None
 
 
-# q.requires_grad = True
-# k.requires_grad = True
-# v.requires_grad = True
+# # triton implementation
+# tri_out = attention(q, k, v, causal, sm_scale).half()
 
-# ref_out = torch_fn(q, k, v, causal, sm_scale)
-# ref_out.backward(dout)
-
-# print("ref_out", ref_out[0, 0, :4, :4])
-# print("ref_grad_q", q.grad[0, 0, :4, :4])
-# print("ref_grad_k", k.grad[0, 0, :4, :4])
-# print("ref_grad_v", v.grad[0, 0, :4, :4])
-
-# # ref_dv, v.grad = v.grad.clone(), None
-# # ref_dk, k.grad = k.grad.clone(), None
-# # ref_dq, q.grad = q.grad.clone(), None
+# assert torch.allclose(torch_out, tri_out, atol=1e-2, rtol=0)
+# assert torch.allclose(torch_dv, tri_dv, atol=1e-2, rtol=0.0)
+# assert torch.allclose(torch_dk, tri_dk, atol=1e-2, rtol=0.0)
+# assert torch.allclose(torch_dq, tri_dq, atol=1e-2, rtol=0.0)
+# return tri_out, torch_out
 
 
-# # # triton implementation
-# # tri_out = attention(q, k, v, causal, sm_scale).half()
+if torch.allclose(my_out, torch_out, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
-# # assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
-# # assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=0.0)
-# # assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=0.0)
-# # assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=0.0)
-# # return tri_out, ref_out
+if torch.allclose(q.grad, torch_q.grad, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
+if torch.allclose(k.grad, torch_k.grad, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
-# if torch.allclose(out, ref_out, atol=1e-2, rtol=0):
-#     print("✅ Triton and Torch match")
-# else:
-#     print("❌ Triton and Torch differ")
-
-# if torch.allclose(grad_q, q.grad, atol=1e-2, rtol=0):
-#     print("✅ Triton and Torch match")
-# else:
-#     print("❌ Triton and Torch differ")
-
-# if torch.allclose(grad_k, k.grad, atol=1e-2, rtol=0):
-#     print("✅ Triton and Torch match")
-# else:
-#     print("❌ Triton and Torch differ")
-
-# if torch.allclose(grad_v, v.grad, atol=1e-2, rtol=0):
-#     print("✅ Triton and Torch match")
-# else:
-#     print("❌ Triton and Torch differ")
+if torch.allclose(v.grad, torch_v.grad, atol=1e-2, rtol=0):
+    print("✅ Triton and Torch match")
+else:
+    print("❌ Triton and Torch differ")
 
 
 
 
-# """
+"""
 
 
-# M = 1151
-# N = 8192
-# dtype = torch.float16
-# device = DEVICE
+M = 1151
+N = 8192
+dtype = torch.float16
+device = DEVICE
 
-# # create data
-# x_shape = (M, N)
-# w_shape = (x_shape[-1], )
-# weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-# bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-# x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
-# dy = .1 * torch.randn_like(x)
-# # x.requires_grad_(True)
-# # quantiles = [0.5, 0.2, 0.8]
+# create data
+x_shape = (M, N)
+w_shape = (x_shape[-1], )
+weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
+dy = .1 * torch.randn_like(x)
+# x.requires_grad_(True)
+# quantiles = [0.5, 0.2, 0.8]
 
 
-# # # Run our implementation
-# with torch.no_grad():
-#     compiled_kernel, grad_x_arg, grad_weight, grad_bias, grad_mean, grad_rstd = bwd(x, weight, bias)
-#     print("grad_x_arg: ", grad_x_arg)
-#     print("grad_weight: ", grad_weight)
-#     print("grad_bias: ", grad_bias)
+# # Run our implementation
+with torch.no_grad():
+    compiled_kernel, grad_x_arg, grad_weight, grad_bias, grad_mean, grad_rstd = bwd(x, weight, bias)
+    print("grad_x_arg: ", grad_x_arg)
+    print("grad_weight: ", grad_weight)
+    print("grad_bias: ", grad_bias)
 
-# print("\n" * 3)
-# # # Forward pass with PyTorch's LayerNorm
-# x.requires_grad = True
-# weight.requires_grad = True
-# bias.requires_grad = True
-# torch_ln = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
-# torch_ln.backward(torch.ones_like(torch_ln))
-# print("x.grad: ", x.grad)
-# print("weight.grad: ", weight.grad)
-# print("bias.grad: ", bias.grad)
-# """
+print("\n" * 3)
+# # Forward pass with PyTorch's LayerNorm
+x.requires_grad = True
+weight.requires_grad = True
+bias.requires_grad = True
+torch_ln = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
+torch_ln.backward(torch.ones_like(torch_ln))
+print("x.grad: ", x.grad)
+print("weight.grad: ", weight.grad)
+print("bias.grad: ", bias.grad)
+"""

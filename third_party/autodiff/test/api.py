@@ -65,13 +65,17 @@ def clone_jit_function(jit_func):
 
 
 # it's not as much as a stub, but more like helper to create_bwd_kernel_inputs from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, kernel_inputs, upstream):
+def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, kernel_inputs, upstream):
 
     # todo: add input checks
     # assert a.device == DEVICE and b.device == DEVICE and upstream.device == DEVICE
 
-    # todo: extract this from the kernel
-    grid = (1, 1, 1)
+    # fwd specializes away some arguments (so that they aren't arguments in the fwd TTIR, and thus not arguments in bwd TTIR as well) -- so don't pass them bwd TTIR
+    idx_folded = [3]
+    num_folded_args_before_upstream = 0
+    for i in idx_folded:
+        kernel_inputs.pop(i)
+        num_folded_args_before_upstream += 1
 
     bwd_args = []
     for i, arg in enumerate(kernel_inputs):
@@ -82,16 +86,33 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, kernel_inputs, upstream):
             bwd_args.append(torch.zeros_like(arg))
 
     # # print("[create_bwd_kernel_inputs] kernel_inputs:", kernel_inputs)
-    print("[create_bwd_kernel_inputs] fwd_args:", kernel_inputs)
-    print("[create_bwd_kernel_inputs] bwd_args:", bwd_args)
+    # print("[create_bwd_kernel_inputs] fwd_args:", kernel_inputs)
+    # print("[create_bwd_kernel_inputs] bwd_args:", bwd_args)
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
-    print("[create_bwd_kernel_inputs] grads", bwd_args)
+    # print("[create_bwd_kernel_inputs] grads", bwd_args)
 
     # [orig_arg, orig_arg, orig_arg_OUT, grad, grad, grad_OUT,]
     # num_args = len([*kernel_inputs, *bwd_args])
 
+    # todo-now: this assumes all args are tensors -- but it's not the case, so this causes idx (in terms of fwd args) not match idx (in terms of grad args)
     # remove upstream grad
-    bwd_args.pop(idx_upstream)
+    bwd_args.pop(idx_upstream - num_folded_args_before_upstream)
+
+
+    # todo-now:
+    #   create_bwd_kernel_inputs really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
+    #       seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
+    #
+    #   capture stub and create_bwd_kernel_inputs by closure -- instead of passing them as inputs to forward() -- otherwise autograd requires to return same number of grads
+    #   cannot just pass "def forward(ctx, stub, create_bwd_kernel_inputs, *stub_inputs)" and later bind stub and create_bwd_kernel_inputs -- bc even if bind and thus won't need to feed them them at runtime, autograd still sees 4 args and therefore will err when by bwd retunrs only 2 grads (wrt to the 2 args) -- it would expect I should return 4 args (as the number of args to autograd.Function.forward)
+    #   E.g. for flash aten kernel user fwd stub creates some additional tensor args and passes them to the kernel (e.g. M, OUT) and feeds them to the kernel but the user calls stub with "my_op(q, k, v)" -- so the autograd.Function.forward also only expects "q, k, v"
+    #       but kernel actually sees (q, k, v, M, OUT, [other non-tensor arguments]) -- and your create_bwd_kernel_inputs creates grad tensors for all tensor arguments (to feed to bwd_kernel) and then returns all added grad_tensor arguments
+    #       (which would also contain grad_M, grad_OUT) but because these M or OUT weren't passed to the autograd.Function.forwad, in autograd.Function.backward, it's incorrect to return grads wrt these values
+    #       so need so way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
+    non_stub_idxs = [3] # remove M
+    for i in non_stub_idxs:
+        bwd_args.pop(i)
+
     # unpack list
     return (*bwd_args,)
 
@@ -367,10 +388,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
 class DifferentiatedCompiledKernel(torch.autograd.Function):
 
-    # question-now:
-    #   create_bwd_kernel_inputs really computes grad wrt inputs to fwd_KERNEL not the inputs to the fwd_stub -- how should you wire this into the autograd system?
-    #   seems like you need do step of: given grads wrt fwd_kernel inputs; select only the ones that are grads wrt stub_fwd inputs
-
     @staticmethod
     def forward(ctx, stub, create_bwd_kernel_inputs, *stub_inputs):
         print("\n"*3, "Op.forward")
@@ -417,20 +434,16 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
                 fwd_kernel_inputs.append(ctx.non_tensor_inputs[non_tensor_idx])
                 non_tensor_idx += 1
 
-        # todo: don't hardcode idx
         # IOW: create_grad_inputs
         # print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
         grads = ctx.create_bwd_kernel_inputs(fwd_kernel_inputs, upstream)
         # print("[Op.backward] grads", grads)
 
-        # todo-now:
-        #   capture stub and create_bwd_kernel_inputs by closure -- instead of passing them as inputs to forward() -- otherwise autograd requres to return same numebr of grads
-        #   cannot just pass "def forward(ctx, stub, create_bwd_kernel_inputs, *stub_inputs)" and later bind stub and create_bwd_kernel_inputs -- bc even if bind and thus won't need to feed them them at runtime, autograd still sees 4 argueets and therefore will err when by bwd retunrs only 2 grads (wrt to the 2 args) -- it would expect I should return 4 args (as the number of args to autograd.Fcutnion.forward)
         return (None, None, *grads,)
 
 
 
-def autodiff(kernel, stub, idx_upstream):
+def autodiff(kernel, stub, grid, idx_upstream):
 
     global bwd_kernel
     bwd_kernel = clone_jit_function(kernel)
@@ -439,7 +452,7 @@ def autodiff(kernel, stub, idx_upstream):
     triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 
     global create_bwd_kernel_inputs
-    create_bwd_kernel_inputs = partial(create_bwd_kernel_inputs, bwd_kernel, idx_upstream)
+    create_bwd_kernel_inputs = partial(create_bwd_kernel_inputs, bwd_kernel, idx_upstream, grid)
     fwd_stub = partial(stub, kernel)
     my_op = partial(DifferentiatedCompiledKernel.apply, fwd_stub, create_bwd_kernel_inputs)
     return my_op, bwd_kernel
