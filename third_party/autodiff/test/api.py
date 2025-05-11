@@ -185,7 +185,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         sig_params = list(fn.jit_function.signature.parameters.values())
         for i in range(delta):
             p = inspect.Parameter(
-                f"extra_{i}",
+                f"grad_{i}",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 annotation="tl.float16*" # "tl.pointer"
             )
@@ -358,6 +358,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # s.non_constexpr_indices = [i for (i, p) in enumerate(s.params) if not p.is_constexpr] # RM
         # s.specialised_indices = [i for (i, p) in enumerate(s.params) if (not p.do_not_specialize) and (not p.is_constexpr)] # RM
 
+        # todo: Iterate over fn.jit_function.device_caches.keys() and duplicate the backward kernel per device, or error out if torch.cuda.current_device() differs between forward and backward.
         # # if multiple gpus, patch caches of all devices?
         # for d, (cch, t, b, _) in fn.jit_function.device_caches.items():
         #     if key in cch:
@@ -379,8 +380,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # includes compile‑time constants (declared `constexpr`) AND automatically specialised (ints/bools/tuples …)
         folded = list(p[0] for p in compile_dict["constants"])
         names = [fn.jit_function.arg_names[i] for i in folded]
-        # print("Hard‑coded parameter indices:", sorted(folded))
-        # print("Hard‑coded parameter names:  ", names)
+        print("Hard‑coded parameter indices:", sorted(folded))
+        print("Hard‑coded parameter names:  ", names)
         fn.jit_function._autodiff_info.append(folded)
 
     return False
@@ -411,7 +412,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, stub, create_bwd_kernel_inputs, *stub_inputs):
+    def forward(ctx, stub, create_bwd_kernel_inputs, post_process_fn, *stub_inputs):
         print("\n"*3, "Op.forward")
 
         # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
@@ -437,6 +438,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         ctx.arg_types = [isinstance(a, torch.Tensor) for a in kernel_inputs]
 
         ctx.create_bwd_kernel_inputs = create_bwd_kernel_inputs
+        ctx.post_process_fn = post_process_fn
         return outs
 
 
@@ -461,11 +463,17 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         grads = ctx.create_bwd_kernel_inputs(fwd_kernel_inputs, upstream)
         # print("[Op.backward] grads", grads)
 
-        return (None, None, *grads,)
+        if ctx.post_process_fn is not None:
+            grads = ctx.post_process_fn(*grads)
+
+        return (None, None, None, *grads,)
 
 
 
-def autodiff(kernel, stub, grid, idx_upstream, non_stub_args_idxs=None):
+def autodiff(kernel, stub, grid, idx_upstream, non_stub_args_idxs=None, post_process_fn=None):
+
+    if non_stub_args_idxs is None:
+        non_stub_args_idxs = []
 
     global bwd_kernel
     bwd_kernel = clone_jit_function(kernel)
@@ -476,6 +484,7 @@ def autodiff(kernel, stub, grid, idx_upstream, non_stub_args_idxs=None):
     global create_bwd_kernel_inputs
     create_bwd_kernel_inputs = partial(create_bwd_kernel_inputs, bwd_kernel, idx_upstream, grid, non_stub_args_idxs)
     fwd_stub = partial(stub, kernel)
-    my_op = partial(DifferentiatedCompiledKernel.apply, fwd_stub, create_bwd_kernel_inputs)
+    my_op = partial(DifferentiatedCompiledKernel.apply, fwd_stub, create_bwd_kernel_inputs, post_process_fn)
     return my_op, bwd_kernel
+
 
