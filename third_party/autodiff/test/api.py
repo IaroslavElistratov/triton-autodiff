@@ -78,6 +78,7 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs,
     # fwd specializes away some arguments (so that they aren't arguments in the fwd TTIR,
     # and thus not arguments in bwd TTIR as well) -- so don't pass them bwd TTIR
     idx_folded = bwd_kernel._autodiff_info[-1]
+    print("[create_bwd_kernel_inputs] idx_folded: ", idx_folded)
     # user provided idx of output (idx_upstream) in terms of all args to fwd python kernel
     # (JITFunction), when it compiled, some of the args potentially got specialized away.
     # Thus here need to shift that user specified index to account for these args (that got
@@ -122,8 +123,12 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs,
     #       but kernel actually sees (q, k, v, M, OUT, [other non-tensor arguments]) -- and your create_bwd_kernel_inputs creates grad tensors for all tensor arguments (to feed to bwd_kernel) and then returns all added grad_tensor arguments
     #       (which would also contain grad_M, grad_OUT) but because these M or OUT weren't passed to the autograd.Function.forwad, in autograd.Function.backward, it's incorrect to return grads wrt these values
     #       so need so way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
-    for i in non_stub_args_idxs:
-        bwd_args.pop(i)
+
+    # use reverse to avoid shifting issues
+    for i in reversed(non_stub_args_idxs):
+        # for the stub args which are **after** the popped upstream_idx,
+        # shift them by 1 to account for the grad_out that I popped just above
+        bwd_args.pop(i) if i < idx_upstream else bwd_args.pop(i - 1)
 
     # unpack list
     return (*bwd_args,)
