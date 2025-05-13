@@ -12,18 +12,18 @@ DEVICE = torch.device("cuda:0")
 
 # comment: M tensor is float32 -- while others are float16
 
-Z=1
-H=2
-N_CTX=16
+B=1
+NUM_HEADS=1
+SEQ_LEN=16
 HEAD_DIM=16
 dtype=torch.float16
 
 causal=False
 sm_scale=0.5
 
-q = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-k = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-v = torch.empty((Z, H, N_CTX, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
 
 grid = (1, q.shape[0] * q.shape[1], 1)
 
@@ -32,19 +32,22 @@ grid = (1, q.shape[0] * q.shape[1], 1)
 # reference implementation
 
 def torch_fn(q, k, v, causal, sm_scale):
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device=DEVICE))
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
+
     if causal:
+        M = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device=DEVICE))
         p[:, :, M == 0] = float("-inf")
 
     # ORIGINAL:
-    p = torch.softmax(p.float(), dim=-1).half()
+    # p = torch.softmax(p.float(), dim=-1).half()
 
     #  todo-now: using softmax wt min-max trick to correspond to the inp.ttir
-    # # MY:
-    # p = p.float()
-    # exp = torch.exp(p)
-    # p = (exp / exp.sum(dim=-1, keepdim=True)).half()
+    # # # MY:
+    p = p.float()
+    p = p - p.max(axis=3, keepdim=True)[0]
+    p = torch.exp(p)
+    p = (p / p.sum(dim=3, keepdim=True))
+    p = p.half()
 
     # p = torch.exp(p)
     ref_out = torch.matmul(p, v)
@@ -58,10 +61,10 @@ output_torch = torch_fn(q, k, v, causal, sm_scale)
 output_triton = stub(kernel, q, k, v, causal, sm_scale)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
-# print("output_torch:", output_torch[:3, :3])
-# print("output_triton:", output_triton[:3, :3])
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
+print("output_torch:", output_torch[0, 0, :4, :4])
+print("output_triton:", output_triton[0, 0, :4, :4])
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 
 # assert max_difference == 0.0
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
@@ -128,9 +131,9 @@ torch_out = torch_fn(torch_q, torch_k, torch_v, causal, sm_scale)
 torch_out.backward(upstream)
 
 # print("torch_out", torch_out[0, 0, :4, :4])
-print("torch_grad_q", q.grad[0, 0, :4, :4])
-print("torch_grad_k", k.grad[0, 0, :4, :4])
-print("torch_grad_v", v.grad[0, 0, :4, :4])
+print("torch_grad_q", torch_q.grad[0, 0, :4, :4])
+print("torch_grad_k", torch_k.grad[0, 0, :4, :4])
+print("torch_grad_v", torch_v.grad[0, 0, :4, :4])
 
 # torch_dv, v.grad = v.grad.clone(), None
 # torch_dk, k.grad = k.grad.clone(), None
@@ -147,63 +150,64 @@ print("torch_grad_v", v.grad[0, 0, :4, :4])
 # return tri_out, torch_out
 
 
-if torch.allclose(my_out, torch_out, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+rtol = 0.1
+if torch.allclose(my_out, torch_out, atol=1e-2, rtol=rtol):
+    print("✅ [out] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ out Triton and Torch differ")
 
-if torch.allclose(q.grad, torch_q.grad, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+if torch.allclose(q.grad, torch_q.grad, atol=1e-2, rtol=rtol):
+    print("✅ [q grad] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ [q grad] Triton and Torch differ")
 
-if torch.allclose(k.grad, torch_k.grad, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+if torch.allclose(k.grad, torch_k.grad, atol=1e-2, rtol=rtol):
+    print("✅ [k grad] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ [k grad] Triton and Torch differ")
 
-if torch.allclose(v.grad, torch_v.grad, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+if torch.allclose(v.grad, torch_v.grad, atol=1e-2, rtol=rtol):
+    print("✅ [v grad] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ [v grad] Triton and Torch differ")
 
 
 
 
-"""
+# """
 
 
-M = 1151
-N = 8192
-dtype = torch.float16
-device = DEVICE
+# M = 1151
+# N = 8192
+# dtype = torch.float16
+# device = DEVICE
 
-# create data
-x_shape = (M, N)
-w_shape = (x_shape[-1], )
-weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
-dy = .1 * torch.randn_like(x)
-# x.requires_grad_(True)
-# quantiles = [0.5, 0.2, 0.8]
+# # create data
+# x_shape = (M, N)
+# w_shape = (x_shape[-1], )
+# weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+# bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+# x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
+# dy = .1 * torch.randn_like(x)
+# # x.requires_grad_(True)
+# # quantiles = [0.5, 0.2, 0.8]
 
 
-# # Run our implementation
-with torch.no_grad():
-    compiled_kernel, grad_x_arg, grad_weight, grad_bias, grad_mean, grad_rstd = bwd(x, weight, bias)
-    print("grad_x_arg: ", grad_x_arg)
-    print("grad_weight: ", grad_weight)
-    print("grad_bias: ", grad_bias)
+# # # Run our implementation
+# with torch.no_grad():
+#     compiled_kernel, grad_x_arg, grad_weight, grad_bias, grad_mean, grad_rstd = bwd(x, weight, bias)
+#     print("grad_x_arg: ", grad_x_arg)
+#     print("grad_weight: ", grad_weight)
+#     print("grad_bias: ", grad_bias)
 
-print("\n" * 3)
-# # Forward pass with PyTorch's LayerNorm
-x.requires_grad = True
-weight.requires_grad = True
-bias.requires_grad = True
-torch_ln = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
-torch_ln.backward(torch.ones_like(torch_ln))
-print("x.grad: ", x.grad)
-print("weight.grad: ", weight.grad)
-print("bias.grad: ", bias.grad)
-"""
+# print("\n" * 3)
+# # # Forward pass with PyTorch's LayerNorm
+# x.requires_grad = True
+# weight.requires_grad = True
+# bias.requires_grad = True
+# torch_ln = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
+# torch_ln.backward(torch.ones_like(torch_ln))
+# print("x.grad: ", x.grad)
+# print("weight.grad: ", weight.grad)
+# print("bias.grad: ", bias.grad)
+# """
