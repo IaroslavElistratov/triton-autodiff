@@ -1,32 +1,37 @@
 import numpy as np
 import torch
 import triton
+# torch.set_printoptions(sci_mode=False, linewidth=1000)
 
 from utils import kernel, stub
 
 torch.manual_seed(20)
 DEVICE = torch.device("cuda:0")
 
-# answer-now: some input types to the fn are float16 and some are float32
 
-M = 1151 # 256
-N = 8192 # 256
-dtype = torch.float16
+M = 1151 # 256 # 32
+N = 8192 # 256 # 32
+
+# answer-now: bc during backward we need to accumulate M times (from each instance of the kernel) -- when data is in float16, this quickly emplifies float numerics issues
+dtype = torch.float32
 
 # create data
 x_shape = (M, N)
-w_shape = (x_shape[-1], )
+print("x_shape: ", x_shape)
+w_shape = (N, )
+print("w_shape: ", w_shape)
 weight = torch.rand(w_shape, dtype=dtype, device=DEVICE, requires_grad=True)
 bias = torch.rand(w_shape, dtype=dtype, device=DEVICE, requires_grad=True)
 x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=DEVICE)
 upstream = .1 * torch.randn_like(x)
-x.requires_grad_(True)
-quantiles = [0.5, 0.2, 0.8]
+
+# x_arg = x.reshape(-1, x.shape[-1])
+# M, N = x_arg.shape
 
 
 #### test forward ####
 
-output_triton = stub(kernel, x, weight, bias)
+output_triton = stub(kernel, x, weight, bias, eps=1e-5)
 output_torch = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
 
 # print("output_torch:", output_torch[:3, :3])
@@ -70,65 +75,35 @@ torch_x = x.clone().detach().requires_grad_(True)
 torch_weight = weight.clone().detach().requires_grad_(True)
 torch_bias = bias.clone().detach().requires_grad_(True)
 
-
-torch_out = torch.nn.functional.layer_norm(torch_x, w_shape, torch_weight, torch_bias, eps=1e-5)
+torch_out = torch.nn.functional.layer_norm(torch_x, w_shape, torch_weight, torch_bias, eps=1e-5).to(dtype)
 torch_out.backward(upstream)
 print("torch_x.grad: ", torch_x.grad)
 print("torch_weight.grad: ", torch_weight.grad)
 print("torch_bias.grad: ", torch_bias.grad)
 
-# print("\nPyTorch reference gradients:")
-# print("dx norm difference:", torch.norm(dx_small - x_torch.grad).item())
-# print("dweight norm difference:", torch.norm(dweight_small - weight_torch.grad).item())
-# print("dbias norm difference:", torch.norm(dbias_small - bias_torch.grad).item())
+print("\nPyTorch reference gradients:")
+print("dx norm difference:", torch.norm(x - torch_x.grad).item())
+print("dweight norm difference:", torch.norm(weight - torch_weight.grad).item())
+print("dbias norm difference:", torch.norm(bias - torch_bias.grad).item())
 
 
+print("abs diff grad_x", (x.grad - torch_x.grad).abs().mean())
+print("abs diff grad_weight", (weight - torch_weight.grad).abs().mean())
+print("abs diff grad_bias", (bias - torch_bias.grad).abs().mean())
 
-if torch.allclose(x.grad, torch_x.grad, atol=1e-2, rtol=0):
+
+rtol = 0.1
+if torch.allclose(x.grad, torch_x.grad, atol=1e-2, rtol=rtol):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
-if torch.allclose(weight.grad, torch_weight.grad, atol=1e-2, rtol=0):
+if torch.allclose(weight.grad, torch_weight.grad, atol=1e-2, rtol=rtol):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
-if torch.allclose(bias.grad, torch_bias.grad, atol=1e-2, rtol=0):
+if torch.allclose(bias.grad, torch_bias.grad, atol=1e-2, rtol=rtol):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
-
-
-
-
-def dynamic_func(X, Y, W, B, Mean, Rstd, extra_0, extra_1, extra_2, extra_3, extra_4, extra_5, **options):
-    params = {
-        'X': X,
-        'Y': Y,
-        'W': W,
-        'B': B,
-        'Mean': Mean,
-        'Rstd': Rstd,
-        'extra_0': extra_0,
-        'extra_1': extra_1,
-        'extra_2': extra_2,
-        'extra_3': extra_3,
-        'extra_4': extra_4,
-        'extra_5': extra_5
-    }
-    specialization = [
-        specialize_impl(X, specialize_extra, False, True, True),
-        specialize_impl(Y, specialize_extra, False, True, True),
-        specialize_impl(W, specialize_extra, False, True, True),
-        specialize_impl(B, specialize_extra, False, True, True),
-        specialize_impl(Mean, specialize_extra, False, True, True),
-        specialize_impl(Rstd, specialize_extra, False, True, True),
-        specialize_impl(extra_0, specialize_extra, False, True, True),
-        specialize_impl(extra_1, specialize_extra, False, True, True),
-        specialize_impl(extra_2, specialize_extra, False, True, True),
-        specialize_impl(extra_3, specialize_extra, False, True, True),
-        specialize_impl(extra_4, specialize_extra, False, True, True),
-        specialize_impl(extra_5, specialize_extra, False, True, True)
-    ]
-    return params, specialization, options

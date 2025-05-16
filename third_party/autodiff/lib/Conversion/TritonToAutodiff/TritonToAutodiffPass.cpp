@@ -263,8 +263,8 @@ struct ConvertTritonToAutodiff
         handleExpandDimsBackward(expandDimsOp, builder, gradMap);
       } else if (auto transOp = dyn_cast<triton::TransOp>(op)){
         handleTransBackward(transOp, builder, gradMap);
-      // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
-      //   handleSplatBackward(splatOp, builder, gradMap);
+      } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
+        handleSplatBackward(splatOp, builder, gradMap);
 
 
       // arith ops
@@ -1441,6 +1441,73 @@ struct ConvertTritonToAutodiff
     markVisited(builder, visitedType::Inserted, transGrad);
   }
 
+  void handleSplatBackward(triton::SplatOp splatOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting tt.splat op\n";
+
+
+    // Get input scalar value
+    Value scalar = splatOp.getSrc();
+
+    // Check if the scalar is a float type
+    bool isFloat = isa<FloatType>(scalar.getType());
+    if (!isFloat) {
+      llvm::errs() << "[handleSplatBackward] exiting early, input is not a Float\n";
+      return;
+    }
+
+    Value upstream = getUpstreamGrad(splatOp, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    // For splat operations, gradient of scalar = sum of all elements in upstream gradient
+    // We need to reduce all dimensions to get a scalar
+
+    // Get the result tensor type
+    auto resultType = dyn_cast<RankedTensorType>(splatOp.getType());
+    // auto resultShape = resultType.getShape();
+
+    // Start with upstream gradient
+    Value currentGrad = upstream;
+
+    // Reduce along each dimension to get a scalar
+    for (int i = 0; i < resultType.getRank(); i++) {
+
+      builder.setInsertionPointAfterValue(currentGrad);
+
+      // We always reduce dimension 0 since the tensor shape changes after each reduction
+      auto reduceOp = createGradOp<triton::ReduceOp>(
+          builder,
+          currentGrad,
+          0); // Always reduce first dimension
+
+      // Add block and arguments
+      auto &combineRegion = reduceOp.getCombineOp();
+      auto *combinerBlock = builder.createBlock(&combineRegion);
+
+      // Add arguments
+      Type elemType = dyn_cast<ShapedType>(currentGrad.getType()).getElementType();
+      combinerBlock->addArgument(elemType, splatOp.getLoc());
+      combinerBlock->addArgument(elemType, splatOp.getLoc());
+
+      // this is kind of inner (builder for the ops inside the reduceOp)
+      auto blockBuilder = OpBuilder::atBlockBegin(combinerBlock);
+      auto sum = blockBuilder.create<arith::AddFOp>(
+          currentNodeName,
+          combinerBlock->getArgument(0),
+          combinerBlock->getArgument(1));
+
+      blockBuilder.create<triton::ReduceReturnOp>(currentNodeName, sum.getResult());
+
+      // Update gradient for next reduction
+      currentGrad = reduceOp->getResult(0);
+
+      // Mark all operations in the reduction as visited
+      // No need to mark operations inside the block as they're contained in the reduce op
+      markVisited(builder, visitedType::Inserted, reduceOp);
+    }
+
+    maybeAccumulateGrad(scalar, currentGrad, gradMap, builder);
+  }
 
 
 }; // ConvertTritonToAutodiff stuct
