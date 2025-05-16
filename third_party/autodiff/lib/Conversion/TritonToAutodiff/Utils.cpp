@@ -480,14 +480,20 @@ namespace triton {
     });
 
     for (auto forOp : forOpsToUnroll) {
-      // Check if we can get the upper bound as a constant
-      if (auto upperBound = getConstantIntValue(forOp.getUpperBound())) {
-        unsigned numIters = *upperBound;
+      // Check if we can get the bounds and step as constants
+      auto upperBound = getConstantIntValue(forOp.getUpperBound());
+      auto lowerBound = getConstantIntValue(forOp.getLowerBound());
+      auto stepValue = getConstantIntValue(forOp.getStep());
+
+      if (upperBound && lowerBound && stepValue && *stepValue != 0) {
+        // Calculate the actual number of iterations
+        unsigned numIters = (*upperBound - *lowerBound) / *stepValue;
         // Completely unroll
         auto resultLoops = loopUnrollByFactor(forOp, numIters);
-        if (DEBUG_PRINTS) llvm::outs() << "Unrolled loop with " << numIters << " iterations\n";
+        llvm::errs() << "Unrolled loop with " << numIters << " iterations\n";
+        if (DEBUG_PRINTS) llvm::errs() << "Unrolled loop with " << numIters << " iterations\n";
       } else {
-        llvm::report_fatal_error("[unrollAllForOps] failed to extract upper bound\n");
+        llvm::report_fatal_error("[unrollAllForOps] failed to extract loop bounds or step\n");
       }
     }
 
