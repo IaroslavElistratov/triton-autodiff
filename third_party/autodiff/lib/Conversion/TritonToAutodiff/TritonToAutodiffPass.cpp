@@ -259,6 +259,10 @@ struct ConvertTritonToAutodiff
         handleReduceBackward(reduceOp, builder, gradMap, origToCloned);
       } else if (auto broadcastOp = dyn_cast<triton::BroadcastOp>(op)){
         handleBroadcastBackward(broadcastOp, builder, gradMap);
+      } else if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)){
+        handleExpandDimsBackward(expandDimsOp, builder, gradMap);
+      } else if (auto transOp = dyn_cast<triton::TransOp>(op)){
+        handleTransBackward(transOp, builder, gradMap);
       // } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
       //   handleSplatBackward(splatOp, builder, gradMap);
 
@@ -280,6 +284,8 @@ struct ConvertTritonToAutodiff
         handleSubfBackward(subfOp, builder, gradMap);
       } else if (auto selectOp = dyn_cast<arith::SelectOp>(op)){
         handleSelectBackward(selectOp, builder, gradMap, origToCloned);
+      } else if (auto maxOp = dyn_cast<arith::MaxNumFOp>(op)){
+        handleMaxBackward(maxOp, builder, gradMap, origToCloned);
 
       // math ops
       } else if (auto cosOp = dyn_cast<math::CosOp>(op)){
@@ -888,6 +894,92 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);
   }
 
+  void handleMaxBackward(arith::MaxNumFOp maxOp, OpBuilder &builder,
+                            llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+
+      Value upstream = getUpstreamGrad(maxOp->getResult(0), gradMap);
+      setInsertionPointAfterLastUse(upstream, builder);
+
+      // Get both input tensors
+      Value lhs = maxOp->getOperand(0);
+      Value rhs = maxOp->getOperand(1);
+
+      // Get the inputs from the forward graph
+      Value lhsCloned = origToCloned.lookup(lhs);
+      Value rhsCloned = origToCloned.lookup(rhs);
+      Value max = origToCloned.lookup(maxOp->getResult(0));
+
+      // For max(a, b), gradient flows only through the maximum element(s)
+      // If a > b, all gradient goes to a
+      // If b > a, all gradient goes to b
+      // If a == b, gradient is split between a and b (here we give it all to both and rely on maybeAccumulateGrad to handle duplicates)
+
+      // Create masks for LHS: mask_lhs = (lhs >= rhs)
+      auto cmpLhsOp = createGradOp<arith::CmpFOp>(
+          builder,
+          arith::CmpFPredicate::OGE,  // ordered greater than or equal
+          lhsCloned,
+          rhsCloned);
+
+      // For reduce_max, gradient only flows through the maximum element(s)
+      // We need to create a mask where elements equal to the maximum get the gradient
+
+      // Create masks for RHS: mask_rhs = (rhs > lhs)
+      auto cmpRhsOp = createGradOp<arith::CmpFOp>(
+          builder,
+          arith::CmpFPredicate::OGT,  // ordered greater than
+          rhsCloned,
+          lhsCloned);
+
+      // Create a mask where elements equal to the max get 1.0, others get 0.0
+      // Compare input with the broadcasted max value
+
+      // Convert boolean masks to float masks (1.0 where true, 0.0 where false)
+      auto oneConst = createConstantTensor(builder, currentNodeName, lhs.getType(), 1.0);
+      auto zeroConst = createConstantTensor(builder, currentNodeName, lhs.getType(), 0.0);
+
+      auto floatMaskLhs = createGradOp<arith::SelectOp>(
+          builder,
+          lhs.getType(),
+          cmpLhsOp,
+          oneConst,
+          zeroConst);
+
+      auto floatMaskRhs = createGradOp<arith::SelectOp>(
+          builder,
+          rhs.getType(),
+          cmpRhsOp,
+          oneConst,
+          zeroConst);
+
+      // Create a broadcast of the upstream gradient if needed
+      Value upstreamBroadcast = createBroadcastOrSplat(
+          upstream,
+          lhs.getType(),
+          currentNodeName,
+          builder);
+
+      // Compute Downstream grad
+      // Multiply the masks by the upstream gradient
+      auto maskedGradLhs = createGradOp<arith::MulFOp>(
+          builder,
+          floatMaskLhs,
+          upstreamBroadcast);
+
+      auto maskedGradRhs = createGradOp<arith::MulFOp>(
+          builder,
+          floatMaskRhs,
+          upstreamBroadcast);
+
+      // Propagate the masked gradients to the inputs
+      maybeAccumulateGrad(lhs, maskedGradLhs, gradMap, builder);
+      maybeAccumulateGrad(rhs, maskedGradRhs, gradMap, builder);
+
+      markAllVisited(builder, visitedType::Inserted, cmpLhsOp, cmpRhsOp,
+                     floatMaskLhs, floatMaskRhs, oneConst, zeroConst,
+                     maskedGradLhs, maskedGradRhs);
+  }
+
 
   void handleReduceBackward(triton::ReduceOp reduceOp, OpBuilder &builder,
                             llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
@@ -1112,9 +1204,10 @@ struct ConvertTritonToAutodiff
     // this attention kernel is different, bc broadcast is used there on the data (rather on the idxs)
     bool isFloat = isa<FloatType>(inputType.getElementType());
     if (!isFloat){
-      llvm::errs() << "[handleBroadcastBackward] existing early, input is not a Float\n";
+      llvm::errs() << "[handleBroadcastBackward] exiting early, input is not a Float\n";
       return;
     }
+    llvm::errs() << "[handleBroadcastBackward] input a Float, adding grad\n";
 
     Value upstream = getUpstreamGrad(broadcastOp, gradMap);
     // setInsertionPointAfterLastUse(upstream, builder);
@@ -1264,6 +1357,90 @@ struct ConvertTritonToAutodiff
 
     markAllVisited(builder, visitedType::Inserted, ln2, localGrad, downstreamGrad);
   }
+
+
+  // tt.expand_dims just adds a singleton dimension (1) to the shape without duplicating data, unlike broadcast which replicates values.
+  // For the backward pass of expand_dims, we don't need a reduction operation - we just need to reshape by removing the singleton dimension
+  void handleExpandDimsBackward(triton::ExpandDimsOp expandDimsOp, OpBuilder &builder,
+                                llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting tt.expand_dims op\n";
+
+    // Get the input tensor and axis that was expanded
+    Value input = expandDimsOp.getOperand();
+    int axis = expandDimsOp.getAxis();
+
+    // my previous kernels also had broadcast ops, but I didn't match on them bc they
+    // were using int inputs (computing some pointer offsets) not actual tensor values -- but
+    // this attention kernel is different, bc broadcast is used there on the data (rather on the idxs)
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    bool isFloat = isa<FloatType>(inputType.getElementType());
+    if (!isFloat){
+      llvm::errs() << "[handleExpandDimsBackward] exiting early, input is not a Float\n";
+      return;
+    }
+    llvm::errs() << "[handleExpandDimsBackward] input a Float, adding grad\n";
+
+
+    Value upstream = getUpstreamGrad(expandDimsOp, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+
+    // The backward operation for expand_dims is to remove the singleton dimension
+    // This is essentially a reshape operation
+    auto reshapeOp = createGradOp<triton::ReshapeOp>(
+        builder,
+        input.getType(),  // Result type should match the original input type
+        upstream,         // Upstream gradient with the expanded dimension
+        false,            // allow_reorder: false to maintain the element order
+        false             // efficient_layout: false (default value)
+    );
+
+    // Propagate the gradient to the input
+    maybeAccumulateGrad(input, reshapeOp, gradMap, builder);
+
+    markVisited(builder, visitedType::Inserted, reshapeOp);
+  }
+
+  void handleTransBackward(triton::TransOp transOp, OpBuilder &builder,
+                          llvm::DenseMap<Value, Value> &gradMap) {
+    if (DEBUG_PRINTS) llvm::errs() << "visiting tt.trans op\n";
+
+    // Get the upstream gradient
+    Value upstream = getUpstreamGrad(transOp, gradMap);
+    setInsertionPointAfterLastUse(upstream, builder);
+
+    // Get the input tensor and permutation order
+    Value input = transOp.getSrc();
+    ArrayRef<int32_t> order = transOp.getOrder();
+
+    // Check if the tensor contains floating point data
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+
+    bool isFloat = isa<FloatType>(inputType.getElementType());
+    if (!isFloat) {
+      llvm::errs() << "[handleTransBackward] exiting early, input is not a Float\n";
+      return;
+    }
+    llvm::errs() << "[handleTransBackward] input is a Float, adding gradient\n";
+
+    // For a transpose operation, the gradient is the transpose of the upstream gradient
+    // with the same permutation (which is its own inverse for 2D case)
+    // For more complex cases, the permutation is still the same because we're undoing
+    // the original permutation
+
+    auto transGrad = createGradOp<triton::TransOp>(
+        builder,
+        input.getType(),  // Result type should match the original input type
+        upstream,         // Upstream gradient
+        builder.getDenseI32ArrayAttr(order)  // Same permutation order as the forward pass
+    );
+
+    // Propagate the gradient to the input
+    maybeAccumulateGrad(input, transGrad, gradMap, builder);
+
+    markVisited(builder, visitedType::Inserted, transGrad);
+  }
+
 
 
 }; // ConvertTritonToAutodiff stuct

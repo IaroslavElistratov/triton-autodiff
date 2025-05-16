@@ -69,7 +69,7 @@ namespace triton {
     }
 
 
-    llvm::errs() << "name: " << name << "\n";
+    if (DEBUG_PRINTS) llvm::errs() << "name: " << name << "\n";
     auto nameAttr = StringAttr::get(op->getContext(), name);
     auto newLoc = NameLoc::get(nameAttr, op->getLoc());
     return newLoc;
@@ -166,7 +166,6 @@ namespace triton {
       gradMap[val] = accumulatedGrad;
     }
   }
-
 
   Value createConstantTensor(OpBuilder &builder, Location loc, Type type, float value) {
       // Determine the element type of the tensor

@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 # %%
 ## Simplified
 
@@ -31,13 +21,6 @@
 
 
 # Made sm_scale a constepr (it was the only non ptr arg) -- so need special handing to compute grad wrt it
-
-# %%
-STAGE = 1
-if (STAGE & 1):
-  print("1: ", True)
-if (STAGE & 2):
-  print("2: ", True)
 
 # %%
 import pytest
@@ -100,8 +83,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     # answer-now: hardcoded N_CTX=16, here bc even though I'm passing compiled time constant -- it still shomehow makes the bounds dynamic
     #   _attn_fwd_inner is inlined into the outer kernel, but its N_CTX is forwarded as an SSA argument so the entry point keeps a uniform parameter that the host sets at launch (just like grid size).
     #   Until the very last “constant-prop + canonicalize” sweep runs, the loop boundary therefore looks dynamic
-    # lo, hi = 0, N_CTX
-    lo, hi = 0, 16
+    lo, hi = 0, N_CTX
 
     K_block_ptr = tl.advance(K_block_ptr, (0, lo))
     V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
@@ -149,7 +131,7 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 
 
     tl.static_assert(BLOCK_N <= HEAD_DIM)
-    start_m = 0 # tl.program_id(0)
+    start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H
@@ -221,6 +203,14 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 
 _COMPILED_KERNEL = None
 
+# answer-now: this works but unrolls the loop too man times
+# BLOCK_M = 128
+# BLOCK_N = 64
+
+BLOCK_M = 16
+BLOCK_N = 16
+
+
 
 def stub(kernel, q, k, v, causal, sm_scale):
     # shape constraints
@@ -233,19 +223,11 @@ def stub(kernel, q, k, v, causal, sm_scale):
     stage = 3 if causal else 1
     print("stage: ", stage)
 
+
     # answer-now: lauch only one block in PID-1 -- to make loops unrollable
-    # assert q.shape[2] / args["BLOCK_M"] == 1
-    grid = lambda args: (1, q.shape[0] * q.shape[1], 1)
+    grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
+    print("grid: ", grid)
 
-    # answer-now: this works but unrolls the loop 128 times! 5500 lines in the IR
-    # BLOCK_M = 128
-    # BLOCK_N = 64
-
-    BLOCK_M = 16
-    BLOCK_N = 16
-
-    # assert q.shape[2] / BLOCK_M == 1
-    assert q.shape[2] == BLOCK_M
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
     global _COMPILED_KERNEL
     _COMPILED_KERNEL = kernel[grid](
@@ -265,50 +247,6 @@ def stub(kernel, q, k, v, causal, sm_scale):
         STAGE=stage,  #
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N)
-
-    # comment: these are the args passed to the fwd kerenl -- unlike in all my preivous kernel I actually want to try to pass all the ints valeus to bwd kenrel as well (instead of hardcoding them)
-    # (Q, K, V, sm_scale: tl.constexpr, M, Out,  #
-    # stride_qz, stride_qh, stride_qm, stride_qk,  #
-    # stride_kz, stride_kh, stride_kn, stride_kk,  #
-    # stride_vz, stride_vh, stride_vk, stride_vn,  #
-    # stride_oz, stride_oh, stride_om, stride_on,  #
-    # Z, H, N_CTX,  #
-    # HEAD_DIM: tl.constexpr,  #
-    # BLOCK_M: tl.constexpr,  #
-    # BLOCK_N: tl.constexpr,  #
-    # STAGE: tl.constexpr  #
-    # )
-
-    # print("q", id(q))
-    # print("k", id(k))
-    # print("v", id(v))
-    # print("sm_scale", sm_scale)
-    # print("M", id(M))
-    # print("o", id(o))
-    # print("q.stride(0)", q.stride(0))
-    # print("q.stride(1)", q.stride(1))
-    # print("q.stride(2)", q.stride(2))
-    # print("q.stride(3)", q.stride(3))
-    # print("k.stride(0)", k.stride(0))
-    # print("k.stride(1)", k.stride(1))
-    # print("k.stride(2)", k.stride(2))
-    # print("k.stride(3)", k.stride(3))
-    # print("v.stride(0)", v.stride(0))
-    # print("v.stride(1)", v.stride(1))
-    # print("v.stride(2)", v.stride(2))
-    # print("v.stride(3)", v.stride(3))
-    # print("o.stride(0)", o.stride(0))
-    # print("o.stride(1)", o.stride(1))
-    # print("o.stride(2)", o.stride(2))
-    # print("o.stride(3)", o.stride(3))
-    # print("q.shape[0]", q.shape[0])
-    # print("q.shape[1]", q.shape[1])
-    # print("N_CTX", q.shape[2])
-    # print("HEAD_DIM", HEAD_DIM_K)
-    # print("STAGE", stage)
-    # print("BLOCK_M", BLOCK_M)
-    # print("BLOCK_N", BLOCK_N)
-
 
     return o # , M
 

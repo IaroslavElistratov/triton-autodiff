@@ -1,9 +1,11 @@
+
 import numpy as np
 import torch
 import triton
+# torch.set_printoptions(sci_mode=False, linewidth=1000)
 
 # comment: at import this also runs asserts comparing fwd out with torch's
-from utils import kernel, stub
+from utils import kernel, stub, BLOCK_M
 
 
 torch.manual_seed(20)
@@ -14,7 +16,7 @@ DEVICE = torch.device("cuda:0")
 
 B=1
 NUM_HEADS=1
-SEQ_LEN=16
+SEQ_LEN=32
 HEAD_DIM=16
 dtype=torch.float16
 
@@ -25,7 +27,7 @@ q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).n
 k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
 v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
 
-grid = (1, q.shape[0] * q.shape[1], 1)
+grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
 
 
 
@@ -38,18 +40,14 @@ def torch_fn(q, k, v, causal, sm_scale):
         M = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device=DEVICE))
         p[:, :, M == 0] = float("-inf")
 
-    # ORIGINAL:
     # p = torch.softmax(p.float(), dim=-1).half()
 
-    #  todo-now: using softmax wt min-max trick to correspond to the inp.ttir
-    # # # MY:
     p = p.float()
     p = p - p.max(axis=3, keepdim=True)[0]
     p = torch.exp(p)
     p = (p / p.sum(dim=3, keepdim=True))
     p = p.half()
 
-    # p = torch.exp(p)
     ref_out = torch.matmul(p, v)
     return ref_out
 
@@ -94,10 +92,8 @@ def right_partial(func, *args):
 stub = right_partial(stub, causal, sm_scale)
 
 # now this uses the stub which only needs grad args (non grad args have been bound)
-# todo-now: the inex of output in original kernel inputs is 5 (not 4), but bc I removed a constexpr  from inputs (in this specific case happened to extract) 1 arg before original_idx_upstream=5 so it's actually should be 4 now
 my_op, bwd_kernel = autodiff(kernel, stub, grid, idx_upstream=5, non_stub_args_idxs=[3])
 
-# todo-now: to do the warmup you need to somehow get all the args -- this requires replicating logic of the entire stub
 # todo: rm warmup
 stub(bwd_kernel, q, k, v)
 
