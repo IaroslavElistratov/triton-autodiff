@@ -39,8 +39,15 @@ def shape_track_hook(*args, **kwargs):
     ctx = StashArgsCtx._active_instance
     if ctx is not None:
         _kwargs = kwargs.copy()
-        # this one kwarg is injected automatically
-        _kwargs.pop("debug")
+        # these kwarg are injected automatically
+        # launch‑options, not ordinary kernel parameters
+        _kwargs.pop("debug", None)
+        # todo-high: understand more
+        _kwargs.pop("num_warps", None)
+        _kwargs.pop("num_ctas", None)
+        # enable_fp_fusion
+        # launch_cooperative_grid
+
         ctx.args = [*args, *_kwargs] # [weakref.ref(arg) for arg in args]
         # print("[shape_track_hook] kwargs", _kwargs)
 
