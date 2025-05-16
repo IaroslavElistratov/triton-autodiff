@@ -64,7 +64,8 @@ struct ConvertTritonToAutodiff
 
     static const char *argv[] = {
         "TritonToAutodiffPass",           // argv[0] — file name must be present
-        "--mlir-use-nameloc-as-prefix"    // the one flag you need
+        "--mlir-use-nameloc-as-prefix",
+        "--mlir-print-debuginfo"
     };
     constexpr int argc = sizeof(argv) / sizeof(argv[0]);
 
