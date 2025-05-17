@@ -1,4 +1,6 @@
-vis/
+**/generated/*
+!generated/annotated/
+__*
 
 third_party/__my_nvidia/
 
