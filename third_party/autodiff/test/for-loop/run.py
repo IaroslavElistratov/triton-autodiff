@@ -19,13 +19,11 @@ def kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
 
     a = tl.load(a_ptr + offsets)
-    # b = tl.load(b_ptr + offsets)
 
     accum = tl.load(output_ptr + offsets)
-    for i in range(3):
-      # x = a + b
-      # y = x * i
 
+    # changed to (1, 3) -- bc range(2): i=0, i=1 -- and thus derivative wrt a is just grad-out
+    for i in range(3):
       # answer-now:
       # use the loop variable here, bc if use a constant, in the IR, the loop gets flattened
       y = a * i
@@ -35,15 +33,13 @@ def kernel(
 
 
 def stub(kernel, a):
-    output = torch.empty_like(a)
-    assert a.device == DEVICE and output.device == DEVICE
+    output = torch.zeros_like(a)
     n_elements = output.numel()
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    # grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    grid = (1, )
+    print("grid: ", grid)
     kernel[grid](a, output, BLOCK_SIZE=4)
     return output
-
-size = 4
-a = torch.rand(size, device=DEVICE)
 
 def torch_fn(torch_a):
     accum = torch.zeros_like(torch_a)
@@ -51,6 +47,10 @@ def torch_fn(torch_a):
       y = torch_a * i
       accum = accum + y
     return accum
+
+
+size = 4
+a = torch.randn(size, device=DEVICE)
 
 output_torch = torch_fn(a)
 output_triton = stub(kernel, a)
@@ -73,17 +73,6 @@ else:
 upstream = torch.randn_like(a)
 a.requires_grad = True
 
-from triton.backends.api import autodiff
-
-# todo-high: grid with meta is not supported when calling bwd kernel (presumably BLOCK_SIZE got already inlined)
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(1, 1, 1), idx_upstream=1)
-
-# todo: rm warmup
-stub(bwd_kernel, a)
-my_out = my_op(a)
-my_out.backward(upstream)
-print("grad a: ", a.grad)
-print()
 
 # compare with pytorch
 
@@ -93,6 +82,22 @@ torch_output = torch_fn(torch_a)
 torch_output.backward(upstream)
 
 print("torch grad a: ", torch_a.grad)
+print()
+
+
+# triton autograd
+
+from triton.backends.api import autodiff
+
+# todo-high: grid with meta is not supported when calling bwd kernel (presumably BLOCK_SIZE got already inlined)
+my_op, bwd_kernel = autodiff(kernel, stub, grid=(1, ), idx_upstream=1)
+
+# todo: rm warmup
+stub(bwd_kernel, a)
+my_out = my_op(a)
+# todo-now: calling this doubles torch grad!
+my_out.backward(upstream)
+print("grad a: ", a.grad)
 print()
 
 

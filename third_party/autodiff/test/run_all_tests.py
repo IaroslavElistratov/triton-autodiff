@@ -81,29 +81,13 @@ def main(path, run_py=True, debug_info=True):
 
 if __name__ == "__main__":
 
-  # TODO:
-  # for test_name in ["multi-use-complex"]:
-  #   - bug introduced by: "[WIP] don't insert grads for later nodes above grads for previous nodes when using same upstream"
-  #   - Cant find fwd py fn
-
-  # todo:
-  # "for-loop-mm_static-bounds_interleave-mul"
-  #   - Cant find fwd py fn
-
-
-  # for test_name in ["add"]:
-
-  # WORKS:
   for test_name in ["add", "add-mul", "div", "add-mul-div", "math-ops",
                     "multiblock_add-mul", "mask_multiblock_add-mul",
                     "2d_dot", "multi-use",
                     "for-loop", "for-loop-mm_static-bounds",
-                    "LOCAL_for-loop-mm-static-bounds_simple", "LOCAL_for-loop-mm-static-bounds_actual"]:
-
-  # GRAD WRONG:
-  #   "layernorm"
-  #   "flash_attention_v2"
-
+                    "LOCAL_for-loop-mm-static-bounds_simple", "LOCAL_for-loop-mm-static-bounds_actual",
+                    "flash_attention_v2", "layernorm"]:
+  # for test_name in ["flash_attention_v2"]:
 
     test_dir = f"{dir}/third_party/autodiff/test/{test_name}"
     print("~" * 20 + f" Running {test_name} " + "~" * 20)

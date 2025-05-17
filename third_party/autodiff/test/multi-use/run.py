@@ -10,21 +10,6 @@ import triton.language as tl
 DEVICE = torch.device("cuda:0")
 
 
-# @triton.jit
-# def kernel(a_ptr,
-#             output_ptr,
-#             BLOCK_SIZE: tl.constexpr,
-#           ):
-#     offsets = tl.arange(0, BLOCK_SIZE)
-
-#     a = tl.load(a_ptr + offsets)
-
-#     x = a + 0.5
-#     y = a * x
-#     z = a * y
-
-#     tl.store(output_ptr + offsets, z)
-
 
 @triton.jit
 def kernel(
@@ -38,12 +23,12 @@ def kernel(
 
     x = a + 0.5
     y = a * x
+    # z = a * y
 
     tl.store(output_ptr + offsets, y)
 
 def stub(kernel, a):
     output = torch.empty_like(a)
-    assert a.device == DEVICE and output.device == DEVICE
     kernel[(1, 1, 1)](a, output, BLOCK_SIZE=4)
     return output
 
@@ -54,7 +39,7 @@ a = torch.rand(size, device=DEVICE)
 # print("a: ", a)
 
 def torch_fn(a):
-    return (a + 0.5) * a
+    return a * (a + 0.5)
 
 output_torch = torch_fn(a)
 output_triton = stub(kernel, a)

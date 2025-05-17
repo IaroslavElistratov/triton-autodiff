@@ -89,6 +89,7 @@ else:
 upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
+c.requires_grad = True
 
 
 from triton.backends.api import autodiff

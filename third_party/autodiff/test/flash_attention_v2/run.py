@@ -86,7 +86,7 @@ from triton.backends.api import autodiff
 # todo: need to support passing no grad args (in this case "causal, sm_scale") -- and my torch.Function needs to know to not output derivatives wrt them
 # my_out = my_op(q, k, v, causal, sm_scale)
 from functools import partial
-# here binding trailing arguments (not begging arguments), bc kernel happen to have these at the end
+# here binding trailing arguments (not arguments at the beginning), bc kernel happen to have these at the end
 def right_partial(func, *args):
     return lambda *fargs: func(*fargs, *args)
 stub = right_partial(stub, causal, sm_scale)
@@ -167,43 +167,3 @@ if torch.allclose(v.grad, torch_v.grad, atol=1e-2, rtol=rtol):
 else:
     print("❌ [v grad] Triton and Torch differ")
 
-
-
-
-# """
-
-
-# M = 1151
-# N = 8192
-# dtype = torch.float16
-# device = DEVICE
-
-# # create data
-# x_shape = (M, N)
-# w_shape = (x_shape[-1], )
-# weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-# bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-# x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
-# dy = .1 * torch.randn_like(x)
-# # x.requires_grad_(True)
-# # quantiles = [0.5, 0.2, 0.8]
-
-
-# # # Run our implementation
-# with torch.no_grad():
-#     compiled_kernel, grad_x_arg, grad_weight, grad_bias, grad_mean, grad_rstd = bwd(x, weight, bias)
-#     print("grad_x_arg: ", grad_x_arg)
-#     print("grad_weight: ", grad_weight)
-#     print("grad_bias: ", grad_bias)
-
-# print("\n" * 3)
-# # # Forward pass with PyTorch's LayerNorm
-# x.requires_grad = True
-# weight.requires_grad = True
-# bias.requires_grad = True
-# torch_ln = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
-# torch_ln.backward(torch.ones_like(torch_ln))
-# print("x.grad: ", x.grad)
-# print("weight.grad: ", weight.grad)
-# print("bias.grad: ", bias.grad)
-# """
