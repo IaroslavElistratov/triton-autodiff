@@ -126,8 +126,8 @@ namespace triton {
     } else {
       auto existingGrad = it->second;
 
-      llvm::errs() << "[maybeAccumulateGrad] found existing grad wrt " << val << "\n";
-      llvm::errs() << "existing grad: " << existingGrad << " new grad: " << grad << "\n";
+      if (DEBUG_PRINTS) llvm::errs() << "[maybeAccumulateGrad] found existing grad wrt " << val << "\n";
+      if (DEBUG_PRINTS) llvm::errs() << "existing grad: " << existingGrad << " new grad: " << grad << "\n";
 
       // otherwise "does not dominate its use"  err
       // Note: when the newGrad value was defined by an op, which was inserted by

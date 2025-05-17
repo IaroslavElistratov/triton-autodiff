@@ -16,6 +16,8 @@ from triton.runtime.jit import JITFunction
 from triton.backends.run_all_tests import main
 
 
+VERBOSE = os.environ.get('VERBOSE', None)
+
 bwd_kernel = None
 
 class StashArgsCtx:
@@ -49,7 +51,7 @@ def shape_track_hook(*args, **kwargs):
         # launch_cooperative_grid
 
         ctx.args = [*args, *_kwargs] # [weakref.ref(arg) for arg in args]
-        # print("[shape_track_hook] kwargs", _kwargs)
+        # if VERBOSE: print("[shape_track_hook] kwargs", _kwargs)
 
 
 
@@ -85,7 +87,7 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs,
     # fwd specializes away some arguments (so that they aren't arguments in the fwd TTIR,
     # and thus not arguments in bwd TTIR as well) -- so don't pass them bwd TTIR
     idx_folded = bwd_kernel._autodiff_info[-1]
-    print("[create_bwd_kernel_inputs] idx_folded: ", idx_folded)
+    if VERBOSE: print("[create_bwd_kernel_inputs] idx_folded: ", idx_folded)
     # user provided idx of output (idx_upstream) in terms of all args to fwd python kernel
     # (JITFunction), when it compiled, some of the args potentially got specialized away.
     # Thus here need to shift that user specified index to account for these args (that got
@@ -97,8 +99,8 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs,
         if i < idx_upstream:
             num_folded_before_upstream += 1
 
-    # print("[create_bwd_kernel_inputs] idx_folded", idx_folded)
-    # print("num_folded_before_upstream:", num_folded_before_upstream)
+    # if VERBOSE: print("[create_bwd_kernel_inputs] idx_folded", idx_folded)
+    # if VERBOSE: print("num_folded_before_upstream:", num_folded_before_upstream)
 
     bwd_args = []
     for i, arg in enumerate(kernel_inputs):
@@ -108,10 +110,10 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs,
         if isinstance(arg, torch.Tensor):
             bwd_args.append(torch.zeros_like(arg))
 
-    # print("[create_bwd_kernel_inputs] fwd_args:", kernel_inputs)
-    # print("[create_bwd_kernel_inputs] bwd_args:", bwd_args)
+    # if VERBOSE: print("[create_bwd_kernel_inputs] fwd_args:", kernel_inputs)
+    # if VERBOSE: print("[create_bwd_kernel_inputs] bwd_args:", bwd_args)
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
-    # print("[create_bwd_kernel_inputs] grads", bwd_args)
+    # if VERBOSE: print("[create_bwd_kernel_inputs] grads", bwd_args)
 
     # remove upstream grad
     # Use num_folded_before_upstream, otherwise assumes all args are tensors (IOW: grad inputs are 1:1 with
@@ -152,11 +154,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # -- thus doing the appraoch below
         # # _bound_args, specialization, options = binder(*args, **kwargs)
 
-        print("[key_add_args] key: ", key)
+        if VERBOSE: print("[key_add_args] key: ", key)
         # key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')]{'debug': False}
 
         split = key.split("]")
-        print("[key_add_args] split: ", split)
+        if VERBOSE: print("[key_add_args] split: ", split)
         # split:  ["[('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D')", "{'debug': False}"]
 
         new_key = split[0] + ", "
@@ -173,7 +175,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         new_key += "]"
         new_key += split[1]
 
-        print("[key_add_args] new_key: ", new_key)
+        if VERBOSE: print("[key_add_args] new_key: ", new_key)
         # new_key:  [('*fp32', 'D'), ('*fp32', 'D'), ('*fp32', 'D'), ('*f32', 'D'), ('*f32', 'D'), ('*f32', 'D')]{'debug': False}
         return new_key
 
@@ -183,7 +185,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         2 – new binder	The helper builds the little Python function (dynamic_func) that maps user launch args → positional tuple for the GPU call
         """
 
-        print("rebuild_binder")
+        if VERBOSE: print("rebuild_binder")
         import inspect
 
         from triton.runtime.jit import (
@@ -191,7 +193,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             create_function_from_signature,     # binder factory
         )
 
-        print(f"adding {delta} args")
+        if VERBOSE: print(f"adding {delta} args")
 
         # 1. extend the Python signature *before* we rebuild the binder
         sig_params = list(fn.jit_function.signature.parameters.values())
@@ -203,8 +205,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             )
             fn.jit_function.params.append(KernelParam(len(fn.jit_function.params), p, False, False)) # dns= dns_oa= , annotation="tl.float16*"
             sig_params.append(p)
-        print("fn.jit_function.signature: ", fn.jit_function.signature)
-        print("fn.jit_function self.params:", fn.jit_function.params)
+        if VERBOSE: print("fn.jit_function.signature: ", fn.jit_function.signature)
+        if VERBOSE: print("fn.jit_function self.params:", fn.jit_function.params)
         fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
 
         # 2. build a fresh binder
@@ -220,15 +222,15 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         # todo-now: find a cleaner way -- compile hook registers on all instances of JITFunction, but i want this hook to trigger only on bwd JITFuncton
         if fn.jit_function is not bwd_kernel:
-            print("fn.jit_function is not bwd_kernel", id(fn.jit_function), id(bwd_kernel))
+            if VERBOSE: print("fn.jit_function is not bwd_kernel", id(fn.jit_function), id(bwd_kernel))
             return
         else:
-            print("post hook triggered on the bwd!")
+            if VERBOSE: print("post hook triggered on the bwd!")
 
         compile_dict = compile
 
-        print(f"Kernel {fn.name} just finished executing!")
-        print(f"Representation: {repr}")
+        if VERBOSE: print(f"Kernel {fn.name} just finished executing!")
+        if VERBOSE: print(f"Representation: {repr}")
 
         # The fn parameter passed to the hook contains a jit_function attribute that refers to the JITFunction instance.
         # Each JITFunction keeps its kernels in device_caches[device], which is a tuple where the first element is the kernel cache dictionary.
@@ -248,7 +250,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # but I want some folder name -- one way is to hash it
         hash_object = hashlib.sha256(key.encode())
         dir_name = hash_object.hexdigest()[:10]
-        print("dir_name: ", dir_name)
+        if VERBOSE: print("dir_name: ", dir_name)
 
         # 2) write fwd IR
         os.makedirs(f"generated/{dir_name}", exist_ok=True)
@@ -270,10 +272,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         )
         assert isinstance(bwd_compiled_kernel, triton.compiler.compiler.CompiledKernel)
         # question-now: seem automtically lowered to ttgir not ttir
-        # print(bwd_compiled_kernel.asm.keys())
+        # if VERBOSE: print(bwd_compiled_kernel.asm.keys())
 
         # good, I can confirm this is my autodiff'ed IR
-        # print(bwd_compiled_kernel.asm['ttgir'])
+        # if VERBOSE: print(bwd_compiled_kernel.asm['ttgir'])
 
 
         # 5) replace original fwd CompiledKernel with autograd.Function (replaces cache entry in the cache of JITFunction)
@@ -281,17 +283,17 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         #   bwd_kernel is a CompiledKernel and I can directly swap original compiled kernel with this CompiledKernel
         #   And because this never calls a stub (no possibility for recursion).
 
-        # print(dir(jit_fn.device_caches[device][0][key]))
+        # if VERBOSE: print(dir(jit_fn.device_caches[device][0][key]))
         # '_init_handles', 'asm', 'function', 'hash', 'kernel', 'launch_enter_hook', 'launch_exit_hook', 'launch_metadata', 'metadata', 'module', 'name', 'packed_metadata', 'src'
 
         #   5.1. remove constexpr form: key, signature, params
 
         def remove_constexpr(key):
-            print("[remove_constexpr] key: ", key)
+            if VERBOSE: print("[remove_constexpr] key: ", key)
             # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
             #   > inf JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
-            print("[remove_constexpr] fn.jit_function.signature:", fn.jit_function.signature)
-            print("[remove_constexpr] fn.jit_function.params:", fn.jit_function.params)
+            if VERBOSE: print("[remove_constexpr] fn.jit_function.signature:", fn.jit_function.signature)
+            if VERBOSE: print("[remove_constexpr] fn.jit_function.params:", fn.jit_function.params)
 
             # remove constexpr -- bc backward signature or key should not have them (bc they will NOT be provided to the bwd kernel)
             # remove ", ('constexpr', 4)"
@@ -299,7 +301,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # replaces all occurrences of , ('constexpr', [some integer]) in the string
 
             sub_strs = key.split("[")[1].split("]")[0].split("), (")
-            # print('sub_strs: ', sub_strs)
+            # if VERBOSE: print('sub_strs: ', sub_strs)
             # >>> sub_strs:  ["('*fp32', 'D'", "'*fp32', 'D'", "'constexpr', 4", "'*fp32', 'D'", "'*fp32', 'D')"]
 
             # iterate over dict whose keys are tuples of ints, and extract all ints from all keys into a single list
@@ -317,10 +319,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             new_key = "[" + "), (".join(sub_strs)
             new_key += "]" if new_key[-1] == ")" else ")]"
             new_key += key.split("]")[1]
-            print("[remove_constexpr] new_key", new_key)
+            if VERBOSE: print("[remove_constexpr] new_key", new_key)
             fn.jit_function.signature = fn.jit_function.signature.replace(parameters=sig_params)
-            print("[remove_constexpr] fn.jit_function.signature: ", fn.jit_function.signature)
-            print("[remove_constexpr] fn.jit_function self.params:", fn.jit_function.params)
+            if VERBOSE: print("[remove_constexpr] fn.jit_function.signature: ", fn.jit_function.signature)
+            if VERBOSE: print("[remove_constexpr] fn.jit_function self.params:", fn.jit_function.params)
 
             return new_key, num_const_args
 
@@ -342,10 +344,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         num_added_args = num_bwd_args - num_fwd_args
 
         new_binder = rebuild_binder(fn, num_added_args, backend)
-        print("new_binder: ", new_binder)
+        if VERBOSE: print("new_binder: ", new_binder)
 
-        print("fn.jit_function.signature:", fn.jit_function.signature)
-        print("fn.jit_function.params:", fn.jit_function.params)
+        if VERBOSE: print("fn.jit_function.signature:", fn.jit_function.signature)
+        if VERBOSE: print("fn.jit_function.params:", fn.jit_function.params)
 
 
         #   5.3. add to bwd CompiledKernel into the cache
@@ -359,7 +361,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         #   otherwise re-wraps -- you'd think that it should bc the signature of args taht will be passed to bwd_kernel is the same as was passed to bwd_kernel (just line above) -- so it seems like shouldn't trigger a re-tracing, but in fact, i guess bc I modified function signature in the hook after last re-teacing, it tries to trace again!
         #   no actually it was re-wrapping bc previously (in my post hook) I saved bwd graph while key'ing on the original signature (3 args). But now when passing 6 args -- it fails to find compiledKerenl with a key which has 6 args and thus re-compiles
         kernel_cache[new_key] = bwd_compiled_kernel
-        print("kernel_cache[new_key]: ", kernel_cache[new_key])
+        if VERBOSE: print("kernel_cache[new_key]: ", kernel_cache[new_key])
         fn.jit_function.device_caches[device] = (kernel_cache, target, backend, new_binder)
 
         # s = fn.jit_function # RM
@@ -381,10 +383,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # quick sanity check
         # assert len(fwd_compiled_kernel.metadata.arg_types) == bwd_compiled_kernel.metadata.arg_types
 
-        print("[my_hook] compile_dict['signature']", compile_dict["signature"])
-        print("[my_hook] compile_dict['constants']", compile_dict["constants"])
-        print("[my hook] jit_fn.params:", jit_fn.params)
-        print("fn.jit_function.signature.parameters", fn.jit_function.signature.parameters)
+        if VERBOSE: print("[my_hook] compile_dict['signature']", compile_dict["signature"])
+        if VERBOSE: print("[my_hook] compile_dict['constants']", compile_dict["constants"])
+        if VERBOSE: print("[my hook] jit_fn.params:", jit_fn.params)
+        if VERBOSE: print("fn.jit_function.signature.parameters", fn.jit_function.signature.parameters)
 
 
         # recover all arguments that have been folded into the CompiledKernel (need for later removal
@@ -392,8 +394,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # includes compile‑time constants (declared `constexpr`) AND automatically specialised (ints/bools/tuples …)
         folded = list(p[0] for p in compile_dict["constants"])
         names = [fn.jit_function.arg_names[i] for i in folded]
-        print("Hard‑coded parameter indices:", sorted(folded))
-        print("Hard‑coded parameter names:  ", names)
+        if VERBOSE: print("Hard‑coded parameter indices:", sorted(folded))
+        if VERBOSE: print("Hard‑coded parameter names:  ", names)
         fn.jit_function._autodiff_info.append(folded)
 
     return False
@@ -425,12 +427,12 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, stub, create_bwd_kernel_inputs, post_process_fn, *stub_inputs):
-        print("\n"*3, "Op.forward")
+        if VERBOSE: print("\n"*3, "Op.forward")
 
         # basically the problem is that for Op.backward you need to save in args produced inside the fwd_stub (can get access right before executing the fwd kernel)
         #   ==> can overload kernel pre-hook to get access to them
         with StashArgsCtx() as arg_ctx:
-            # print("[op fwd] stub_inputs:", stub_inputs)
+            # if VERBOSE: print("[op fwd] stub_inputs:", stub_inputs)
             outs = stub(*stub_inputs)
         # now executing the stub should populate FWD_ARGS (bc we registered pre-hook on the kernel, and that kernel was called inside the stub)
 
@@ -439,8 +441,8 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
         # note: you assume nothing modifies these arg in the StashArgsCtx before Function.backward is called (between Function.fwd and Function.bwd)
         kernel_inputs = arg_ctx.args
-        # print("saving for bwd: ", kernel_inputs)
-        # print("kernel_inputs: ", len(kernel_inputs))
+        # if VERBOSE: print("saving for bwd: ", kernel_inputs)
+        # if VERBOSE: print("kernel_inputs: ", len(kernel_inputs))
 
         # ugly workaround for the fact that save_for_backward only works for tensor inputs
         # note stashing kernel inputs, not stub inputs
@@ -456,7 +458,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, upstream):
-        print("\n"*3, "Op.backward")
+        if VERBOSE: print("\n"*3, "Op.backward")
 
         # reconstruct all fwd kernel args
         fwd_kernel_inputs = []
@@ -471,9 +473,9 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
                 non_tensor_idx += 1
 
         # IOW: create_grad_inputs
-        # print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
+        # if VERBOSE: print("[Op.backward] fwd_kernel_inputs", fwd_kernel_inputs)
         grads = ctx.create_bwd_kernel_inputs(fwd_kernel_inputs, upstream)
-        # print("[Op.backward] grads", grads)
+        # if VERBOSE: print("[Op.backward] grads", grads)
 
         if ctx.post_process_fn is not None:
             grads = ctx.post_process_fn(*grads)

@@ -413,7 +413,7 @@ struct ConvertTritonToAutodiff
 
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
     builder.setInsertionPointAfter(lastBwdOp);
-    llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
+    if (DEBUG_PRINTS) llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
     // Value ptr = origToCloned.lookup(storeOp->getOperand(0));
@@ -1205,10 +1205,10 @@ struct ConvertTritonToAutodiff
     // this attention kernel is different, bc broadcast is used there on the data (rather on the idxs)
     bool isFloat = isa<FloatType>(inputType.getElementType());
     if (!isFloat){
-      llvm::errs() << "[handleBroadcastBackward] exiting early, input is not a Float\n";
+      if (DEBUG_PRINTS) llvm::errs() << "[handleBroadcastBackward] exiting early, input is not a Float\n";
       return;
     }
-    llvm::errs() << "[handleBroadcastBackward] input a Float, adding grad\n";
+    if (DEBUG_PRINTS) llvm::errs() << "[handleBroadcastBackward] input a Float, adding grad\n";
 
     Value upstream = getUpstreamGrad(broadcastOp, gradMap);
     // setInsertionPointAfterLastUse(upstream, builder);
@@ -1376,10 +1376,10 @@ struct ConvertTritonToAutodiff
     auto inputType = dyn_cast<RankedTensorType>(input.getType());
     bool isFloat = isa<FloatType>(inputType.getElementType());
     if (!isFloat){
-      llvm::errs() << "[handleExpandDimsBackward] exiting early, input is not a Float\n";
+      if (DEBUG_PRINTS) llvm::errs() << "[handleExpandDimsBackward] exiting early, input is not a Float\n";
       return;
     }
-    llvm::errs() << "[handleExpandDimsBackward] input a Float, adding grad\n";
+    if (DEBUG_PRINTS) llvm::errs() << "[handleExpandDimsBackward] input a Float, adding grad\n";
 
 
     Value upstream = getUpstreamGrad(expandDimsOp, gradMap);
@@ -1419,10 +1419,10 @@ struct ConvertTritonToAutodiff
 
     bool isFloat = isa<FloatType>(inputType.getElementType());
     if (!isFloat) {
-      llvm::errs() << "[handleTransBackward] exiting early, input is not a Float\n";
+      if (DEBUG_PRINTS) llvm::errs() << "[handleTransBackward] exiting early, input is not a Float\n";
       return;
     }
-    llvm::errs() << "[handleTransBackward] input is a Float, adding gradient\n";
+    if (DEBUG_PRINTS) llvm::errs() << "[handleTransBackward] input is a Float, adding gradient\n";
 
     // For a transpose operation, the gradient is the transpose of the upstream gradient
     // with the same permutation (which is its own inverse for 2D case)
@@ -1453,7 +1453,7 @@ struct ConvertTritonToAutodiff
     // Check if the scalar is a float type
     bool isFloat = isa<FloatType>(scalar.getType());
     if (!isFloat) {
-      llvm::errs() << "[handleSplatBackward] exiting early, input is not a Float\n";
+      if (DEBUG_PRINTS) llvm::errs() << "[handleSplatBackward] exiting early, input is not a Float\n";
       return;
     }
 

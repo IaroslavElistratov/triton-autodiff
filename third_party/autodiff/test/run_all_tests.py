@@ -5,6 +5,8 @@ import sys
 import subprocess
 
 
+VERBOSE = int(os.environ.get('VERBOSE', 0))
+assert VERBOSE in [0, 1, 2]
 
 
 dir = "/home/iaro/Desktop/my_triton_autodiff/working_files/triton"
@@ -40,7 +42,7 @@ def draw_dot(path, mode):
 
 
 
-def main(path, run_py=True, debug_info=True):
+def main(path, run_py=True):
 
   os.makedirs(path, exist_ok=True)
 
@@ -55,8 +57,7 @@ def main(path, run_py=True, debug_info=True):
     with open(f"{path}/out.ttir", "w") as f:
       subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
 
-    if debug_info:
-
+    if VERBOSE >= 1:
       # optionally, produce readable fwd ttir
 
       # with open(f"{path}/_inp_readable.ttir", "w") as f:
@@ -72,11 +73,13 @@ def main(path, run_py=True, debug_info=True):
           subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
           f.truncate()               # Remove remaining old content
 
-      # optionally, produce vis dot
-      draw_dot(path, mode="fwd")
+      if VERBOSE == 2:
 
-      # optionally, produce vis dot
-      draw_dot(path, mode="bwd")
+        # optionally, produce vis dot
+        draw_dot(path, mode="fwd")
+
+        # optionally, produce vis dot
+        draw_dot(path, mode="bwd")
 
 
 if __name__ == "__main__":
