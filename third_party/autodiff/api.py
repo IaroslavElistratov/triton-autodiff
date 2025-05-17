@@ -1,6 +1,8 @@
+import sys
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 import hashlib
+import subprocess
 from functools import partial
 from collections import defaultdict
 
@@ -13,10 +15,75 @@ import triton.language as tl
 from triton.runtime import driver
 from triton.runtime.jit import JITFunction
 
-from triton.backends.run_all_tests import main
+
+VERBOSE = int(os.environ.get('VERBOSE', 0))
+assert VERBOSE in [0, 1, 2]
+
+dir = "/home/iaro/Desktop/my_triton_autodiff/working_files/triton"
+tool = f"{dir}/python/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
 
-VERBOSE = os.environ.get('VERBOSE', None)
+def run_mlir_pass(path):
+
+  os.makedirs(path, exist_ok=True)
+
+  # produce bwd ttir
+  with open(f"{path}/out.ttir", "w") as f:
+    subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+
+  if VERBOSE >= 1:
+    # optionally, produce readable fwd ttir
+
+    # with open(f"{path}/_inp_readable.ttir", "w") as f:
+    #   subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+
+    # this is a bit ugly but needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
+    # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix" on it and write
+    # to the same files to avoid creating redundant files
+    with open(f"{path}/inp.ttir", "r+") as f:
+        content = f.read()         # Read existing content
+        f.seek(0)                  # Move cursor to the beginning
+        # Overwrite from the start
+        subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+        f.truncate()               # Remove remaining old content
+
+    if VERBOSE == 2:
+
+      def draw_dot(path, mode):
+        assert mode in ["fwd", "bwd"]
+
+        vis_dir = path + "/vis"
+        os.makedirs(vis_dir, exist_ok=True)
+
+        # a. optionally, produce vis dot
+        with open(f"{vis_dir}/{mode}.dot", "w") as f:
+          ttir_path = f"{path}/inp.ttir" if mode == "fwd" else f"{path}/out.ttir"
+          subprocess.run([tool, "-mlir-use-nameloc-as-prefix", "--view-op-graph", ttir_path], stderr=f,
+                        # suppress stdout, otherwise prints _inp_readable again
+                        stdout=subprocess.DEVNULL)
+
+        with open(f"{vis_dir}/{mode}.svg", "w") as f:
+          subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}.dot"], stdout=f)
+
+        # b. optionally cluster nodes
+        subprocess.run(["python", "cluster_dot.py", "--strict", f"{vis_dir}/{mode}.dot", f"{vis_dir}/{mode}_grouped.dot"])
+
+        with open(f"{vis_dir}/{mode}_grouped.svg", "w") as f:
+          subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}_grouped.dot"], stdout=f)
+
+        # todo: fails when running be tests (from another dir)
+        # os.remove(f"{vis_dir}/{mode}.dot")
+        # os.remove(f"{vis_dir}/{mode}_grouped.dot")
+
+      # optionally, produce vis dot
+      draw_dot(path, mode="fwd")
+
+      # optionally, produce vis dot
+      draw_dot(path, mode="bwd")
+
+
+
+
 
 bwd_kernel = None
 
@@ -258,7 +325,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
           f.write(fwd_compiled_kernel.asm['ttir'])
 
         # 3) autodiff
-        main(f"generated/{dir_name}", run_py=False)
+        run_mlir_pass(f"generated/{dir_name}")
 
         # 4) create executable python fn for bwd
         from triton.compiler import compile
