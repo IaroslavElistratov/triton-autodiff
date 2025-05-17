@@ -502,3 +502,10 @@ def autodiff(kernel, stub, grid, idx_upstream, non_stub_args_idxs=None, post_pro
     return my_op, bwd_kernel
 
 
+
+#### utils  ####
+
+from functools import partial
+
+def right_partial(func, *args):
+    return lambda *fargs: func(*fargs, *args)
