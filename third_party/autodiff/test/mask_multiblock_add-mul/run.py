@@ -80,7 +80,7 @@ upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 my_op, bwd_kernel = autodiff(kernel, stub, grid=(3, 1, 1), idx_upstream=2)
 

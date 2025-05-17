@@ -87,7 +87,7 @@ print()
 
 # triton autograd
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 # todo-high: grid with meta is not supported when calling bwd kernel (presumably BLOCK_SIZE got already inlined)
 my_op, bwd_kernel = autodiff(kernel, stub, grid=(1, ), idx_upstream=1)

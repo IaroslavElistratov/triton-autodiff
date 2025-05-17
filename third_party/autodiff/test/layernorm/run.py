@@ -54,7 +54,7 @@ weight.requires_grad = True
 bias.requires_grad = True
 
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 my_op, bwd_kernel = autodiff(kernel, stub, grid=(M,), non_stub_args_idxs=[4,5], idx_upstream=1)
 

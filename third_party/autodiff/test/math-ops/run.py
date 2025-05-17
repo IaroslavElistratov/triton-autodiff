@@ -92,7 +92,7 @@ b.requires_grad = True
 c.requires_grad = True
 
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=3)
 

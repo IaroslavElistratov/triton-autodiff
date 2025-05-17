@@ -80,7 +80,7 @@ q.requires_grad = True
 k.requires_grad = True
 v.requires_grad = True
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 
 # todo: need to support passing no grad args (in this case "causal, sm_scale") -- and my torch.Function needs to know to not output derivatives wrt them

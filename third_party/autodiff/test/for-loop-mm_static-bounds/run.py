@@ -130,7 +130,7 @@ else:
 
 #### test backward ####
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 # todo: passing grid with meta args isn't supported yet
 my_op, bwd_kernel = autodiff(kernel, stub, grid=(4, 1, 1), idx_upstream=2)

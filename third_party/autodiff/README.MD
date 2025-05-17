@@ -346,7 +346,7 @@ q.requires_grad = True
 k.requires_grad = True
 v.requires_grad = True
 
-+ from triton.backends.api import autodiff, right_partial
++ from triton.backends.autodiff import autodiff, right_partial
 
 + # temporary limitation:
 + #   here need right_partial because binding trailing arguments (not arguments at the beginning), because kernel signature
@@ -548,7 +548,7 @@ x.requires_grad = True
 weight.requires_grad = True
 bias.requires_grad = True
 
-+ from triton.backends.api import autodiff
++ from triton.backends.autodiff import autodiff
 
 + my_op, bwd_kernel = autodiff(kernel, stub, grid=(M,), non_stub_args_idxs=[4,5], idx_upstream=1)
 

@@ -72,7 +72,7 @@ else:
 upstream = torch.randn(4, device=DEVICE)
 a.requires_grad = True
 
-from triton.backends.api import autodiff
+from triton.backends.autodiff import autodiff
 
 my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=1)
 
