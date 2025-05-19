@@ -1,3 +1,25 @@
+# Triton-Autodiff
+
+A fork of [Triton](https://github.com/openai/triton) with an experimental automatic differentiation support.
+
+This work clones the main Triton repository, but intends to minimize
+divergences in the core. Most of the autodiff work is in [third_party/autodiff](backend/autodiff)
+subdirectory.
+
+**NOTE: This project is at a very early stage -- APIs will change.**
+
+
+# How to use it?
+
+TBD: For now see examples at [third_party/autodiff/test](backend/autodiff/test).
+
+
+
+---
+
+# Upstream README
+
+
 <div align="center">
   <img src="https://lh5.googleusercontent.com/wzQKEsTFkrgNQO9JjhGH5wFvslJr1saLtLaJ_a6Fp_gNENpvt3VG7BmztwngU9hFJaU4CPwGiw1opQtDvTkLrxWRbO_a12Q-pdESWHgtmheIHcPbOL5ZMC4TSiJVe5ty1w=w3517" alt="Triton logo">
 </div>

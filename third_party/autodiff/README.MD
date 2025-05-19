@@ -1,4 +1,16 @@
-Below my goal is to show how your kernel definition simplifies as a result of using this repo.
+# Motivation
+
+This repo aims to take in an arbitrary triton kernel and return a callable that supports automatic differentiation out of the box.
+
+Given a triton kernel and its stub
+  - creates a corresponding backward_triton_kernel
+  - then wraps this pair of forward / backward triton kernels into a torch.autograd.Function
+
+The project aims to support arbitrary triton kernels.
+
+Below I show how this repo helps to simplify your kernel definitions.
+
+For more examples see [third_party/autodiff/test](backend/autodiff/test).
 
 # Example 1: Flash Attention v2
 
@@ -6,6 +18,9 @@ Let's look at flash attention v2 impl from [official triton tutorial](https://gi
 
 I'll show code snippets below. **For end to end example see: triton/third_party/autodiff/test/flash_attention_v2/run.py**
 
+
+<details>
+  <summary>Click to expand</summary>
 
 ```diff
 
@@ -23,6 +38,8 @@ def _attn_fwd_inner
 def _attn_fwd
   ...
 
+
++ # No need to write backward kernel and backward stub by hand anymore!
 
 -@triton.jit
 -def _attn_bwd_preprocess(O, DO,  #
@@ -364,6 +381,8 @@ v.requires_grad = True
 + # now grads have been populated for: q.grad, k.grad, v.grad
 ```
 
+</details>
+
 
 
 
@@ -373,6 +392,9 @@ Let's look at layer-norm impl from [official triton tutorial](https://triton-lan
 
 I'll show code snippets below. **For end to end example see: triton/third_party/autodiff/test/layernorm/run.py**
 
+
+<details>
+  <summary>Click to expand</summary>
 
 ```diff
 
@@ -384,6 +406,9 @@ I'll show code snippets below. **For end to end example see: triton/third_party/
 
 @triton.jit
 def _layer_norm_fwd_fused
+
+
++ # No need to write backward kernel and backward stub by hand anymore!
 
 -@triton.jit
 -def _layer_norm_bwd_dx_fused(DX,  # pointer to the input gradient
@@ -560,3 +585,10 @@ bias.requires_grad = True
 
 + # now grads have been populated for: x.grad, weight.grad, bias.grad
 ```
+
+</details>
+
+
+# Other examples
+
+**See 10 more examples in [third_party/autodiff/test](backend/autodiff/test)**.
