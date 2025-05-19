@@ -203,7 +203,7 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 
 _COMPILED_KERNEL = None
 
-# answer-now: this works but unrolls the loop too man times
+# answer-now: this works but unrolls the loop too many times
 # BLOCK_M = 128
 # BLOCK_N = 64
 
@@ -299,7 +299,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     # assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol)
     return tri_out, ref_out
 
-# NOTE: this works but unrolls for 128 times -- so try smaller shapes
+# NOTE: this works but unrolls for loop too many -- so try smaller shapes
 # tri_out, ref_out = test_op(1, 1, 128, 64, True)
 
 

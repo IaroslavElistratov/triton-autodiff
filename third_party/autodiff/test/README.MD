@@ -1,4 +1,4 @@
-
+```
 <!-- cmake -G Ninja ../triton -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLLVM_ENABLE_LLD=ON -DLLVM_CCACHE_BUILD=ON -->
 
 
@@ -23,12 +23,14 @@ python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-
 
 
 - dump reuslts on internal trtion optmizaitons
-    / TRITON_ALWAYS_COMPILE forces to ingore cache wt needing to manualy delete it (rm -rf /home/iaro/.triton/cache/)
+    / TRITON_ALWAYS_COMPILE forces to ingore cache wt needing to manualy delete it ($HOME/.triton/cache/)
   TRITON_ALWAYS_COMPILE=1 MLIR_ENABLE_DUMP=1 _rpy 2> ./third_party/autodiff/test/dump.log
 - dissable some otpimzaitons
   DISABLE_LLVM_OPT=1 DISABLE_PTXAS_OPT=1
 
-- # use "mlir-opt -test-print-nesting" to get this printed
+```
+
+- use "mlir-opt -test-print-nesting" to get this printed
 
   ```mlir
   visiting op: 'tt.func' with 0 operands and 0 results
