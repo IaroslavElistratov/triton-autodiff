@@ -58,7 +58,9 @@ namespace triton {
 
   void maybeAccumulateGrad(Value val, Value grad, llvm::DenseMap<Value, Value> &gradMap, OpBuilder &builder);
 
-  triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value);
+  Value createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value);
+
+  Value createConstantBoolTensor(OpBuilder &builder, Location loc, Type type, bool value);
 
   Operation* cloneSubtree(Operation *targetOp, IRMapping &mapper, OpBuilder &builder);
 
@@ -69,6 +71,10 @@ namespace triton {
   Operation* substituteBasePtr(Operation *targetOp, OpBuilder &builder, llvm::DenseMap<Value, Value> ptrToAddedPtrMap);
 
   void setInsertionPointAfterLastUse(Value val, OpBuilder &builder);
+
+  Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder);
+
+  NameLoc createNodeName(Operation *op, std::string prefix);
 
 } // namespace triton
 } // namespace mlir

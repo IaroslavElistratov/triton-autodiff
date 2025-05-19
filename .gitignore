@@ -1,3 +1,7 @@
+**/generated/*
+!generated/annotated/
+__*
+
 third_party/__my_nvidia/
 
 # Triton builds

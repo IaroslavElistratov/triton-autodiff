@@ -275,11 +275,24 @@ class ASTFunction:
         return vals
 
 
+
+class _AssignCtx:
+    """Keeps a base identifier and an incrementing counter."""
+    def __init__(self, base: str):
+        self.base = base
+        self.counter = -1
+
+    def next(self) -> str:
+        self.counter += 1
+        return self.base if self.counter == 0 else f"{self.base}_temp{self.counter}"
+
+
 class CodeGenerator(ast.NodeVisitor):
 
     def __init__(self, context, prototype, gscope, function_name, jit_fn: JITFunction, options, codegen_fns, module_map,
                  module=None, is_kernel=False, function_types: Optional[Dict] = None, noinline=False,
                  file_name: Optional[str] = None, begin_line=0):
+        self._assign_ctx_stack = []
         self.context = context
         self.builder = ir.builder(context)
         self.file_name = file_name
@@ -576,6 +589,7 @@ class CodeGenerator(ast.NodeVisitor):
         self.set_value(self.visit(target), value)
 
     def visit_Assign(self, node):
+
         # construct values to assign
         def _sanitize_value(value):
             if self._is_namedtuple(type(value)):
@@ -593,10 +607,25 @@ class CodeGenerator(ast.NodeVisitor):
                 value = semantic.to_tensor(value, self.builder)
             return value
 
-        values = _sanitize_value(self.visit(node.value))
-        targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
-        assert len(targets) == 1
-        self.assignTarget(targets[0], values)
+        base = None
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            base = node.targets[0].id           # qvk_offset, acc, …
+
+        if base:
+            self._assign_ctx_stack.append(_AssignCtx(base))
+        try:
+            # Give the *whole* assignment the base name (counter 0)
+            if base:
+                self._set_src_loc(node, explicit=base)
+
+            values = _sanitize_value(self.visit(node.value))
+            targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+            assert len(targets) == 1
+            self.assignTarget(targets[0], values)
+
+        finally:
+            if base:
+                self._assign_ctx_stack.pop()
 
     def visit_AugAssign(self, node):
         name = node.target.id
@@ -1305,7 +1334,62 @@ class CodeGenerator(ast.NodeVisitor):
                 raise AssertionError("encountered unexpected node of type {} in a JoinedStr node".format(type(value)))
         return ''.join(values)
 
+
+    def _set_src_loc(self, node, explicit: str | None = None):
+        """Attach a NameLoc for *node*.
+        1) explicit   overrides everything if provided
+        2) heuristics try to find an identifier from the AST node
+        3) inside an assignment, fall back to ctx.next()
+        4) else leave the builder’s current loc unchanged
+        """
+        if not (hasattr(node, "lineno") and hasattr(node, "col_offset")):
+            return
+
+        # 1) explicit from caller
+        stem = explicit
+
+        # 2) heuristics from AST node
+        if stem is None:
+            if isinstance(node, ast.Name):
+                stem = node.id                                  # bare 'x'
+            elif isinstance(node, ast.Attribute):
+                stem = node.attr                                # obj.attr
+            elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+                stem = node.targets[0].id                       # x = ...
+
+        # 3) assignment context fallback
+        if stem is None and self._assign_ctx_stack:
+            stem = self._assign_ctx_stack[-1].next()
+
+
+        # question-now:
+        # Any expression that defines no obvious Python identifier – e.g. a bare function call, an arithmetic sub-expression, or tl.program_id(1) – falls through to the site_<lineno> placeholder.
+        # That placeholder is still useful because it keeps SSA IDs stable (%site_36, %site_36_1, …) but it obviously isn’t as descriptive as offs_m, stride_qh, etc.
+        # 4) if still None, do *not* overwrite – keep previous meaningful loc
+        if stem is None:
+            return
+        # if stem is None:
+        #     stem = f"site_{node.lineno}"
+
+        # print("[codegen._set_src_loc] VAR: ", var)
+        self.builder.set_named_loc(
+            stem,
+            self.file_name,
+            self.begin_line + node.lineno,
+            node.col_offset,
+        )
+
     def visit(self, node):
+
+        # Location.file and Location.name are the canonical factory helpers in the bindings. 
+        # The nested structure retains the file/line/col information, so IDE “jump-to-definition” and stack-trace printing still work. 
+
+        from mlir.ir import Location, StringAttr          # MLIR Python API
+        def _name_loc(ctx, var_name, file_name, line, col):
+            file_loc = Location.file(file_name, line, col, context=ctx)
+            return Location.name(StringAttr.get(var_name, context=ctx), file_loc)
+
+
         if node is None:
             return
         with warnings.catch_warnings():
@@ -1317,7 +1401,8 @@ class CodeGenerator(ast.NodeVisitor):
             last_loc = self.builder.get_loc()
             self.cur_node = node
             if hasattr(node, 'lineno') and hasattr(node, 'col_offset'):
-                self.builder.set_loc(self.file_name, self.begin_line + node.lineno, node.col_offset)
+                # self.builder.set_loc(self.file_name, self.begin_line + node.lineno, node.col_offset)
+                self._set_src_loc(node)
                 last_loc = self.builder.get_loc()
             try:
                 ret = super().visit(node)

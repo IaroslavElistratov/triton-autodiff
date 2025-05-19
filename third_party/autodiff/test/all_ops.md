@@ -1,6 +1,6 @@
 Programming Model
 -----------------
-    program_id
+    + program_id
     num_programs
 
 
@@ -16,7 +16,7 @@ Creation Ops
 
 Shape Manipulation Ops
 ----------------------
-    broadcast
+    + broadcast
     broadcast_to
     expand_dims
     interleave
@@ -31,8 +31,8 @@ Shape Manipulation Ops
 
 Memory/Pointer Ops
 ----------
-    load
-    store
+    + load
+    + store
     make_block_ptr
     advance
 
@@ -50,30 +50,30 @@ Math Ops
     cdiv
     ceil
     clamp
-    cos
+    + cos
     div_rn
     erf
-    exp
-    exp2
+    + exp
+    + exp2
     + fdiv
     floor
     fma
-    log
-    log2
+    + log
+    + log2
     maximum
     minimum
     rsqrt
     sigmoid
-    sin
+    + sin
     softmax
-    sqrt
+    + sqrt
     sqrt_rn
     umulhi
 
 
 Linear Algebra Ops
 ------------------
-    dot
+    + dot
     dot_scaled
 
 
@@ -86,10 +86,10 @@ Linear Algebra Ops
   -------------
       argmax
       argmin
-      max
+      + max
       min
-      reduce
-      sum
+      + reduce
+      + sum
       xor_sum
 
   Scan/Sort Ops

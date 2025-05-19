@@ -24,6 +24,57 @@
 namespace mlir {
 namespace triton {
 
+  NameLoc createNodeName(Operation *op, std::string prefix){
+    // Only use this approach for debugging purposes with -mlir-use-nameloc-as-prefix compilation flag
+
+    auto origLoc = op->getLoc();
+    std::string name = prefix;
+
+    // Declare first so the lambda can call itself.
+    std::function<std::optional<StringRef>(Location)> firstNameIn;
+
+    firstNameIn = [&firstNameIn](Location loc) -> std::optional<StringRef> {
+      // Fast‑path: most ops already have a NameLoc on top.
+      // handles e.g.:   #loc103 = loc("element_ty"(#loc51))
+      if (auto nl = dyn_cast<NameLoc>(loc))
+        return nl.getName().getValue();
+
+      // For CallSiteLoc, check both callee and caller.
+      //CallSiteLoc records a call stack: it always contains exactly one “callee” location and one “caller” location (the caller may itself be another CallSiteLoc, giving a chain).
+      if (auto cs = dyn_cast<CallSiteLoc>(loc)) {
+        if (auto s = firstNameIn(cs.getCallee())) return s;
+        if (auto s = firstNameIn(cs.getCaller())) return s;
+        return std::nullopt;
+      }
+
+
+      // A FusedLoc may hold several sub‑locations.
+      // handles e.g.: #loc106 = loc(callsite(#loc72 at #loc73))
+      //
+      // FusedLoc, in contrast, is a bag of locations: it owns an arbitrary‑length list of sub‑locations that were “fused” together (plus optional metadata).
+      // So when we search for the first NameLoc string we must look down the callee/caller chain for a CallSiteLoc, but iterate over the entire list for a FusedLoc.
+      if (auto fused = dyn_cast<FusedLoc>(loc))
+        for (Location sub : fused.getLocations())
+          if (auto s = firstNameIn(sub)) return s;
+
+      // UnknownLoc, FileLineCol, etc.
+      return std::nullopt;
+    };
+
+    std::optional<StringRef> optName = firstNameIn(origLoc);
+    if (optName.has_value()) {
+        name += optName.value().str();  // StringRef to std::string
+    } else {
+        name += "unnamed";
+    }
+
+
+    if (DEBUG_PRINTS) llvm::errs() << "name: " << name << "\n";
+    auto nameAttr = StringAttr::get(op->getContext(), name);
+    auto newLoc = NameLoc::get(nameAttr, op->getLoc());
+    return newLoc;
+  }
+
   void markVisited(OpBuilder &builder, visitedType mode, Operation *op) {
     if (!op) {
       llvm::report_fatal_error("markVisited received null operation pointer\n");
@@ -49,6 +100,7 @@ namespace triton {
     auto it = gradMap.find(result);
     if (it == gradMap.end()) {
       llvm::errs() << "No grad found for " << result << "\n";
+      result.getParentBlock()->dump();
       llvm::report_fatal_error("Expected gradient in gradMap");
       // llvm::report_fatal_error("Expected gradient in the map for " + Twine(result));
     }
@@ -58,6 +110,12 @@ namespace triton {
   void maybeAccumulateGrad(Value val, Value grad,
                           llvm::DenseMap<Value, Value> &gradMap,
                           OpBuilder &builder) {
+
+    if (val.getType() != grad.getType()) {
+      llvm::errs() << "val type: " << val.getType() << "\n";
+      llvm::errs() << "grad type: " << grad.getType() << "\n";
+      llvm::report_fatal_error("[maybeAccumulateGrad] shape of grad does not match shape of Value");
+    }
     auto it = gradMap.find(val);
 
     // no existing grad
@@ -68,12 +126,31 @@ namespace triton {
     } else {
       auto existingGrad = it->second;
 
+      if (DEBUG_PRINTS) llvm::errs() << "[maybeAccumulateGrad] found existing grad wrt " << val << "\n";
+      if (DEBUG_PRINTS) llvm::errs() << "existing grad: " << existingGrad << " new grad: " << grad << "\n";
+
       // otherwise "does not dominate its use"  err
-      // Note: when the grad value was defined by an op which was inserted by
-      //  a handler which called setInsertionPointAfterLastUse, that means the
-      //  grad Value is already inserted into the graph after last use of the
+      // Note: when the newGrad value was defined by an op, which was inserted by
+      //  a handler, which called setInsertionPointAfterLastUse, that means the
+      //  grad Value is already inserted into the bwd graph after last use of the
       //  upstream value (IOW existingGrad value)
-      builder.setInsertionPointAfterValue(grad);
+
+      // The handler that called maybeAccumulateGrad must have already set the insertion point (for the ops it inserted)
+      //  to after the last use of upstream grad (for that handler) -- which is called "existingGrad" here
+      //  so the ops that produce new grad (which is called grad here) must have been insierted AFTER the last use of existingGrad
+      //  (so grad is below existingGrad)
+
+      // answer-now:
+      //  no, it's incorrect to assume that the "upstream" for the handler
+      //  that produced the newGrad was the existingGrad -- it's not!
+
+      // builder.setInsertionPointAfterValue(grad);
+
+      Operation *pNew = grad.getDefiningOp();
+      Operation *pOld = existingGrad.getDefiningOp();
+      if (!pOld) pOld = pNew;                    // block-arg case
+      Operation *later = pNew->isBeforeInBlock(pOld) ? pOld : pNew;   // choose the lower op
+      builder.setInsertionPointAfter(later);
 
       // // todo: don't use atomics unless needed (requires some analysis pass
       // // to identify if this accesses the same memory location)
@@ -84,28 +161,93 @@ namespace triton {
       auto accumulatedGrad = builder.create<arith::AddFOp>(existingGrad.getLoc(), existingGrad, grad);
       markVisited(builder, visitedType::Inserted, accumulatedGrad);
 
+      // In standard map/dictionary data structures, when you assign a new value to an existing key, the old value is overwritten
+      // You don't need to "pop" the old value first - the assignment operation automatically replaces the existing value.
       gradMap[val] = accumulatedGrad;
     }
   }
 
-  triton::SplatOp createConstantTensor(OpBuilder &builder, Location loc, Type tensorType, float value) {
+  Value createConstantTensor(OpBuilder &builder, Location loc, Type type, float value) {
       // Determine the element type of the tensor
-      auto tensorElemType = mlir::cast<ShapedType>(tensorType).getElementType();
+      // llvm::errs() << type; // tensor<8192xf32>f32
 
-      // Ensure the tensor element type is either float16 or float32
-      assert((tensorElemType.isF16() || tensorElemType.isF32()) && "Tensor element type must be float16 or float32");
 
-      // Create a constant value of the appropriate type
-      auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(tensorElemType, value));
+      // Difference between Type and ShapedType in MLIR:
+      // - Type is the base class for all types in MLIR's type system. It represents any kind of type in MLIR, which could be primitive types (like integers, floats), complex types (like tensors, memrefs), or function types.
+      // - ShapedType is a subclass of Type that specifically represents types with a shape, such as:
+      //    RankedTensorType: Tensors with known dimensions
+      //    MemRefType: Memory references with known dimensions
+      //    UnrankedTensorType: Tensors with unknown dimensions
+      //    UnrankedMemRefType: Memory references with unknown dimensions
+      // auto tensorElemType = dyn_cast<ShapedType>(tensorType).getElementType();
 
-      // Splat the scalar value into a tensor of the desired type
-      auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
 
-      // Mark the operations as visited
-      markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+      /*
+      This needs to handle the case where tensorType is just a Type and not Shaped Type -- e.g. below when divf's operand is just a scalar (and not a tensor)
+        but I still need to differentiate it, bc that scalar was computed by taking a tensor and reducing it into a single float (via tt.reduce)
 
-      return tensorValue;
+        %18 = "tt.reduce"(%17) <{axis = 0 : i32}> ({
+        ^bb0(%arg8: f32, %arg9: f32):
+          %43 = arith.addf %arg8, %arg9 : f32
+          tt.reduce.return %43 : f32
+        }) : (tensor<8192xf32>) -> f32
+        %19 = arith.divf %18, %cst_1 : f32
+        %20 = arith.addf %19, %arg7 : f32
+        %21 = math.sqrt %20 : f32
+        %22 = arith.divf %cst_0, %21 : f32
+
+      */
+
+      // Handle all cases: either it's already a ShapedType or we need to extract it
+      if (auto tensorType = dyn_cast<ShapedType>(type)) {
+        // If it's ShapedType extract type of a single element
+        Type scalarType = tensorType.getElementType();
+        assert((scalarType.isF16() || scalarType.isF32()) && "Tensor element type must be float16 or float32");
+
+        auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(scalarType, value));
+
+        // Splat the scalar value into a tensor of the desired type
+        auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+
+        markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+        return tensorValue;
+
+      } else if (auto scalarType = dyn_cast<Type>(type)) {
+        // If it's Type, just use it directly
+        assert((scalarType.isF16() || scalarType.isF32()) && "Tensor element type must be float16 or float32");
+
+        auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(scalarType, value));
+        markVisited(builder, visitedType::Inserted, scalarValue);
+        return scalarValue;
+
+      } else {
+        // can handle other cases in the future,
+        // thigh can't hink of any at the moment
+        llvm::report_fatal_error("unreachable");
+      }
+
   }
+
+
+  // todo-low: re-use createConstantTensor?
+  Value createConstantBoolTensor(OpBuilder &builder, Location loc, Type type, bool value) {
+      // llvm::errs() << type; // tensor<8192xi1>
+      //    i1 represents a 1-bit integer (a boolean-like value, typically 0 or 1).
+
+      if (auto tensorType = dyn_cast<ShapedType>(type)) {
+        Type elemType = tensorType.getElementType();
+        assert(elemType.isInteger(1) && "Tensor element type must be an int with exactly 1 bit");
+        auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getBoolAttr(value));
+        // auto scalarValue = builder.create<arith::ConstantOp>(loc, getAttr(elemType, value ? 1 : 0));
+        auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+        markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
+        return tensorValue;
+      } else {
+        llvm::report_fatal_error("unreachable");
+      }
+  }
+
+
 
 
 
@@ -153,6 +295,11 @@ namespace triton {
     // IRMapping used to ensure when I clone operations, the operands of the cloned
     // ops refer to the cloned values, not the original ones.
     Operation *clonedOp = builder.clone(*targetOp, mapper);
+
+    // add prefix to the name
+    NameLoc prefixedLoc = createNodeName(clonedOp, "fwd_");
+    clonedOp->setLoc(prefixedLoc);
+
     markVisited(builder, visitedType::Cloned, clonedOp);
 
     // if (clonedOp) {
@@ -205,7 +352,7 @@ namespace triton {
         for (Value operand : op->getOperands()) {
           // NOTE: because I explicitly call substituteBasePtr on store / load (targetOp) -- there should be a base pointer (somewhere up in the def-chain, form the perspective of targetOp)
           //  and because, as I understand, triton does not support e.g. adding two pointers -- there can only be one basePtr in that def-chain
-          if (isa<BlockArgument>(operand)) {
+          if (isa<BlockArgument>(operand) && isa<triton::PointerType>(operand.getType())) {
             basePtr = operand;
             break;
           }
@@ -226,7 +373,7 @@ namespace triton {
     // corresponding to grad pointers for every arg)
     Value replacementPtr = ptrToAddedPtrMap[basePtr];
     if (DEBUG_PRINTS)
-      llvm::outs() << "load's basePtr " << basePtr << " was replaced with replacementPtr " << replacementPtr << ". Dependant nodes cloned to use the new base\n";
+      llvm::errs() << "[substituteBasePtr] load's basePtr " << basePtr << " was replaced with replacementPtr " << replacementPtr << ". Dependant nodes cloned to use the new base\n";
 
     // don't pass origToCloned as mapper argument (IRMapping) to substituteBasePtr,
     // instead create a completely new IRMapping from inside this function
@@ -261,15 +408,24 @@ namespace triton {
       // Clone all operations we depend on first
       for (Value operand : op->getOperands()) {
 
-        if (isa<BlockArgument>(operand)){
+        // the 2nd condition is needed bc there can other non pointer arguments -- don't treat them as the pointer base that I'm looking for
+        if (isa<BlockArgument>(operand) && isa<triton::PointerType>(operand.getType())){
 
           // NOTE: I don't think there can be other BlockArgs in the subtree leading to tt:load operand
           //  because I think triton does not support adding two pointers, thus there can only be one base (IOW blockArgument)
+
+          // ==> oh yeah, there can be other **NON-POINTER** arguments (e.g. above) -- this was just used as some offset into another BlockArg which was a pointer
+          //   - operand: <block argument> of type 'i32' at index: 6; basePtr: <block argument> of type '!tt.ptr<f16>' at index: 1LLVM ERROR: Expected only to find basePtr
+          // signature of the associated tl code:
+          //    def _layer_norm_fwd_fused(
+          //        X,  # pointer to the input
+          //        Y,  # pointer to the output
+          //        stride,  # how much to increase the pointer when moving by 1 row
+          //        N,  # number of columns in X
+          //    )
+
           assert(operand == basePtr);
           isOpDependsOnBasePtr = true;
-
-          // there can be other BlockArguments which are not my basePtr
-          // if (operand == basePtr)
           continue;
         }
 
@@ -280,13 +436,15 @@ namespace triton {
       }
 
       if (isOpDependsOnBasePtr){
-        if (DEBUG_PRINTS) llvm::outs() << "Cloning (depends on base ptr): " << *op << "\n";
+        if (DEBUG_PRINTS) llvm::errs() << "Cloning (depends on base ptr): " << *op << "\n";
+
         resultOp = builder.clone(*op, mapper);
+
         markVisited(builder, visitedType::GradPtrRebase, resultOp);
         opsDependendingOnBasePtr.insert(op);
       } else {
         // Reuse this operation by mapping its results to themselves
-        if (DEBUG_PRINTS) llvm::outs() << "Reusing (independent of base ptr): " << *op << "\n";
+        if (DEBUG_PRINTS) llvm::errs() << "Reusing (independent of base ptr): " << *op << "\n";
         // todo: correct?
         for (Value result : op->getResults())
           mapper.map(result, result);
@@ -321,19 +479,47 @@ namespace triton {
     });
 
     for (auto forOp : forOpsToUnroll) {
-      // Check if we can get the upper bound as a constant
-      if (auto upperBound = getConstantIntValue(forOp.getUpperBound())) {
-        unsigned numIters = *upperBound;
+      // Check if we can get the bounds and step as constants
+      auto upperBound = getConstantIntValue(forOp.getUpperBound());
+      auto lowerBound = getConstantIntValue(forOp.getLowerBound());
+      auto stepValue = getConstantIntValue(forOp.getStep());
+
+      if (upperBound && lowerBound && stepValue && *stepValue != 0) {
+        // Calculate the actual number of iterations
+        unsigned numIters = (*upperBound - *lowerBound) / *stepValue;
         // Completely unroll
         auto resultLoops = loopUnrollByFactor(forOp, numIters);
-        if (DEBUG_PRINTS) llvm::outs() << "Unrolled loop with " << numIters << " iterations\n";
+        llvm::errs() << "Unrolled loop with " << numIters << " iterations\n";
+        if (DEBUG_PRINTS) llvm::errs() << "Unrolled loop with " << numIters << " iterations\n";
       } else {
-        llvm::report_fatal_error("[unrollAllForOps] failed to extract upper bound\n");
+        llvm::report_fatal_error("[unrollAllForOps] failed to extract loop bounds or step\n");
       }
     }
 
   }
 
+  /* error
+
+  The function's signature expects argument #4 to have the type !tt.ptr<f16> (a pointer to a 16-bit floating-point value).
+  However, the entry block of the function defines argument #4 as !tt.ptr<f32> (a pointer to a 32-bit floating-point value).
+
+    the types of arguments in the function's entry block must exactly match the types declared in the function signature
+
+
+  or: 'tt.func' op type of entry block argument #4('!tt.ptr<f32>') must match the type of the corresponding argument in function signature('!tt.ptr<f16>')
+    tt.func public @_layer_norm_fwd_fused(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg5: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg6: i32 {tt.divisibility = 16 : i32}, %arg7: f32) attributes {noinline = false} {
+    ^
+
+  answer-now:
+  ==> currently for block args, I just append newly added arguments AFTER all the original argumenets -- that only works when all
+
+    I think the problem was bc I inserted ptr args to right after original ptr arg (for the fn signature)
+    (ptr_1, ADDED_ptr_1, ptr_2, ADDED_ptr_2, **int_1**, ptr_3, ADDED_ptr_3)
+
+    but incorrectly inserted all inserted args after all original args for the blockArgs:
+    (ptr_1, ptr_2, **int_1**, ptr_3, ADDED_ptr_1, ADDED_ptr_2, ADDED_ptr_3)
+
+  */
   // todo: simplify this
   llvm::DenseMap<Value, Value> addPointerArgsToFunction(triton::FuncOp funcOp) {
 
@@ -355,7 +541,6 @@ namespace triton {
       newInputTypes.push_back(inputType);
 
       if (auto ptrType = dyn_cast<triton::PointerType>(inputType)) {
-        newInputTypes.push_back(ptrType);
         additionalPtrTypes.push_back(ptrType); // Remember only the new ones
 
         auto numAdded = ptrIdxToAddedPtrIdxMap.size();
@@ -363,6 +548,11 @@ namespace triton {
       }
 
     }
+
+    // append newly added args to the end of ALL original args (including after original non ptr args), iow:
+    //  Original inputs: (ptr_1, ptr_2, **int_1**, ptr_3)
+    //  Modified: (ptr_1, ptr_2, **int_1**, ptr_3, ADDED_ptr_1, ADDED_ptr_2, ADDED_ptr_3)
+    newInputTypes.append(additionalPtrTypes.begin(), additionalPtrTypes.end());
 
     // Create and set the new function type
     auto newFnType = FunctionType::get(funcOp.getContext(), newInputTypes,  fnType.getResults());
@@ -433,6 +623,53 @@ namespace triton {
     builder.setInsertionPointAfter(lastUseInBwd);
   }
 
+
+  // Helper function to create either a SplatOp or ExpandDimsOp+BroadcastOp based on input type
+  Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder) {
+    // Check if input is a tensor or scalar
+    if (isa<TensorType>(input.getType())) {
+      // For tensor input, use expand_dims + broadcast
+      auto inputTensorType = dyn_cast<RankedTensorType>(input.getType());
+      auto targetTensorType = dyn_cast<RankedTensorType>(targetType);
+
+      if (inputTensorType && targetTensorType) {
+        // First expand dimensions to match the target shape
+        Value currentResult = input;
+
+        // If ranks don't match, we need to add dimensions
+        int inputRank = inputTensorType.getRank();
+        int targetRank = targetTensorType.getRank();
+
+        // Add missing dimensions
+        for (int i = inputRank; i < targetRank; i++) {
+          auto expandOp = builder.create<triton::ExpandDimsOp>(
+              loc,
+              currentResult,
+              i); // Add dimension at position i
+          currentResult = expandOp->getResult(0);
+          markVisited(builder, visitedType::Inserted, expandOp);
+        }
+
+        // Then broadcast to the target shape
+        auto broadcastOp = builder.create<triton::BroadcastOp>(
+            loc,
+            targetType,
+            currentResult);
+
+        markVisited(builder, visitedType::Inserted, broadcastOp);
+        return broadcastOp->getResult(0);
+      }
+    }
+
+    // For scalar input or fallback case, use splat
+    auto splatOp = builder.create<triton::SplatOp>(
+        loc,
+        targetType,
+        input);
+
+    markVisited(builder, visitedType::Inserted, splatOp);
+    return splatOp->getResult(0);
+  }
 
 } // namespace triton
 } // namespace mlir

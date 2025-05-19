@@ -74,9 +74,49 @@ public:
       lastLoc = std::make_unique<Location>(loc);
   }
 
+  // In Triton’s C++ bindings, TritonOpBuilder::setLastLoc is the single gate that decides “which mlir::Location gets stamped on the next op we build.”
+  // Every higher-level call (builder.set_loc(…) from the Python side, setInsertionPointToStart/End, or the convenience create<OpTy> templates) eventually funnels through this helper.
+
+  // Where setLastLoc lives and why it exists
+  //  TritonOpBuilder is a thin wrapper around the vanilla mlir::OpBuilder that:
+  //  keeps a cache of the “current” location (std::unique_ptr<Location> lastLoc), and
+  //  updates that cache whenever you change insertion points or explicitly call builder.set_loc(…).
+  //  When one of the create<OpTy> helpers finally materialises an operation, it passes getLastLoc() as the first constructor argument, exactly as MLIR expects.
+  //  This guarantees every op carries an accurate provenance tag without you having to thread a Location through every call.
+
+
+  // 2 Two overloads, one job
+
+  // void setLastLoc(Location loc);
+  // void setLastLoc(const std::string &fileName, int line, int column);
+
+  // setLastLoc(Location loc)
+  //   Caller already built a Location object (could be FileLineColLoc, NameLoc, FusedLoc, etc.).
+  //   Function copies it into lastLoc iff lineInfoEnabled is true (more on that flag below).
+  //   No work is done—just a cheap pointer assign.
+  // setLastLoc(fileName, line, col)
+  //   Convenience wrapper used by the Python code-gen (self.builder.set_loc(file, line, col)).
+  //   Builds a FileLineColLoc via FileLineColLoc::get(context, fileName, line, column) and forwards to the first overload.
+  //   Result: operations get a path-plus-line location, but not the variable name you want.
+  //   Take-away: unless a caller passes in a pre-wrapped NameLoc, the builder defaults to a plain FileLineColLoc, which the printer ignores for -mlir-use-nameloc-as-prefix.
   void setLastLoc(const std::string &fileName, int line, int column) {
     auto context = builder->getContext();
     setLastLoc(FileLineColLoc::get(context, fileName, line, column));
+  }
+
+  void setLastLoc(const std::string &varName,
+                  const std::string &fileName,
+                  int line,
+                  int column) {
+    // if (!lineInfoEnabled)          // respect TRITON_DISABLE_LINE_INFO
+    //   return;
+
+    auto *ctx     = builder->getContext();
+    auto fileLoc  = mlir::FileLineColLoc::get(ctx, fileName, line, column);
+    auto nameAttr = mlir::StringAttr::get(ctx, varName);
+    auto nameLoc  = mlir::NameLoc::get(nameAttr, fileLoc);
+
+    lastLoc = std::make_unique<mlir::Location>(nameLoc);
   }
 
   Location getLastLoc() {
@@ -946,6 +986,16 @@ void init_triton_ir(py::module &&m) {
       .def("set_loc",
            [](TritonOpBuilder &self, const std::string &fileName, int line,
               int column) { self.setLastLoc(fileName, line, column); })
+
+      .def("set_named_loc",
+            [](TritonOpBuilder &self,
+              const std::string &var,
+              const std::string &file,
+              int line,
+              int col) {
+              self.setLastLoc(var, file, line, col);
+            })
+
       .def("get_loc",
            [](TritonOpBuilder &self) -> Location { return self.getLastLoc(); })
 
