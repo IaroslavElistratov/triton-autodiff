@@ -323,13 +323,6 @@ struct ConvertTritonToAutodiff
 
     } // for loop over ops
 
-    // todo-now:
-    //  in the stub I'm using output variable to pass the upstream grad
-    //  but now when copying entire fwd graph, and the fwd graph actually
-    //  writes output into that variable -- thus overwriting my upstream grad
-    //
-    // don't overwrite upstream with the fwd output
-    // lastFwdOp->erase();
 
     // Second pass: handle LoadOp operations
     // because its derivative (storeOp) destroyaes semantics of input args
@@ -451,20 +444,16 @@ struct ConvertTritonToAutodiff
 
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
     // if (DEBUG_PRINTS) llvm::errs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
-    // todo-high: note I'm currently assuming that there's a single Store function and that it's the first one be added to the gradMap
     maybeAccumulateGrad(storeOp->getOperand(1), load, gradMap, builder);
 
-    // mark as visited
     markVisited(builder, visitedType::Inserted, load);
-
-    // todo: (OLD) replace that blockArg with another tensor (corresponding to grad of that original argument)
 
     // return to use as insertion point for differentiating next soreOp I match to
     return load;
   }
 
   // todo-now:
-  //  Don't just blindly add atomics in all cases, instead have an anylysis pass of what kernel instances actaully confifct and add finer grained atomics (locks) only for them
+  //  Don't just blindly add atomics in all cases, instead have an analysis pass of what kernel instances actually conflict and add finer grained atomics (locks) only for them
   // this version of the func adds atomics
   void handleLoadBackward(triton::LoadOp loadOp, OpBuilder &builder,
                           llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
@@ -497,7 +486,7 @@ struct ConvertTritonToAutodiff
     //
     // NOTE: use origToCloned.lookup(loadOp->getOperand(0))->getDefiningOp instead of loadOp
     //  directly -- I think the latter would give the op in the backward graph being re-written,
-    //  but the latter should give the fwd graph. And since I want my "cloning/or-reusing logic"
+    //  but the former should give the fwd graph. And since I want my "cloning/or-reusing logic"
     //  (in substituteBasePtr) to re-use intermideats from fwd -- I'm passing the op from the fwd
     //  graph (accessed via origToCloned)
 
@@ -521,10 +510,9 @@ struct ConvertTritonToAutodiff
         triton::MemSyncScope::GPU             // Memory scope
     );
 
-    // todo-high: note this op does not add anything to the gradMap, bc here I'm manually traversing
-    // inputs to this op (hardcoded for the specific toy graphs I'm working with) and marking them so
-    // that they will not be switched on (IOW iterated over) by this loop
     markVisited(builder, visitedType::Inserted, atomicOp);
+
+    // note this op does not add anything to the gradMap
 
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
@@ -558,14 +546,6 @@ struct ConvertTritonToAutodiff
                            llvm::DenseMap<Value, Value> &gradMap) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.truncf op\n";
 
-    /*
-    handler solves:
-      // NOTE: 97 didn't have gradient in the gradMap bc I was not matching to the "arith.truncf"
-      %97 = tt.dot %95, %96, %92
-      %100 = arith.truncf %97
-      tt.store %109, %100
-    */
-
     Value upstream = getUpstreamGrad(truncfOp, gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -584,8 +564,7 @@ struct ConvertTritonToAutodiff
     markAllVisited(builder, visitedType::Inserted, extOp);
 
 
-
-    // todo-high: the problem is that I'm casting upstream gradient from float16 to float32 -- but then I'm adding [that upstream] @ [some fwd activation] where the forward activation is float16
+    // the problem is that I'm casting upstream gradient from float16 to float32 -- but then I'm adding [that upstream] @ [some fwd activation] where the forward activation is float16
     /* my backward graph
       %58 = "tt.load"(%22) tensor<16x16xf16>
       %59 = "arith.extf"(%58) (tensor<16x16xf16>) -> tensor<16x16xf32>
@@ -618,7 +597,7 @@ struct ConvertTritonToAutodiff
 
     // (2) differentiate rhs
     auto gradRhsOp = createGradOp<arith::MulFOp>(builder, clonedLhs, upstream);
-    // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differenciating the original path (while cloned will not be differenicated)
+    // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differentiating the original path (while cloned will not be differenciated)
     maybeAccumulateGrad(rhs, gradRhsOp, gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradRhsOp);
 
@@ -693,8 +672,7 @@ struct ConvertTritonToAutodiff
     auto negSin = createGradOp<arith::MulFOp>(builder, negOne, sinOp);
     auto xDownstream = createGradOp<arith::MulFOp>(builder, negSin, upstream);
 
-    // answer-now:
-    //  gardMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
+    //  gradMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
     //  to values in backward graph which I've already re-written
     maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
@@ -988,7 +966,7 @@ struct ConvertTritonToAutodiff
 
     // Get the upstream gradient
     //  getResult retruns result_range
-    // answer-now: again I did the same mistake as before. triton::ReduceOp (a specific subclass of Operation) for some reason does not have getReuslt method attached to it -- so what you should instead is use -> syntax on it to dispatch to its parent (generic Operation) which has getResult(1) implemented
+    // again I did the same mistake as before. triton::ReduceOp (a specific subclass of Operation) for some reason does not have getReuslt method attached to it -- so what you should instead is use -> syntax on it to dispatch to its parent (generic Operation) which has getResult(1) implemented
     //    same for getOperand(): reduceOp.getOperand(0) -- ERRORS OUT.    reduceOp->getOperand(0) -- works!
     Value upstream = getUpstreamGrad(reduceOp->getResult(0), gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
@@ -1009,12 +987,12 @@ struct ConvertTritonToAutodiff
     if (isa<arith::AddFOp>(combiner)) {
 
       // Get the axis being reduced
-      // int32_t axis = reduceOp.getAxis(); 
+      // int32_t axis = reduceOp.getAxis();
 
       // Create a broadcast of the upstream gradient along the reduced axis
       // For reduce_sum, gradient is uniform broadcast of upstream gradient
       Value downstreamGrad = createBroadcastOrSplat(
-          upstream, // castToSameEncoding(upstream, input, builder);
+          upstream,
           input.getType(),
           currentNodeName,
           builder);
@@ -1055,7 +1033,7 @@ struct ConvertTritonToAutodiff
 
       // Create a broadcast of the upstream gradient
       Value upstreamBroadcast = createBroadcastOrSplat(
-          upstream,   // castToSameEncoding(upstream, input, builder)
+          upstream,
           input.getType(),
           currentNodeName,
           builder);
@@ -1243,7 +1221,7 @@ struct ConvertTritonToAutodiff
         auto *combinerBlock = builder.createBlock(&combineRegion);
 
         // Add arguments
-        // the block itself is typically created automatically because it has the OpTrait::SingleBlock trait, but the arguments aren't automatically added.
+        // the block itself seems to be created automatically because it has the OpTrait::SingleBlock trait, but the arguments aren't automatically added
         Type elemType = dyn_cast<ShapedType>(upstream.getType()).getElementType();
         combinerBlock->addArgument(elemType, broadcastOp.getLoc());
         combinerBlock->addArgument(elemType, broadcastOp.getLoc());
@@ -1265,8 +1243,6 @@ struct ConvertTritonToAutodiff
         // to preserve it as singleton dim (1) -- bc shape of grad needs to match shape of the original input
         //    iterating over op %150 = tt.broadcast %149 : tensor<16x1xf32> -> tensor<16x16xf32>
 
-        //question-now:
-        // setInsertionPointAfterLastUse(upstream, builder);
         // insertion point in the outer graph -- for the expand to be directly after reduceOp
         builder.setInsertionPointAfter(reduceOp);
 
@@ -1298,7 +1274,7 @@ struct ConvertTritonToAutodiff
       }
     }
 
-    // todo-now: grad accum logic needs to be outside of the reuce
+    // grad accum logic needs to be outside of the reduce
     // %108 = "tt.reduce"(%97) <{axis = 1 : i32}> ({
     // ^bb0(%arg27: f32, %arg28: f32):
     //   %188 = "arith.addf"(%arg27, %arg28) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
@@ -1502,7 +1478,6 @@ struct ConvertTritonToAutodiff
       // Update gradient for next reduction
       currentGrad = reduceOp->getResult(0);
 
-      // Mark all operations in the reduction as visited
       // No need to mark operations inside the block as they're contained in the reduce op
       markVisited(builder, visitedType::Inserted, reduceOp);
     }

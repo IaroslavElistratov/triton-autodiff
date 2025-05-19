@@ -109,7 +109,7 @@ print()
 
 
 
-# # NOTE: this works but unrolls for 128 times -- so try smaller shapes
+# # NOTE: this works but unrolls for loop too many times -- so try smaller shapes
 # # tri_out, ref_out = test_op(1, 1, 128, 64, True)
 
 # out, grad_q, grad_k, grad_v, grad_m = test_op(dout, q, k, v, causal, sm_scale)

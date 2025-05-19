@@ -102,13 +102,13 @@ class StashArgsCtx:
 # hook is called on the Python side with the same *args, **kwargs you pass when you launch the kernel
 # to keep track of the shapes of the tensors (seems by default this info is not accessible form the bwd hook alone)
 def shape_track_hook(*args, **kwargs):
-    # Clear previous shapes if needed
-    # fwd_shapes.clear()  # Uncomment if you want to reset on each call
+
+    # fwd_shapes.clear()
 
     ctx = StashArgsCtx._active_instance
     if ctx is not None:
         _kwargs = kwargs.copy()
-        # these kwarg are injected automatically
+        # these kwargs are injected automatically
         # launch‑options, not ordinary kernel parameters
         _kwargs.pop("debug", None)
         # todo-high: understand more
@@ -198,7 +198,7 @@ def create_bwd_kernel_inputs(bwd_kernel, idx_upstream, grid, non_stub_args_idxs,
     #   E.g. for flash aten kernel user fwd stub creates some additional tensor args and passes them to the kernel (e.g. M, OUT) and feeds them to the kernel but the user calls stub with "my_op(q, k, v)" -- so the autograd.Function.forward also only expects "q, k, v"
     #       but kernel actually sees (q, k, v, M, OUT, [other non-tensor arguments]) -- and your create_bwd_kernel_inputs creates grad tensors for all tensor arguments (to feed to bwd_kernel) and then returns all added grad_tensor arguments
     #       (which would also contain grad_M, grad_OUT) but because these M or OUT weren't passed to the autograd.Function.forwad, in autograd.Function.backward, it's incorrect to return grads wrt these values
-    #       so need so way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
+    #       so need a way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
 
     # use reverse to avoid shifting issues
     for i in reversed(non_stub_args_idxs):
@@ -256,7 +256,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         import inspect
 
         from triton.runtime.jit import (
-            KernelParam,                        # Triton’s helper for arg metadata
+            KernelParam,                        # helper for arg metadata
             create_function_from_signature,     # binder factory
         )
 
@@ -338,7 +338,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
         )
         assert isinstance(bwd_compiled_kernel, triton.compiler.compiler.CompiledKernel)
-        # question-now: seem automtically lowered to ttgir not ttir
+        # question-now: seems to automatically lowered to ttgir not ttir
         # if VERBOSE: print(bwd_compiled_kernel.asm.keys())
 
         # good, I can confirm this is my autodiff'ed IR
@@ -420,7 +420,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         #   5.3. add to bwd CompiledKernel into the cache
 
         del jit_fn.device_caches[device][0][key]
-        # peevishly I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
+        # previously I incorrectly stored at the same key -- so the grad fn is basically keyed on singatures to the fwd kernel
         # key on a new_key (containing added args) not on the old key, otherwise:
         #   when you pass 6 args to the bwd JITFunction on the next call, it checks the cache for CompiledKernel with signature which has 6 args -- didn't find one (bc here you're storing the bwd CompiledKernel under the *original key* which only has 3 args) and thus re-compiles
         #   JITFunction looking for key: [('*fp32','D'), … 6 items …]{'debug':False}

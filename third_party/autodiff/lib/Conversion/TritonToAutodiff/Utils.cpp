@@ -25,12 +25,12 @@ namespace mlir {
 namespace triton {
 
   NameLoc createNodeName(Operation *op, std::string prefix){
-    // Only use this approach for debugging purposes with -mlir-use-nameloc-as-prefix compilation flag
+    // Only use this approach with -mlir-use-nameloc-as-prefix compilation flag
 
     auto origLoc = op->getLoc();
     std::string name = prefix;
 
-    // Declare first so the lambda can call itself.
+    // Declare first so the lambda can call itself
     std::function<std::optional<StringRef>(Location)> firstNameIn;
 
     firstNameIn = [&firstNameIn](Location loc) -> std::optional<StringRef> {
@@ -40,7 +40,7 @@ namespace triton {
         return nl.getName().getValue();
 
       // For CallSiteLoc, check both callee and caller.
-      //CallSiteLoc records a call stack: it always contains exactly one “callee” location and one “caller” location (the caller may itself be another CallSiteLoc, giving a chain).
+      // CallSiteLoc records a call stack: it always contains exactly one “callee” location and one “caller” location (the caller may itself be another CallSiteLoc, giving a chain).
       if (auto cs = dyn_cast<CallSiteLoc>(loc)) {
         if (auto s = firstNameIn(cs.getCallee())) return s;
         if (auto s = firstNameIn(cs.getCaller())) return s;
@@ -140,8 +140,7 @@ namespace triton {
       //  so the ops that produce new grad (which is called grad here) must have been insierted AFTER the last use of existingGrad
       //  (so grad is below existingGrad)
 
-      // answer-now:
-      //  no, it's incorrect to assume that the "upstream" for the handler
+      // No, it's incorrect to assume that the "upstream" for the handler
       //  that produced the newGrad was the existingGrad -- it's not!
 
       // builder.setInsertionPointAfterValue(grad);
@@ -161,8 +160,7 @@ namespace triton {
       auto accumulatedGrad = builder.create<arith::AddFOp>(existingGrad.getLoc(), existingGrad, grad);
       markVisited(builder, visitedType::Inserted, accumulatedGrad);
 
-      // In standard map/dictionary data structures, when you assign a new value to an existing key, the old value is overwritten
-      // You don't need to "pop" the old value first - the assignment operation automatically replaces the existing value.
+      // don't need to pop the old value first -- the assignment automatically replaces the existing value
       gradMap[val] = accumulatedGrad;
     }
   }
@@ -221,8 +219,7 @@ namespace triton {
         return scalarValue;
 
       } else {
-        // can handle other cases in the future,
-        // thigh can't hink of any at the moment
+        // can handle other cases in the future, though can't think of any at the moment
         llvm::report_fatal_error("unreachable");
       }
 
@@ -320,8 +317,8 @@ namespace triton {
     k = BASE_PTR + f
     p = k - y
 
-    // ops that don't depend on REPLACED_PTR don't need to be copied
-    // ops that depend on it (directly or indirectly need to be copied)
+    // ops that don't depend on REPLACED_PTR -- don't need to be copied;
+    // ops that depend on it (directly or indirectly) -- need to be copied
 
     f = a * z
     k_copy = REPLACED_PTR + f
@@ -414,7 +411,7 @@ namespace triton {
           // NOTE: I don't think there can be other BlockArgs in the subtree leading to tt:load operand
           //  because I think triton does not support adding two pointers, thus there can only be one base (IOW blockArgument)
 
-          // ==> oh yeah, there can be other **NON-POINTER** arguments (e.g. above) -- this was just used as some offset into another BlockArg which was a pointer
+          // ==> oh yeah, there can be other **NON-POINTER** arguments (e.g. below) -- this was just used as some offset into another BlockArg which was a pointer
           //   - operand: <block argument> of type 'i32' at index: 6; basePtr: <block argument> of type '!tt.ptr<f16>' at index: 1LLVM ERROR: Expected only to find basePtr
           // signature of the associated tl code:
           //    def _layer_norm_fwd_fused(
@@ -510,8 +507,7 @@ namespace triton {
     tt.func public @_layer_norm_fwd_fused(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg5: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg6: i32 {tt.divisibility = 16 : i32}, %arg7: f32) attributes {noinline = false} {
     ^
 
-  answer-now:
-  ==> currently for block args, I just append newly added arguments AFTER all the original argumenets -- that only works when all
+  ==> previously for block args, I just append newly added arguments AFTER all the original argumenets -- that only works when all args are ptr args
 
     I think the problem was bc I inserted ptr args to right after original ptr arg (for the fn signature)
     (ptr_1, ADDED_ptr_1, ptr_2, ADDED_ptr_2, **int_1**, ptr_3, ADDED_ptr_3)
