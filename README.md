@@ -607,6 +607,8 @@ TBD: For now see examples at [third_party/autodiff/test](third_party/autodiff/te
 
 
 
+<!--
+
 ---
 
 # Upstream README
@@ -917,3 +919,4 @@ the [triton-dev-containers repository](https://github.com/redhat-et/triton-dev-c
 
 For detailed instructions on how to use the dev containers please see
 the [dev container user guide](https://github.com/redhat-et/triton-dev-containers/blob/main/.devcontainer/devcontainer.md)
+-->
