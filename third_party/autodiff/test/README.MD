@@ -23,7 +23,7 @@ python/build/cmake.linux-x86_64-cpython-3.11/bin/triton-opt --convert-triton-to-
 
 
 - dump reuslts on internal trtion optmizaitons
-    / TRITON_ALWAYS_COMPILE forces to ingore cache wt needing to manualy delete it (rm -rf /home/iaro/.triton/cache/)
+    / TRITON_ALWAYS_COMPILE forces to ingore cache wt needing to manualy delete it ($HOME/.triton/cache/)
   TRITON_ALWAYS_COMPILE=1 MLIR_ENABLE_DUMP=1 _rpy 2> ./third_party/autodiff/test/dump.log
 - dissable some otpimzaitons
   DISABLE_LLVM_OPT=1 DISABLE_PTXAS_OPT=1
