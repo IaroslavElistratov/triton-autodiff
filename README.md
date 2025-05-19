@@ -3,35 +3,31 @@
 A fork of [Triton](https://github.com/openai/triton) with an experimental automatic differentiation support.
 
 This work clones the main Triton repository, but intends to minimize
-divergences in the core. Most of the autodiff work is in [third_party/autodiff](backend/autodiff)
+divergences in the core. Most of the autodiff work is in [third_party/autodiff](third_party/autodiff)
 subdirectory.
 
-**NOTE: This project is at a very early stage -- APIs will change.**
+**NOTE: This project is in its early stages and under heavy development -- it is not stable, not feature complete, and APIs will change.**
 
 
 # Motivation
 
 This repo aims to take in an arbitrary triton kernel and return a callable that supports automatic differentiation out of the box.
 
-Given a triton kernel and its stub
+Given a triton kernel and its stub:
   - creates a corresponding backward_triton_kernel
   - then wraps this pair of forward / backward triton kernels into a torch.autograd.Function
 
-The project aims to support arbitrary triton kernels.
+Below I show how this repo helps to simplify your kernel definitions. The project aims to support arbitrary triton kernels.
 
-Below I show how this repo helps to simplify your kernel definitions.
 
-For more examples see [third_party/autodiff/test](backend/autodiff/test).
-
-# Example 1: Flash Attention v2
+# 🔥 Example 1: Flash Attention v2
 
 Let's look at flash attention v2 impl from [official triton tutorial](https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py).
 
-I'll show code snippets below. **For end to end example see: triton/third_party/autodiff/test/flash_attention_v2/run.py**
-
+I'll show code snippets below. **For end to end example see: [autodiff/test/flash_attention_v2/run.py](third_party/autodiff/test/flash_attention_v2/run.py)**
 
 <details>
-  <summary>Click to expand</summary>
+  <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
 
 ```diff
 
@@ -50,7 +46,7 @@ def _attn_fwd
   ...
 
 
-+ # No need to write backward kernel and backward stub by hand anymore!
++ # No need to write backward kernels and backward stubs by hand anymore!
 
 -@triton.jit
 -def _attn_bwd_preprocess(O, DO,  #
@@ -397,19 +393,16 @@ v.requires_grad = True
 
 
 
-# Example 2: LayerNorm
+# 🧪 Example 2: LayerNorm
 
 Let's look at layer-norm impl from [official triton tutorial](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py).
 
-I'll show code snippets below. **For end to end example see: triton/third_party/autodiff/test/layernorm/run.py**
-
+I'll show code snippets below. **For end to end example see: [autodiff/test/layernorm/run.py](third_party/autodiff/test/layernorm/run.py)**
 
 <details>
-  <summary>Click to expand</summary>
+  <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
 
 ```diff
-
-
 
 + # Define your forward kernel as usual:
 
@@ -419,7 +412,7 @@ I'll show code snippets below. **For end to end example see: triton/third_party/
 def _layer_norm_fwd_fused
 
 
-+ # No need to write backward kernel and backward stub by hand anymore!
++ # No need to write backward kernels and backward stubs by hand anymore!
 
 -@triton.jit
 -def _layer_norm_bwd_dx_fused(DX,  # pointer to the input gradient
@@ -600,13 +593,17 @@ bias.requires_grad = True
 </details>
 
 
-# Other examples
 
-**See 10 more examples in [third_party/autodiff/test](backend/autodiff/test)**.
+# 🔧 Other examples
 
+<!-- **See 10 more examples in [third_party/autodiff/test](backend/autodiff/test)**. -->
+For more examples see [third_party/autodiff/test](third_party/autodiff/test).
+
+
+<!-- 
 # How to use it?
 
-TBD: For now see examples at [third_party/autodiff/test](backend/autodiff/test).
+TBD: For now see examples at [third_party/autodiff/test](third_party/autodiff/test). -->
 
 
 
