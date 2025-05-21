@@ -19,7 +19,7 @@ from triton.runtime.jit import JITFunction
 VERBOSE = int(os.environ.get('VERBOSE', 0))
 assert VERBOSE in [0, 1, 2]
 
-dir = os.getenv("TRITON_AUTODIFF_ROOT")
+dir = os.getenv("TRITON_AUTODIFF_DIR")
 tool = f"{dir}/python/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
 

@@ -600,6 +600,25 @@ bias.requires_grad = True
 For more examples see [third_party/autodiff/test](third_party/autodiff/test).
 
 
+
+# Reproduce results
+
+```shell
+git clone --depth 1 https://github.com/IaroslavElistratov/triton-autodiff
+cd triton-autodiff
+
+// build
+pip install -e python
+
+// todo: cleanup
+export TRITON_AUTODIFF_DIR=$(pwd)
+ln -s $TRITON_AUTODIFF_DIR/third_party/autodiff/python/api.py $TRITON_AUTODIFF_DIR/python/triton/backends/autodiff.py
+
+cd third_party/autodiff/test
+python run_all_tests.py
+```
+
+
 <!-- 
 # How to use it?
 
