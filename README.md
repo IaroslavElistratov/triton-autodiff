@@ -619,6 +619,35 @@ python run_all_tests.py
 ```
 
 
+# Current limitations
+
+Working on the project full-time for less than a month so definitely many things to improve 🙂
+
+I haven't benchmarked yet but assume it’s slow at the moment at least because: (1) unrolls for-loops for easier differentiation; (2) conservatively assumes potential data races thus always adds atomics when store’ing gradients; (3) haven’t yet added algebraic simplification pass.
+
+My general thoughts:
+
+- Hopefully I can improve perf.
+
+- At least, there'd likely still be utility to having a slow-ish backward pass (research / experiments / small scale training).
+
+- At the very least (if none of the above), can transpile differentiated TTIRs back into python to yield source code of a working and numerically correct backward kernels, which can be used as a starting point to manually modify and optimize even more. But at the very least, this library aims to get you over the initial hump by providing a working and numerically accurate backward implementations.
+
+
+# Planned features / prototyping
+
+Adding not just auto-diff itself, but rather, adding cool things *on top of* it. For example:
+
+- algebraic simplification
+
+- automatic activation checkpointing
+
+- reducing atomics during backward
+
+- etc.
+
+
+
 <!-- 
 # How to use it?
 
