@@ -1,102 +1,296 @@
-// one block + sm_scale (float arg) is constexpr
-
-
-
+#loc = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0)
+#loc1 = loc(unknown)
+#loc24 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":190:63)
+#loc28 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":97:42)
+#loc37 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":101:25)
+#loc84 = loc("N_CTX"(#loc24))
+#loc88 = loc("m_ij_temp3"(#loc28))
+#loc97 = loc("l_ij_temp1"(#loc37))
+#loc126 = loc(callsite(#loc1 at #loc88))
+#loc135 = loc(callsite(#loc1 at #loc97))
+#loc150 = loc(callsite(#loc126 at #loc84))
+#loc153 = loc(callsite(#loc135 at #loc84))
 module {
-  tt.func public @_attn_fwd(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg5: i32 {tt.divisibility = 16 : i32}, %arg6: i32 {tt.divisibility = 16 : i32}, %arg7: i32 {tt.divisibility = 16 : i32}, %arg8: i32 {tt.divisibility = 16 : i32}, %arg9: i32 {tt.divisibility = 16 : i32}, %arg10: i32 {tt.divisibility = 16 : i32}, %arg11: i32 {tt.divisibility = 16 : i32}, %arg12: i32 {tt.divisibility = 16 : i32}, %arg13: i32 {tt.divisibility = 16 : i32}, %arg14: i32 {tt.divisibility = 16 : i32}, %arg15: i32 {tt.divisibility = 16 : i32}, %arg16: i32 {tt.divisibility = 16 : i32}, %arg17: i32 {tt.divisibility = 16 : i32}) attributes {noinline = false} {
-    %cst = arith.constant dense<0.000000e+00> : tensor<16x1xf32>
-    %cst_0 = arith.constant dense<0.72134751> : tensor<16x16xf32>
-    %cst_1 = arith.constant dense<0xFF800000> : tensor<16xf32>
-    %cst_2 = arith.constant dense<-1.000000e+06> : tensor<16x16xf32>
-    %cst_3 = arith.constant dense<0.000000e+00> : tensor<16x16xf32>
-    %0 = tt.get_program_id y : i32
-    %1 = arith.extsi %0 : i32 to i64
-    %2 = arith.extsi %arg5 : i32 to i64
-    %3 = arith.muli %1, %2 : i64
-    %4 = tt.addptr %arg0, %3 : !tt.ptr<f16>, i64
-    %5 = arith.extsi %arg7 : i32 to i64
-    %6 = tt.addptr %arg2, %3 : !tt.ptr<f16>, i64
-    %7 = arith.extsi %arg13 : i32 to i64
-    %8 = tt.addptr %arg1, %3 : !tt.ptr<f16>, i64
-    %9 = arith.extsi %arg10 : i32 to i64
-    %10 = tt.addptr %arg4, %3 : !tt.ptr<f16>, i64
-    %11 = arith.extsi %arg16 : i32 to i64
-    %12 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
-    %13 = tt.splat %4 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %14 = arith.extsi %12 : tensor<16xi32> to tensor<16xi64>
-    %15 = tt.expand_dims %14 {axis = 1 : i32} : tensor<16xi64> -> tensor<16x1xi64>
-    %16 = tt.splat %5 : i64 -> tensor<16x1xi64>
-    %17 = arith.muli %15, %16 : tensor<16x1xi64>
-    %18 = tt.broadcast %17 : tensor<16x1xi64> -> tensor<16x16xi64>
-    %19 = tt.expand_dims %14 {axis = 0 : i32} : tensor<16xi64> -> tensor<1x16xi64>
-    %20 = tt.broadcast %19 : tensor<1x16xi64> -> tensor<16x16xi64>
-    %21 = arith.addi %18, %20 : tensor<16x16xi64>
-    %22 = tt.addptr %13, %21 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %23 = tt.load %22 : tensor<16x16x!tt.ptr<f16>>
-    %24 = tt.splat %8 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %25 = tt.broadcast %15 : tensor<16x1xi64> -> tensor<16x16xi64>
-    %26 = tt.splat %9 : i64 -> tensor<1x16xi64>
-    %27 = arith.muli %19, %26 : tensor<1x16xi64>
-    %28 = tt.broadcast %27 : tensor<1x16xi64> -> tensor<16x16xi64>
-    %29 = arith.addi %25, %28 : tensor<16x16xi64>
-    %30 = tt.addptr %24, %29 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %31 = tt.load %30 : tensor<16x16x!tt.ptr<f16>>
-    %32 = tt.dot %23, %31, %cst_3, inputPrecision = tf32 : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
-    %33 = tt.expand_dims %12 {axis = 1 : i32} : tensor<16xi32> -> tensor<16x1xi32>
-    %34 = tt.expand_dims %12 {axis = 0 : i32} : tensor<16xi32> -> tensor<1x16xi32>
-    %35 = tt.broadcast %33 : tensor<16x1xi32> -> tensor<16x16xi32>
-    %36 = tt.broadcast %34 : tensor<1x16xi32> -> tensor<16x16xi32>
-    %37 = arith.cmpi sge, %35, %36 : tensor<16x16xi32>
-    %38 = arith.mulf %32, %cst_0 : tensor<16x16xf32>
-    %39 = arith.select %37, %cst_3, %cst_2 : tensor<16x16xi1>, tensor<16x16xf32>
-    %40 = arith.addf %38, %39 : tensor<16x16xf32>
-    %41 = "tt.reduce"(%40) <{axis = 1 : i32}> ({
-    ^bb0(%arg18: f32, %arg19: f32):
-      %78 = arith.maxnumf %arg18, %arg19 : f32
-      tt.reduce.return %78 : f32
-    }) : (tensor<16x16xf32>) -> tensor<16xf32>
-    %42 = tt.expand_dims %41 {axis = 1 : i32} : tensor<16xf32> -> tensor<16x1xf32>
-    %43 = tt.broadcast %42 : tensor<16x1xf32> -> tensor<16x16xf32>
-    %44 = arith.subf %40, %43 : tensor<16x16xf32>
-    %45 = math.exp2 %44 : tensor<16x16xf32>
-    %46 = "tt.reduce"(%45) <{axis = 1 : i32}> ({
-    ^bb0(%arg18: f32, %arg19: f32):
-      %78 = arith.addf %arg18, %arg19 : f32
-      tt.reduce.return %78 : f32
-    }) : (tensor<16x16xf32>) -> tensor<16xf32>
-    %47 = arith.subf %cst_1, %41 : tensor<16xf32>
-    %48 = math.exp2 %47 : tensor<16xf32>
-    %49 = arith.addf %48, %46 : tensor<16xf32>
-    %50 = tt.expand_dims %48 {axis = 1 : i32} : tensor<16xf32> -> tensor<16x1xf32>
-    %51 = arith.mulf %50, %cst : tensor<16x1xf32>
-    %52 = tt.broadcast %51 : tensor<16x1xf32> -> tensor<16x16xf32>
-    %53 = tt.splat %6 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %54 = tt.splat %7 : i64 -> tensor<16x1xi64>
-    %55 = arith.muli %15, %54 : tensor<16x1xi64>
-    %56 = tt.broadcast %55 : tensor<16x1xi64> -> tensor<16x16xi64>
-    %57 = arith.addi %56, %20 : tensor<16x16xi64>
-    %58 = tt.addptr %53, %57 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %59 = tt.load %58 : tensor<16x16x!tt.ptr<f16>>
-    %60 = arith.truncf %45 : tensor<16x16xf32> to tensor<16x16xf16>
-    %61 = tt.dot %60, %59, %52, inputPrecision = tf32 : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
-    %62 = math.log2 %49 : tensor<16xf32>
-    %63 = arith.addf %41, %62 : tensor<16xf32>
-    %64 = tt.expand_dims %49 {axis = 1 : i32} : tensor<16xf32> -> tensor<16x1xf32>
-    %65 = tt.broadcast %64 : tensor<16x1xf32> -> tensor<16x16xf32>
-    %66 = arith.divf %61, %65 : tensor<16x16xf32>
-    %67 = arith.muli %0, %arg17 : i32
-    %68 = tt.addptr %arg3, %67 : !tt.ptr<f32>, i32
-    %69 = tt.splat %68 : !tt.ptr<f32> -> tensor<16x!tt.ptr<f32>>
-    %70 = tt.addptr %69, %12 : tensor<16x!tt.ptr<f32>>, tensor<16xi32>
-    tt.store %70, %63 : tensor<16x!tt.ptr<f32>>
-    %71 = arith.truncf %66 : tensor<16x16xf32> to tensor<16x16xf16>
-    %72 = tt.splat %10 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %73 = tt.splat %11 : i64 -> tensor<16x1xi64>
-    %74 = arith.muli %15, %73 : tensor<16x1xi64>
-    %75 = tt.broadcast %74 : tensor<16x1xi64> -> tensor<16x16xi64>
-    %76 = arith.addi %75, %20 : tensor<16x16xi64>
-    %77 = tt.addptr %72, %76 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    tt.store %77, %71 : tensor<16x16x!tt.ptr<f16>>
-    tt.return
-  }
-}
+  tt.func public @_attn_fwd(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg4: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg5: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg6: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg7: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg8: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg9: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg10: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg11: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg12: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg13: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg14: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg15: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg16: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0)) attributes {noinline = false} {
+    %c16_i64 = arith.constant 16 : i64 loc(#loc1)
+    %c0_i64 = arith.constant 0 : i64 loc(#loc1)
+    %cst = arith.constant dense<0.72134751> : tensor<16x16xf32> loc(#loc1)
+    %cst_0 = arith.constant dense<0.72134751> : tensor<16xf32> loc(#loc1)
+    %cst_1 = arith.constant dense<1.000000e+00> : tensor<16xf32> loc(#loc1)
+    %cst_2 = arith.constant dense<0xFF800000> : tensor<16xf32> loc(#loc1)
+    %cst_3 = arith.constant dense<0.000000e+00> : tensor<16x16xf32> loc(#loc1)
+    %c32_i32 = arith.constant 32 : i32 loc(#loc1)
+    %c0_i32 = arith.constant 0 : i32 loc(#loc1)
+    %c16_i32 = arith.constant 16 : i32 loc(#loc1)
+    %start_m_temp1 = tt.get_program_id x : i32 loc(#loc62)
+    %off_hz_temp1 = tt.get_program_id y : i32 loc(#loc63)
+    %H = arith.divsi %off_hz_temp1, %arg16 : i32 loc(#loc64)
+    %H_4 = arith.remsi %off_hz_temp1, %arg16 : i32 loc(#loc65)
+    %int64 = arith.extsi %H : i32 to i64 loc(#loc66)
+    %stride_qz = arith.extsi %arg5 : i32 to i64 loc(#loc67)
+    %stride_qz_5 = arith.muli %int64, %stride_qz : i64 loc(#loc67)
+    %int64_6 = arith.extsi %H_4 : i32 to i64 loc(#loc68)
+    %stride_qh = arith.extsi %arg6 : i32 to i64 loc(#loc69)
+    %stride_qh_7 = arith.muli %int64_6, %stride_qh : i64 loc(#loc69)
+    %qvk_offset_temp3 = arith.addi %stride_qz_5, %stride_qh_7 : i64 loc(#loc70)
+    %qvk_offset = tt.addptr %arg0, %qvk_offset_temp3 : !tt.ptr<f16>, i64 loc(#loc71)
+    %BLOCK_M = arith.muli %start_m_temp1, %c16_i32 : i32 loc(#loc72)
+    %Q_block_ptr_temp13 = arith.extsi %arg7 : i32 to i64 loc(#loc73)
+    %Q_block_ptr_temp13_8 = arith.extsi %arg8 : i32 to i64 loc(#loc73)
+    %Q_block_ptr_temp13_9 = arith.extsi %BLOCK_M : i32 to i64 loc(#loc73)
+    %qvk_offset_10 = tt.addptr %arg2, %qvk_offset_temp3 : !tt.ptr<f16>, i64 loc(#loc74)
+    %V_block_ptr_temp13 = arith.extsi %arg11 : i32 to i64 loc(#loc75)
+    %V_block_ptr_temp13_11 = arith.extsi %arg12 : i32 to i64 loc(#loc75)
+    %qvk_offset_12 = tt.addptr %arg1, %qvk_offset_temp3 : !tt.ptr<f16>, i64 loc(#loc76)
+    %K_block_ptr_temp13 = arith.extsi %arg10 : i32 to i64 loc(#loc77)
+    %K_block_ptr_temp13_13 = arith.extsi %arg9 : i32 to i64 loc(#loc77)
+    %qvk_offset_14 = tt.addptr %arg4, %qvk_offset_temp3 : !tt.ptr<f16>, i64 loc(#loc78)
+    %O_block_ptr_temp13 = arith.extsi %arg13 : i32 to i64 loc(#loc79)
+    %O_block_ptr_temp13_15 = arith.extsi %arg14 : i32 to i64 loc(#loc79)
+    %BLOCK_M_16 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32> loc(#loc80)
+    %offs_m_temp2 = tt.splat %BLOCK_M : i32 -> tensor<16xi32> loc(#loc81)
+    %offs_m_temp2_17 = arith.addi %offs_m_temp2, %BLOCK_M_16 : tensor<16xi32> loc(#loc81)
+    %Q_block_ptr = tt.splat %qvk_offset : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc82)
+    %Q_block_ptr_18 = tt.splat %Q_block_ptr_temp13_9 : i64 -> tensor<16xi64> loc(#loc82)
+    %Q_block_ptr_19 = arith.extsi %BLOCK_M_16 : tensor<16xi32> to tensor<16xi64> loc(#loc82)
+    %Q_block_ptr_20 = arith.addi %Q_block_ptr_18, %Q_block_ptr_19 : tensor<16xi64> loc(#loc82)
+    %Q_block_ptr_21 = tt.expand_dims %Q_block_ptr_20 {axis = 1 : i32} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc82)
+    %Q_block_ptr_22 = tt.splat %Q_block_ptr_temp13 : i64 -> tensor<16x1xi64> loc(#loc82)
+    %Q_block_ptr_23 = arith.muli %Q_block_ptr_21, %Q_block_ptr_22 : tensor<16x1xi64> loc(#loc82)
+    %Q_block_ptr_24 = tt.broadcast %Q_block_ptr_23 : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc82)
+    %Q_block_ptr_25 = tt.expand_dims %Q_block_ptr_19 {axis = 0 : i32} : tensor<16xi64> -> tensor<1x16xi64> loc(#loc82)
+    %Q_block_ptr_26 = tt.splat %Q_block_ptr_temp13_8 : i64 -> tensor<1x16xi64> loc(#loc82)
+    %Q_block_ptr_27 = arith.muli %Q_block_ptr_25, %Q_block_ptr_26 : tensor<1x16xi64> loc(#loc82)
+    %Q_block_ptr_28 = tt.broadcast %Q_block_ptr_27 : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc82)
+    %Q_block_ptr_29 = arith.addi %Q_block_ptr_24, %Q_block_ptr_28 : tensor<16x16xi64> loc(#loc82)
+    %Q_block_ptr_30 = tt.addptr %Q_block_ptr, %Q_block_ptr_29 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc82)
+    %Q_block_ptr_31 = tt.load %Q_block_ptr_30 : tensor<16x16x!tt.ptr<f16>> loc(#loc82)
+    %BLOCK_N:5 = scf.for %arg17 = %c0_i32 to %c32_i32 step %c16_i32 iter_args(%arg18 = %cst_1, %arg19 = %cst_3, %arg20 = %cst_2, %arg21 = %c0_i64, %arg22 = %c0_i64) -> (tensor<16xf32>, tensor<16x16xf32>, tensor<16xf32>, i64, i64)  : i32 {
+      %K_block_ptr = tt.splat %qvk_offset_12 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc123)
+      %K_block_ptr_42 = tt.expand_dims %Q_block_ptr_19 {axis = 1 : i32} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc123)
+      %K_block_ptr_43 = tt.splat %K_block_ptr_temp13 : i64 -> tensor<16x1xi64> loc(#loc123)
+      %K_block_ptr_44 = arith.muli %K_block_ptr_42, %K_block_ptr_43 : tensor<16x1xi64> loc(#loc123)
+      %K_block_ptr_45 = tt.broadcast %K_block_ptr_44 : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc123)
+      %K_block_ptr_46 = tt.splat %arg22 : i64 -> tensor<16xi64> loc(#loc123)
+      %K_block_ptr_47 = arith.addi %K_block_ptr_46, %Q_block_ptr_19 : tensor<16xi64> loc(#loc123)
+      %K_block_ptr_48 = tt.expand_dims %K_block_ptr_47 {axis = 0 : i32} : tensor<16xi64> -> tensor<1x16xi64> loc(#loc123)
+      %K_block_ptr_49 = tt.splat %K_block_ptr_temp13_13 : i64 -> tensor<1x16xi64> loc(#loc123)
+      %K_block_ptr_50 = arith.muli %K_block_ptr_48, %K_block_ptr_49 : tensor<1x16xi64> loc(#loc123)
+      %K_block_ptr_51 = tt.broadcast %K_block_ptr_50 : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc123)
+      %K_block_ptr_52 = arith.addi %K_block_ptr_45, %K_block_ptr_51 : tensor<16x16xi64> loc(#loc123)
+      %K_block_ptr_53 = tt.addptr %K_block_ptr, %K_block_ptr_52 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc123)
+      %K_block_ptr_54 = tt.load %K_block_ptr_53 : tensor<16x16x!tt.ptr<f16>> loc(#loc123)
+      %k = tt.dot %Q_block_ptr_31, %K_block_ptr_54, %cst_3, inputPrecision = tf32 : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32> loc(#loc124)
+      %_elementwise_max = "tt.reduce"(%k) <{axis = 1 : i32}> ({
+      ^bb0(%m_ij_temp3: f32 loc(callsite(#loc126 at #loc84)), %m_ij_temp3_72: f32 loc(callsite(#loc126 at #loc84))):
+        %b = arith.maxnumf %m_ij_temp3, %m_ij_temp3_72 : f32 loc(#loc155)
+        tt.reduce.return %b : f32 loc(#loc149)
+      }) : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc149)
+      %qk_scale = arith.mulf %_elementwise_max, %cst_0 : tensor<16xf32> loc(#loc128)
+      %m_ij_temp1 = arith.maxnumf %arg20, %qk_scale : tensor<16xf32> loc(#loc129)
+      %qk_scale_55 = arith.mulf %k, %cst : tensor<16x16xf32> loc(#loc130)
+      %qk_temp3 = tt.expand_dims %m_ij_temp1 {axis = 1 : i32} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc131)
+      %qk_temp2 = tt.broadcast %qk_temp3 : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc132)
+      %qk_temp2_56 = arith.subf %qk_scale_55, %qk_temp2 : tensor<16x16xf32> loc(#loc132)
+      %qk = math.exp2 %qk_temp2_56 : tensor<16x16xf32> loc(#loc133)
+      %_sum_combine = "tt.reduce"(%qk) <{axis = 1 : i32}> ({
+      ^bb0(%l_ij_temp1: f32 loc(callsite(#loc135 at #loc84)), %l_ij_temp1_72: f32 loc(callsite(#loc135 at #loc84))):
+        %b = arith.addf %l_ij_temp1, %l_ij_temp1_72 : f32 loc(#loc156)
+        tt.reduce.return %b : f32 loc(#loc152)
+      }) : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc152)
+      %m_ij = arith.subf %arg20, %m_ij_temp1 : tensor<16xf32> loc(#loc137)
+      %alpha_temp1 = math.exp2 %m_ij : tensor<16xf32> loc(#loc138)
+      %alpha = arith.mulf %arg18, %alpha_temp1 : tensor<16xf32> loc(#loc139)
+      %l_ij = arith.addf %alpha, %_sum_combine : tensor<16xf32> loc(#loc140)
+      %acc_temp2_57 = tt.expand_dims %alpha_temp1 {axis = 1 : i32} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc141)
+      %acc_temp1_58 = tt.broadcast %acc_temp2_57 : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc142)
+      %acc_temp1_59 = arith.mulf %arg19, %acc_temp1_58 : tensor<16x16xf32> loc(#loc142)
+      %V_block_ptr = tt.splat %qvk_offset_10 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc143)
+      %V_block_ptr_60 = tt.splat %arg21 : i64 -> tensor<16xi64> loc(#loc143)
+      %V_block_ptr_61 = arith.addi %V_block_ptr_60, %Q_block_ptr_19 : tensor<16xi64> loc(#loc143)
+      %V_block_ptr_62 = tt.expand_dims %V_block_ptr_61 {axis = 1 : i32} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc143)
+      %V_block_ptr_63 = tt.splat %V_block_ptr_temp13 : i64 -> tensor<16x1xi64> loc(#loc143)
+      %V_block_ptr_64 = arith.muli %V_block_ptr_62, %V_block_ptr_63 : tensor<16x1xi64> loc(#loc143)
+      %V_block_ptr_65 = tt.broadcast %V_block_ptr_64 : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc143)
+      %V_block_ptr_66 = tt.splat %V_block_ptr_temp13_11 : i64 -> tensor<1x16xi64> loc(#loc143)
+      %V_block_ptr_67 = arith.muli %Q_block_ptr_25, %V_block_ptr_66 : tensor<1x16xi64> loc(#loc143)
+      %V_block_ptr_68 = tt.broadcast %V_block_ptr_67 : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc143)
+      %V_block_ptr_69 = arith.addi %V_block_ptr_65, %V_block_ptr_68 : tensor<16x16xi64> loc(#loc143)
+      %V_block_ptr_70 = tt.addptr %V_block_ptr, %V_block_ptr_69 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc143)
+      %V_block_ptr_71 = tt.load %V_block_ptr_70 : tensor<16x16x!tt.ptr<f16>> loc(#loc143)
+      %float16 = arith.truncf %qk : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc144)
+      %acc = tt.dot %float16, %V_block_ptr_71, %acc_temp1_59, inputPrecision = tf32 : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32> loc(#loc145)
+      %V_block_ptr_temp1 = arith.addi %arg21, %c16_i64 : i64 loc(#loc146)
+      %K_block_ptr_temp1 = arith.addi %arg22, %c16_i64 : i64 loc(#loc147)
+      scf.yield %l_ij, %acc, %m_ij_temp1, %V_block_ptr_temp1, %K_block_ptr_temp1 : tensor<16xf32>, tensor<16x16xf32>, tensor<16xf32>, i64, i64 loc(#loc148)
+    } {tt.divisibility_arg1 = dense<16> : tensor<1xi32>} loc(#loc122)
+    %l_i = math.log2 %BLOCK_N#0 : tensor<16xf32> loc(#loc111)
+    %m_i = arith.addf %BLOCK_N#2, %l_i : tensor<16xf32> loc(#loc112)
+    %acc_temp2 = tt.expand_dims %BLOCK_N#0 {axis = 1 : i32} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc113)
+    %acc_temp1 = tt.broadcast %acc_temp2 : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc114)
+    %acc_temp1_32 = arith.divf %BLOCK_N#1, %acc_temp1 : tensor<16x16xf32> loc(#loc114)
+    %N_CTX = arith.muli %off_hz_temp1, %c32_i32 : i32 loc(#loc115)
+    %m_ptrs_temp2 = tt.addptr %arg3, %N_CTX : !tt.ptr<f32>, i32 loc(#loc116)
+    %offs_m = tt.splat %m_ptrs_temp2 : !tt.ptr<f32> -> tensor<16x!tt.ptr<f32>> loc(#loc117)
+    %offs_m_33 = tt.addptr %offs_m, %offs_m_temp2_17 : tensor<16x!tt.ptr<f32>>, tensor<16xi32> loc(#loc117)
+    tt.store %offs_m_33, %m_i : tensor<16x!tt.ptr<f32>> loc(#loc118)
+    %element_ty = arith.truncf %acc_temp1_32 : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc119)
+    %O_block_ptr = tt.splat %qvk_offset_14 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc120)
+    %O_block_ptr_34 = tt.splat %O_block_ptr_temp13 : i64 -> tensor<16x1xi64> loc(#loc120)
+    %O_block_ptr_35 = arith.muli %Q_block_ptr_21, %O_block_ptr_34 : tensor<16x1xi64> loc(#loc120)
+    %O_block_ptr_36 = tt.broadcast %O_block_ptr_35 : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc120)
+    %O_block_ptr_37 = tt.splat %O_block_ptr_temp13_15 : i64 -> tensor<1x16xi64> loc(#loc120)
+    %O_block_ptr_38 = arith.muli %Q_block_ptr_25, %O_block_ptr_37 : tensor<1x16xi64> loc(#loc120)
+    %O_block_ptr_39 = tt.broadcast %O_block_ptr_38 : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc120)
+    %O_block_ptr_40 = arith.addi %O_block_ptr_36, %O_block_ptr_39 : tensor<16x16xi64> loc(#loc120)
+    %O_block_ptr_41 = tt.addptr %O_block_ptr, %O_block_ptr_40 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc120)
+    tt.store %O_block_ptr_41, %element_ty : tensor<16x16x!tt.ptr<f16>> loc(#loc120)
+    tt.return loc(#loc121)
+  } loc(#loc)
+} loc(#loc)
+#loc2 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":134:28)
+#loc3 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":135:27)
+#loc4 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":136:22)
+#loc5 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":137:21)
+#loc6 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:26)
+#loc7 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:38)
+#loc8 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:59)
+#loc9 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:71)
+#loc10 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:50)
+#loc11 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":142:17)
+#loc12 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":145:27)
+#loc13 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":147:8)
+#loc14 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":150:17)
+#loc15 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":155:8)
+#loc16 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":158:17)
+#loc17 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":163:8)
+#loc18 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":166:19)
+#loc19 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":171:8)
+#loc20 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":174:46)
+#loc21 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":174:33)
+#loc22 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":184:16)
+#loc23 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":91:33)
+#loc25 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":94:20)
+#loc26 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":95:23)
+#loc27 = loc("triton/python/triton/language/standard.py":184:40)
+#loc29 = loc("triton/python/triton/language/standard.py":163:27)
+#loc30 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":97:47)
+#loc31 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":97:31)
+#loc32 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":98:18)
+#loc33 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":98:34)
+#loc34 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":98:29)
+#loc35 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":100:25)
+#loc36 = loc("triton/python/triton/language/standard.py":286:36)
+#loc38 = loc("triton/python/triton/language/standard.py":256:15)
+#loc39 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":103:35)
+#loc40 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":103:29)
+#loc41 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":104:20)
+#loc42 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":104:28)
+#loc43 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":106:26)
+#loc44 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":106:20)
+#loc45 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":108:20)
+#loc46 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":109:17)
+#loc47 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":110:27)
+#loc48 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":113:46)
+#loc49 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":114:46)
+#loc50 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":114:8)
+#loc51 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":194:24)
+#loc52 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":194:11)
+#loc53 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":195:20)
+#loc54 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":195:16)
+#loc55 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:26)
+#loc56 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:17)
+#loc57 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:34)
+#loc58 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":198:21)
+#loc59 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":199:33)
+#loc60 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":199:13)
+#loc61 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:4)
+#loc62 = loc("start_m_temp1"(#loc2))
+#loc63 = loc("off_hz_temp1"(#loc3))
+#loc64 = loc("H"(#loc4))
+#loc65 = loc("H"(#loc5))
+#loc66 = loc("int64"(#loc6))
+#loc67 = loc("stride_qz"(#loc7))
+#loc68 = loc("int64"(#loc8))
+#loc69 = loc("stride_qh"(#loc9))
+#loc70 = loc("qvk_offset_temp3"(#loc10))
+#loc71 = loc("qvk_offset"(#loc11))
+#loc72 = loc("BLOCK_M"(#loc12))
+#loc73 = loc("Q_block_ptr_temp13"(#loc13))
+#loc74 = loc("qvk_offset"(#loc14))
+#loc75 = loc("V_block_ptr_temp13"(#loc15))
+#loc76 = loc("qvk_offset"(#loc16))
+#loc77 = loc("K_block_ptr_temp13"(#loc17))
+#loc78 = loc("qvk_offset"(#loc18))
+#loc79 = loc("O_block_ptr_temp13"(#loc19))
+#loc80 = loc("BLOCK_M"(#loc20))
+#loc81 = loc("offs_m_temp2"(#loc21))
+#loc82 = loc("Q_block_ptr"(#loc22))
+#loc83 = loc("BLOCK_N"(#loc23))
+#loc85 = loc("K_block_ptr"(#loc25))
+#loc86 = loc("k"(#loc26))
+#loc87 = loc("_elementwise_max"(#loc27))
+#loc89 = loc("b"(#loc29))
+#loc90 = loc("qk_scale"(#loc30))
+#loc91 = loc("m_ij_temp1"(#loc31))
+#loc92 = loc("qk_scale"(#loc32))
+#loc93 = loc("qk_temp3"(#loc33))
+#loc94 = loc("qk_temp2"(#loc34))
+#loc95 = loc("qk"(#loc35))
+#loc96 = loc("_sum_combine"(#loc36))
+#loc98 = loc("b"(#loc38))
+#loc99 = loc("m_ij"(#loc39))
+#loc100 = loc("alpha_temp1"(#loc40))
+#loc101 = loc("alpha"(#loc41))
+#loc102 = loc("l_ij"(#loc42))
+#loc103 = loc("acc_temp2"(#loc43))
+#loc104 = loc("acc_temp1"(#loc44))
+#loc105 = loc("V_block_ptr"(#loc45))
+#loc106 = loc("float16"(#loc46))
+#loc107 = loc("acc"(#loc47))
+#loc108 = loc("V_block_ptr_temp1"(#loc48))
+#loc109 = loc("K_block_ptr_temp1"(#loc49))
+#loc110 = loc("K_block_ptr"(#loc50))
+#loc111 = loc("l_i"(#loc51))
+#loc112 = loc("m_i"(#loc52))
+#loc113 = loc("acc_temp2"(#loc53))
+#loc114 = loc("acc_temp1"(#loc54))
+#loc115 = loc("N_CTX"(#loc55))
+#loc116 = loc("m_ptrs_temp2"(#loc56))
+#loc117 = loc("offs_m"(#loc57))
+#loc118 = loc("m_i"(#loc58))
+#loc119 = loc("element_ty"(#loc59))
+#loc120 = loc("O_block_ptr"(#loc60))
+#loc121 = loc("m_ptrs"(#loc61))
+#loc122 = loc(callsite(#loc83 at #loc84))
+#loc123 = loc(callsite(#loc85 at #loc84))
+#loc124 = loc(callsite(#loc86 at #loc84))
+#loc125 = loc(callsite(#loc87 at #loc88))
+#loc127 = loc(callsite(#loc89 at #loc87))
+#loc128 = loc(callsite(#loc90 at #loc84))
+#loc129 = loc(callsite(#loc91 at #loc84))
+#loc130 = loc(callsite(#loc92 at #loc84))
+#loc131 = loc(callsite(#loc93 at #loc84))
+#loc132 = loc(callsite(#loc94 at #loc84))
+#loc133 = loc(callsite(#loc95 at #loc84))
+#loc134 = loc(callsite(#loc96 at #loc97))
+#loc136 = loc(callsite(#loc98 at #loc96))
+#loc137 = loc(callsite(#loc99 at #loc84))
+#loc138 = loc(callsite(#loc100 at #loc84))
+#loc139 = loc(callsite(#loc101 at #loc84))
+#loc140 = loc(callsite(#loc102 at #loc84))
+#loc141 = loc(callsite(#loc103 at #loc84))
+#loc142 = loc(callsite(#loc104 at #loc84))
+#loc143 = loc(callsite(#loc105 at #loc84))
+#loc144 = loc(callsite(#loc106 at #loc84))
+#loc145 = loc(callsite(#loc107 at #loc84))
+#loc146 = loc(callsite(#loc108 at #loc84))
+#loc147 = loc(callsite(#loc109 at #loc84))
+#loc148 = loc(callsite(#loc110 at #loc84))
+#loc149 = loc(callsite(#loc125 at #loc84))
+#loc151 = loc(callsite(#loc127 at #loc88))
+#loc152 = loc(callsite(#loc134 at #loc84))
+#loc154 = loc(callsite(#loc136 at #loc97))
+#loc155 = loc(callsite(#loc151 at #loc84))
+#loc156 = loc(callsite(#loc154 at #loc84))
+

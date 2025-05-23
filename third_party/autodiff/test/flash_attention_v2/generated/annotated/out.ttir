@@ -1,216 +1,647 @@
+#loc = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0)
+#loc21 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":190:63)
+#loc27 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":97:42)
+#loc28 = loc(unknown)
+#loc33 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":98:29)
+#loc43 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":106:20)
+#loc47 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":101:25)
+#loc51 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":195:16)
+#loc80 = loc("N_CTX"(#loc21))
+#loc86 = loc("m_ij_temp3"(#loc27))
+#loc91 = loc("qk_temp2"(#loc33))
+#loc101 = loc("acc_temp1"(#loc43))
+#loc105 = loc("l_ij_temp1"(#loc47))
+#loc109 = loc("acc_temp1"(#loc51))
+#loc143 = loc(callsite(#loc28 at #loc86))
+#loc148 = loc(callsite(#loc91 at #loc80))
+#loc158 = loc(callsite(#loc101 at #loc80))
+#loc162 = loc(callsite(#loc28 at #loc105))
+#loc187 = loc(callsite(#loc143 at #loc80))
+#loc204 = loc(callsite(#loc162 at #loc80))
 module {
-  tt.func public @_attn_fwd(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg5: i32 {tt.divisibility = 16 : i32}, %arg6: i32 {tt.divisibility = 16 : i32}, %arg7: i32 {tt.divisibility = 16 : i32}, %arg8: i32 {tt.divisibility = 16 : i32}, %arg9: i32 {tt.divisibility = 16 : i32}, %arg10: i32 {tt.divisibility = 16 : i32}, %arg11: i32 {tt.divisibility = 16 : i32}, %arg12: i32 {tt.divisibility = 16 : i32}, %arg13: i32 {tt.divisibility = 16 : i32}, %arg14: i32 {tt.divisibility = 16 : i32}, %arg15: i32 {tt.divisibility = 16 : i32}, %arg16: i32 {tt.divisibility = 16 : i32}, %arg17: i32 {tt.divisibility = 16 : i32}, %arg18: !tt.ptr<f16>, %arg19: !tt.ptr<f16>, %arg20: !tt.ptr<f16>, %arg21: !tt.ptr<f32>, %arg22: !tt.ptr<f16>) attributes {noinline = false} {
-    %0 = tt.get_program_id y {autogradVisited = true, isCloned = true} : i32
-    %1 = arith.extsi %0 {autogradVisited = true, isCloned = true} : i32 to i64
-    %2 = arith.extsi %arg5 {autogradVisited = true, isCloned = true} : i32 to i64
-    %3 = arith.muli %1, %2 {autogradVisited = true, isCloned = true} : i64
-    %4 = tt.addptr %arg4, %3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64
-    %5 = tt.splat %4 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %6 = tt.make_range {autogradVisited = true, end = 16 : i32, isCloned = true, start = 0 : i32} : tensor<16xi32>
-    %7 = arith.extsi %6 {autogradVisited = true, isCloned = true} : tensor<16xi32> to tensor<16xi64>
-    %8 = tt.expand_dims %7 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi64> -> tensor<16x1xi64>
-    %9 = arith.extsi %arg16 {autogradVisited = true, isCloned = true} : i32 to i64
-    %10 = tt.splat %9 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64>
-    %11 = arith.muli %8, %10 {autogradVisited = true, isCloned = true} : tensor<16x1xi64>
-    %12 = tt.broadcast %11 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64>
-    %13 = tt.expand_dims %7 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi64> -> tensor<1x16xi64>
-    %14 = tt.broadcast %13 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64>
-    %15 = arith.addi %12, %14 {autogradVisited = true, isCloned = true} : tensor<16x16xi64>
-    %16 = tt.addptr %5, %15 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %17 = tt.addptr %arg0, %3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64
-    %18 = tt.splat %17 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %19 = arith.extsi %arg7 {autogradVisited = true, isCloned = true} : i32 to i64
-    %20 = tt.splat %19 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64>
-    %21 = arith.muli %8, %20 {autogradVisited = true, isCloned = true} : tensor<16x1xi64>
-    %22 = tt.broadcast %21 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64>
-    %23 = arith.addi %22, %14 {autogradVisited = true, isCloned = true} : tensor<16x16xi64>
-    %24 = tt.addptr %18, %23 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %25 = tt.load %24 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
-    %26 = tt.addptr %arg1, %3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64
-    %27 = tt.splat %26 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %28 = tt.broadcast %8 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64>
-    %29 = arith.extsi %arg10 {autogradVisited = true, isCloned = true} : i32 to i64
-    %30 = tt.splat %29 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64>
-    %31 = arith.muli %13, %30 {autogradVisited = true, isCloned = true} : tensor<1x16xi64>
-    %32 = tt.broadcast %31 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64>
-    %33 = arith.addi %28, %32 {autogradVisited = true, isCloned = true} : tensor<16x16xi64>
-    %34 = tt.addptr %27, %33 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %35 = tt.load %34 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
-    %cst = arith.constant {autogradVisited = true, isCloned = true} dense<0.000000e+00> : tensor<16x16xf32>
-    %36 = tt.dot %25, %35, %cst, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
-    %cst_0 = arith.constant {autogradVisited = true, isCloned = true} dense<0.72134751> : tensor<16x16xf32>
-    %37 = arith.mulf %36, %cst_0 {autogradVisited = true, isCloned = true} : tensor<16x16xf32>
-    %38 = tt.expand_dims %6 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi32> -> tensor<16x1xi32>
-    %39 = tt.broadcast %38 {autogradVisited = true, isCloned = true} : tensor<16x1xi32> -> tensor<16x16xi32>
-    %40 = tt.expand_dims %6 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi32> -> tensor<1x16xi32>
-    %41 = tt.broadcast %40 {autogradVisited = true, isCloned = true} : tensor<1x16xi32> -> tensor<16x16xi32>
-    %42 = arith.cmpi sge, %39, %41 {autogradVisited = true, isCloned = true} : tensor<16x16xi32>
-    %cst_1 = arith.constant {autogradVisited = true, isCloned = true} dense<-1.000000e+06> : tensor<16x16xf32>
-    %43 = arith.select %42, %cst, %cst_1 {autogradVisited = true, isCloned = true} : tensor<16x16xi1>, tensor<16x16xf32>
-    %44 = arith.addf %37, %43 {autogradVisited = true, isCloned = true} : tensor<16x16xf32>
-    %45 = "tt.reduce"(%44) <{axis = 1 : i32}> ({
-    ^bb0(%arg23: f32, %arg24: f32):
-      %165 = arith.maxnumf %arg23, %arg24 : f32
-      tt.reduce.return %165 : f32
-    }) {autogradVisited = true, isCloned = true} : (tensor<16x16xf32>) -> tensor<16xf32>
-    %46 = tt.expand_dims %45 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %47 = tt.broadcast %46 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32>
-    %48 = arith.subf %44, %47 {autogradVisited = true, isCloned = true} : tensor<16x16xf32>
-    %49 = math.exp2 %48 {autogradVisited = true, isCloned = true} : tensor<16x16xf32>
-    %50 = arith.truncf %49 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> to tensor<16x16xf16>
-    %51 = tt.addptr %arg2, %3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64
-    %52 = tt.splat %51 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %53 = arith.extsi %arg13 {autogradVisited = true, isCloned = true} : i32 to i64
-    %54 = tt.splat %53 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64>
-    %55 = arith.muli %8, %54 {autogradVisited = true, isCloned = true} : tensor<16x1xi64>
-    %56 = tt.broadcast %55 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64>
-    %57 = arith.addi %56, %14 {autogradVisited = true, isCloned = true} : tensor<16x16xi64>
-    %58 = tt.addptr %52, %57 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %59 = tt.load %58 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
-    %cst_2 = arith.constant {autogradVisited = true, isCloned = true} dense<0xFF800000> : tensor<16xf32>
-    %60 = arith.subf %cst_2, %45 {autogradVisited = true, isCloned = true} : tensor<16xf32>
-    %61 = math.exp2 %60 {autogradVisited = true, isCloned = true} : tensor<16xf32>
-    %62 = tt.expand_dims %61 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %cst_3 = arith.constant {autogradVisited = true, isCloned = true} dense<0.000000e+00> : tensor<16x1xf32>
-    %63 = arith.mulf %62, %cst_3 {autogradVisited = true, isCloned = true} : tensor<16x1xf32>
-    %64 = tt.broadcast %63 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32>
-    %65 = tt.dot %50, %59, %64, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
-    %66 = "tt.reduce"(%49) <{axis = 1 : i32}> ({
-    ^bb0(%arg23: f32, %arg24: f32):
-      %165 = arith.addf %arg23, %arg24 : f32
-      tt.reduce.return %165 : f32
-    }) {autogradVisited = true, isCloned = true} : (tensor<16x16xf32>) -> tensor<16xf32>
-    %67 = arith.addf %61, %66 {autogradVisited = true, isCloned = true} : tensor<16xf32>
-    %68 = tt.expand_dims %67 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %69 = tt.broadcast %68 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32>
-    %70 = arith.divf %65, %69 {autogradVisited = true, isCloned = true} : tensor<16x16xf32>
-    %71 = arith.truncf %70 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> to tensor<16x16xf16>
-    tt.store %16, %71 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>
-    %72 = arith.muli %0, %arg17 {autogradVisited = true, isCloned = true} : i32
-    %73 = tt.addptr %arg3, %72 {autogradVisited = true, isCloned = true} : !tt.ptr<f32>, i32
-    %74 = tt.splat %73 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<16x!tt.ptr<f32>>
-    %75 = tt.addptr %74, %6 {autogradVisited = true, isCloned = true} : tensor<16x!tt.ptr<f32>>, tensor<16xi32>
-    %76 = math.log2 %67 {autogradVisited = true, isCloned = true} : tensor<16xf32>
-    %77 = arith.addf %45, %76 {autogradVisited = true, isCloned = true} : tensor<16xf32>
-    tt.store %75, %77 {autogradVisited = true, isCloned = true} : tensor<16x!tt.ptr<f32>>
-    %78 = tt.addptr %arg21, %72 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32>, i32
-    %79 = tt.splat %78 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<16x!tt.ptr<f32>>
-    %80 = tt.addptr %79, %6 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x!tt.ptr<f32>>, tensor<16xi32>
-    %81 = tt.load %80 {autogradVisited = true, isInserted = true} : tensor<16x!tt.ptr<f32>>
-    %cst_4 = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32
-    %82 = tt.splat %cst_4 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32>
-    %83 = arith.mulf %67, %82 {autogradVisited = true, isInserted = true} : tensor<16xf32>
-    %cst_5 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32
-    %84 = tt.splat %cst_5 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32>
-    %85 = arith.divf %84, %83 {autogradVisited = true, isInserted = true} : tensor<16xf32>
-    %86 = arith.mulf %85, %81 {autogradVisited = true, isInserted = true} : tensor<16xf32>
-    %87 = tt.expand_dims %86 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %88 = tt.broadcast %87 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32>
-    %cst_6 = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32
-    %89 = tt.splat %cst_6 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %90 = arith.mulf %89, %49 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %91 = arith.mulf %90, %88 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %cst_7 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32
-    %92 = tt.splat %cst_7 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %93 = arith.mulf %91, %92 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %94 = "tt.reduce"(%93) <{axis = 1 : i32}> ({
-    ^bb0(%arg23: f32, %arg24: f32):
-      %165 = arith.addf %arg23, %arg24 : f32
-      tt.reduce.return %165 : f32
-    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32>
-    %95 = tt.expand_dims %94 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %cst_8 = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32
-    %96 = tt.splat %cst_8 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32>
-    %97 = arith.mulf %96, %61 {autogradVisited = true, isInserted = true} : tensor<16xf32>
-    %98 = arith.mulf %97, %86 {autogradVisited = true, isInserted = true} : tensor<16xf32>
-    %cst_9 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32
-    %99 = tt.splat %cst_9 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32>
-    %100 = arith.mulf %98, %99 {autogradVisited = true, isInserted = true} : tensor<16xf32>
-    %101 = tt.expand_dims %45 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %102 = tt.broadcast %101 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32>
-    %103 = arith.cmpf oeq, %44, %102 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %cst_10 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32
-    %104 = tt.splat %cst_10 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %cst_11 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32
-    %105 = tt.splat %cst_11 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %106 = arith.select %103, %104, %105 {autogradVisited = true, isInserted = true} : tensor<16x16xi1>, tensor<16x16xf32>
-    %107 = tt.expand_dims %100 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %108 = tt.broadcast %107 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32>
-    %109 = arith.mulf %106, %108 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %110 = arith.mulf %36, %109 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %111 = arith.mulf %cst_0, %109 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %112 = arith.truncf %111 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> to tensor<16x16xf16>
-    %113 = tt.trans %35 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
-    %cst_12 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
-    %114 = tt.splat %cst_12 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
-    %115 = tt.dot %112, %113, %114, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
-    %116 = tt.trans %25 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
-    %cst_13 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
-    %117 = tt.splat %cst_13 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
-    %118 = tt.dot %116, %112, %117, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
-    %cst_14 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32
-    %119 = tt.splat %cst_14 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %120 = arith.select %42, %109, %119 {autogradVisited = true, isInserted = true} : tensor<16x16xi1>, tensor<16x16xf32>
-    %true = arith.constant {autogradVisited = true, isInserted = true} true
-    %121 = tt.splat %true {autogradVisited = true, isInserted = true} : i1 -> tensor<16x16xi1>
-    %false = arith.constant {autogradVisited = true, isInserted = true} false
-    %122 = tt.splat %false {autogradVisited = true, isInserted = true} : i1 -> tensor<16x16xi1>
-    %123 = arith.select %42, %122, %121 {autogradVisited = true, isInserted = true} : tensor<16x16xi1>, tensor<16x16xi1>
-    %cst_15 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32
-    %124 = tt.splat %cst_15 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %125 = arith.select %123, %109, %124 {autogradVisited = true, isInserted = true} : tensor<16x16xi1>, tensor<16x16xf32>
-    %126 = tt.addptr %arg22, %3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64
-    %127 = tt.splat %126 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %128 = tt.addptr %127, %15 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %129 = tt.load %128 {autogradVisited = true, isInserted = true} : tensor<16x16x!tt.ptr<f16>>
-    %130 = arith.extf %129 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> to tensor<16x16xf32>
-    %cst_16 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32
-    %131 = tt.splat %cst_16 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %132 = arith.divf %131, %69 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %133 = arith.mulf %132, %130 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %134 = arith.truncf %133 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> to tensor<16x16xf16>
-    %135 = tt.trans %59 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
-    %cst_17 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
-    %136 = tt.splat %cst_17 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
-    %137 = tt.dot %134, %135, %136, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
-    %138 = arith.extf %137 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> to tensor<16x16xf32>
-    %139 = tt.trans %50 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16>
-    %cst_18 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16
-    %140 = tt.splat %cst_18 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16>
-    %141 = tt.dot %139, %134, %140, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16>
-    %142 = "tt.reduce"(%133) <{axis = 1 : i32}> ({
-    ^bb0(%arg23: f32, %arg24: f32):
-      %165 = arith.addf %arg23, %arg24 : f32
-      tt.reduce.return %165 : f32
-    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32>
-    %143 = tt.expand_dims %142 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %144 = arith.mulf %62, %143 {autogradVisited = true, isInserted = true} : tensor<16x1xf32>
-    %145 = arith.mulf %cst_3, %143 {autogradVisited = true, isInserted = true} : tensor<16x1xf32>
-    %146 = arith.mulf %69, %69 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %147 = arith.divf %65, %146 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %cst_19 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32
-    %148 = tt.splat %cst_19 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32>
-    %149 = arith.mulf %148, %147 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %150 = arith.mulf %149, %130 {autogradVisited = true, isInserted = true} : tensor<16x16xf32>
-    %151 = "tt.reduce"(%150) <{axis = 1 : i32}> ({
-    ^bb0(%arg23: f32, %arg24: f32):
-      %165 = arith.addf %arg23, %arg24 : f32
-      tt.reduce.return %165 : f32
-    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32>
-    %152 = tt.expand_dims %151 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32>
-    %153 = tt.addptr %arg19, %3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64
-    %154 = tt.splat %153 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %155 = tt.addptr %154, %33 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %156 = tt.atomic_rmw fadd, acq_rel, gpu, %155, %118 {autogradVisited = true, gradOf = "%109 = tt.load %108 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
-    %157 = tt.addptr %arg20, %3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64
-    %158 = tt.splat %157 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %159 = tt.addptr %158, %57 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %160 = tt.atomic_rmw fadd, acq_rel, gpu, %159, %141 {autogradVisited = true, gradOf = "%137 = tt.load %136 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
-    %161 = tt.addptr %arg18, %3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64
-    %162 = tt.splat %161 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
-    %163 = tt.addptr %162, %23 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64>
-    %164 = tt.atomic_rmw fadd, acq_rel, gpu, %163, %115 {autogradVisited = true, gradOf = "%101 = tt.load %100 : tensor<16x16x!tt.ptr<f16>>", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16>
-    tt.return
-  }
-}
+  tt.func public @_attn_fwd(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg4: !tt.ptr<f16> {tt.divisibility = 16 : i32} loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg5: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg6: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg7: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg8: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg9: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg10: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg11: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg12: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg13: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg14: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg15: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg16: i32 loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg17: !tt.ptr<f16> loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg18: !tt.ptr<f16> loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg19: !tt.ptr<f16> loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg20: !tt.ptr<f32> loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0), %arg21: !tt.ptr<f16> loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":120:0)) attributes {noinline = false} {
+    %fwd_off_hz_temp1 = tt.get_program_id y {autogradVisited = true, isCloned = true} : i32 loc(#loc119)
+    %fwd_H = arith.divsi %fwd_off_hz_temp1, %arg16 {autogradVisited = true, isCloned = true} : i32 loc(#loc120)
+    %fwd_int64 = arith.extsi %fwd_H {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc121)
+    %fwd_stride_qz = arith.extsi %arg5 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc122)
+    %fwd_stride_qz_0 = arith.muli %fwd_int64, %fwd_stride_qz {autogradVisited = true, isCloned = true} : i64 loc(#loc122)
+    %fwd_H_1 = arith.remsi %fwd_off_hz_temp1, %arg16 {autogradVisited = true, isCloned = true} : i32 loc(#loc123)
+    %fwd_int64_2 = arith.extsi %fwd_H_1 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc124)
+    %fwd_stride_qh = arith.extsi %arg6 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc125)
+    %fwd_stride_qh_3 = arith.muli %fwd_int64_2, %fwd_stride_qh {autogradVisited = true, isCloned = true} : i64 loc(#loc125)
+    %fwd_qvk_offset_temp3 = arith.addi %fwd_stride_qz_0, %fwd_stride_qh_3 {autogradVisited = true, isCloned = true} : i64 loc(#loc126)
+    %fwd_qvk_offset = tt.addptr %arg4, %fwd_qvk_offset_temp3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64 loc(#loc127)
+    %fwd_O_block_ptr = tt.splat %fwd_qvk_offset {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc128)
+    %fwd_start_m_temp1 = tt.get_program_id x {autogradVisited = true, isCloned = true} : i32 loc(#loc129)
+    %fwd_unnamed = arith.constant {autogradVisited = true, isCloned = true} 16 : i32 loc(#loc12)
+    %fwd_BLOCK_M = arith.muli %fwd_start_m_temp1, %fwd_unnamed {autogradVisited = true, isCloned = true} : i32 loc(#loc130)
+    %fwd_Q_block_ptr_temp13 = arith.extsi %fwd_BLOCK_M {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc131)
+    %fwd_Q_block_ptr = tt.splat %fwd_Q_block_ptr_temp13 {autogradVisited = true, isCloned = true} : i64 -> tensor<16xi64> loc(#loc132)
+    %fwd_BLOCK_M_4 = tt.make_range {autogradVisited = true, end = 16 : i32, isCloned = true, start = 0 : i32} : tensor<16xi32> loc(#loc133)
+    %fwd_Q_block_ptr_5 = arith.extsi %fwd_BLOCK_M_4 {autogradVisited = true, isCloned = true} : tensor<16xi32> to tensor<16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_6 = arith.addi %fwd_Q_block_ptr, %fwd_Q_block_ptr_5 {autogradVisited = true, isCloned = true} : tensor<16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_7 = tt.expand_dims %fwd_Q_block_ptr_6 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc132)
+    %fwd_O_block_ptr_temp13 = arith.extsi %arg13 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc134)
+    %fwd_O_block_ptr_8 = tt.splat %fwd_O_block_ptr_temp13 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64> loc(#loc128)
+    %fwd_O_block_ptr_9 = arith.muli %fwd_Q_block_ptr_7, %fwd_O_block_ptr_8 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> loc(#loc128)
+    %fwd_O_block_ptr_10 = tt.broadcast %fwd_O_block_ptr_9 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc128)
+    %fwd_Q_block_ptr_11 = tt.expand_dims %fwd_Q_block_ptr_5 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi64> -> tensor<1x16xi64> loc(#loc132)
+    %fwd_O_block_ptr_temp13_12 = arith.extsi %arg14 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc134)
+    %fwd_O_block_ptr_13 = tt.splat %fwd_O_block_ptr_temp13_12 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64> loc(#loc128)
+    %fwd_O_block_ptr_14 = arith.muli %fwd_Q_block_ptr_11, %fwd_O_block_ptr_13 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> loc(#loc128)
+    %fwd_O_block_ptr_15 = tt.broadcast %fwd_O_block_ptr_14 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc128)
+    %fwd_O_block_ptr_16 = arith.addi %fwd_O_block_ptr_10, %fwd_O_block_ptr_15 {autogradVisited = true, isCloned = true} : tensor<16x16xi64> loc(#loc128)
+    %fwd_O_block_ptr_17 = tt.addptr %fwd_O_block_ptr, %fwd_O_block_ptr_16 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc128)
+    %fwd_qvk_offset_18 = tt.addptr %arg0, %fwd_qvk_offset_temp3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64 loc(#loc135)
+    %fwd_Q_block_ptr_19 = tt.splat %fwd_qvk_offset_18 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc132)
+    %fwd_Q_block_ptr_temp13_20 = arith.extsi %arg7 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc131)
+    %fwd_Q_block_ptr_21 = tt.splat %fwd_Q_block_ptr_temp13_20 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64> loc(#loc132)
+    %fwd_Q_block_ptr_22 = arith.muli %fwd_Q_block_ptr_7, %fwd_Q_block_ptr_21 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> loc(#loc132)
+    %fwd_Q_block_ptr_23 = tt.broadcast %fwd_Q_block_ptr_22 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_temp13_24 = arith.extsi %arg8 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc131)
+    %fwd_Q_block_ptr_25 = tt.splat %fwd_Q_block_ptr_temp13_24 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_26 = arith.muli %fwd_Q_block_ptr_11, %fwd_Q_block_ptr_25 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_27 = tt.broadcast %fwd_Q_block_ptr_26 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_28 = arith.addi %fwd_Q_block_ptr_23, %fwd_Q_block_ptr_27 {autogradVisited = true, isCloned = true} : tensor<16x16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_29 = tt.addptr %fwd_Q_block_ptr_19, %fwd_Q_block_ptr_28 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc132)
+    %fwd_Q_block_ptr_30 = tt.load %fwd_Q_block_ptr_29 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc132)
+    %fwd_qvk_offset_31 = tt.addptr %arg1, %fwd_qvk_offset_temp3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64 loc(#loc136)
+    %fwd_K_block_ptr = tt.splat %fwd_qvk_offset_31 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc182)
+    %fwd_K_block_ptr_32 = tt.expand_dims %fwd_Q_block_ptr_5 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc182)
+    %fwd_K_block_ptr_temp13 = arith.extsi %arg10 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc138)
+    %fwd_K_block_ptr_33 = tt.splat %fwd_K_block_ptr_temp13 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64> loc(#loc182)
+    %fwd_K_block_ptr_34 = arith.muli %fwd_K_block_ptr_32, %fwd_K_block_ptr_33 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> loc(#loc182)
+    %fwd_K_block_ptr_35 = tt.broadcast %fwd_K_block_ptr_34 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc182)
+    %fwd_unnamed_36 = arith.constant {autogradVisited = true, isCloned = true} 0 : i64 loc(#loc12)
+    %fwd_unnamed_37 = arith.constant {autogradVisited = true, isCloned = true} 16 : i64 loc(#loc12)
+    %fwd_K_block_ptr_temp1 = arith.addi %fwd_unnamed_36, %fwd_unnamed_37 {autogradVisited = true, isCloned = true} : i64 loc(#loc183)
+    %fwd_K_block_ptr_38 = tt.splat %fwd_K_block_ptr_temp1 {autogradVisited = true, isCloned = true} : i64 -> tensor<16xi64> loc(#loc182)
+    %fwd_K_block_ptr_39 = arith.addi %fwd_K_block_ptr_38, %fwd_Q_block_ptr_5 {autogradVisited = true, isCloned = true} : tensor<16xi64> loc(#loc182)
+    %fwd_K_block_ptr_40 = tt.expand_dims %fwd_K_block_ptr_39 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi64> -> tensor<1x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_temp13_41 = arith.extsi %arg9 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc138)
+    %fwd_K_block_ptr_42 = tt.splat %fwd_K_block_ptr_temp13_41 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_43 = arith.muli %fwd_K_block_ptr_40, %fwd_K_block_ptr_42 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_44 = tt.broadcast %fwd_K_block_ptr_43 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_45 = arith.addi %fwd_K_block_ptr_35, %fwd_K_block_ptr_44 {autogradVisited = true, isCloned = true} : tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_46 = tt.addptr %fwd_K_block_ptr, %fwd_K_block_ptr_45 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_47 = tt.load %fwd_K_block_ptr_46 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc182)
+    %fwd_unnamed_48 = arith.constant {autogradVisited = true, isCloned = true} dense<0.000000e+00> : tensor<16x16xf32> loc(#loc12)
+    %fwd_k = tt.dot %fwd_Q_block_ptr_30, %fwd_K_block_ptr_47, %fwd_unnamed_48, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32> loc(#loc184)
+    %fwd_unnamed_49 = arith.constant {autogradVisited = true, isCloned = true} dense<0.72134751> : tensor<16x16xf32> loc(#loc12)
+    %fwd_qk_scale = arith.mulf %fwd_k, %fwd_unnamed_49 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc185)
+    %fwd_unnamed_50 = arith.constant {autogradVisited = true, isCloned = true} dense<0xFF800000> : tensor<16xf32> loc(#loc12)
+    %fwd_K_block_ptr_51 = tt.splat %fwd_qvk_offset_31 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc182)
+    %fwd_K_block_ptr_52 = tt.expand_dims %fwd_Q_block_ptr_5 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc182)
+    %fwd_K_block_ptr_53 = tt.splat %fwd_K_block_ptr_temp13 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64> loc(#loc182)
+    %fwd_K_block_ptr_54 = arith.muli %fwd_K_block_ptr_52, %fwd_K_block_ptr_53 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> loc(#loc182)
+    %fwd_K_block_ptr_55 = tt.broadcast %fwd_K_block_ptr_54 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_56 = tt.splat %fwd_unnamed_36 {autogradVisited = true, isCloned = true} : i64 -> tensor<16xi64> loc(#loc182)
+    %fwd_K_block_ptr_57 = arith.addi %fwd_K_block_ptr_56, %fwd_Q_block_ptr_5 {autogradVisited = true, isCloned = true} : tensor<16xi64> loc(#loc182)
+    %fwd_K_block_ptr_58 = tt.expand_dims %fwd_K_block_ptr_57 {autogradVisited = true, axis = 0 : i32, isCloned = true} : tensor<16xi64> -> tensor<1x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_59 = tt.splat %fwd_K_block_ptr_temp13_41 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_60 = arith.muli %fwd_K_block_ptr_58, %fwd_K_block_ptr_59 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_61 = tt.broadcast %fwd_K_block_ptr_60 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_62 = arith.addi %fwd_K_block_ptr_55, %fwd_K_block_ptr_61 {autogradVisited = true, isCloned = true} : tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_63 = tt.addptr %fwd_K_block_ptr_51, %fwd_K_block_ptr_62 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc182)
+    %fwd_K_block_ptr_64 = tt.load %fwd_K_block_ptr_63 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc182)
+    %fwd_k_65 = tt.dot %fwd_Q_block_ptr_30, %fwd_K_block_ptr_64, %fwd_unnamed_48, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32> loc(#loc184)
+    %fwd__elementwise_max = "tt.reduce"(%fwd_k_65) <{axis = 1 : i32}> ({
+    ^bb0(%m_ij_temp3: f32 loc(callsite(#loc143 at #loc80)), %m_ij_temp3_309: f32 loc(callsite(#loc143 at #loc80))):
+      %b = arith.maxnumf %m_ij_temp3, %m_ij_temp3_309 : f32 loc(#loc224)
+      tt.reduce.return %b : f32 loc(#loc186)
+    }) {autogradVisited = true, isCloned = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc223)
+    %fwd_unnamed_66 = arith.constant {autogradVisited = true, isCloned = true} dense<0.72134751> : tensor<16xf32> loc(#loc12)
+    %fwd_qk_scale_67 = arith.mulf %fwd__elementwise_max, %fwd_unnamed_66 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc189)
+    %fwd_m_ij_temp1 = arith.maxnumf %fwd_unnamed_50, %fwd_qk_scale_67 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc190)
+    %fwd__elementwise_max_68 = "tt.reduce"(%fwd_k) <{axis = 1 : i32}> ({
+    ^bb0(%m_ij_temp3: f32 loc(callsite(#loc143 at #loc80)), %m_ij_temp3_309: f32 loc(callsite(#loc143 at #loc80))):
+      %b = arith.maxnumf %m_ij_temp3, %m_ij_temp3_309 : f32 loc(#loc224)
+      tt.reduce.return %b : f32 loc(#loc186)
+    }) {autogradVisited = true, isCloned = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc223)
+    %fwd_qk_scale_69 = arith.mulf %fwd__elementwise_max_68, %fwd_unnamed_66 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc189)
+    %fwd_m_ij_temp1_70 = arith.maxnumf %fwd_m_ij_temp1, %fwd_qk_scale_69 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc190)
+    %fwd_qk_temp3 = tt.expand_dims %fwd_m_ij_temp1_70 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc191)
+    %fwd_qk_temp2 = tt.broadcast %fwd_qk_temp3 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc192)
+    %fwd_qk_temp2_71 = arith.subf %fwd_qk_scale, %fwd_qk_temp2 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc192)
+    %fwd_qk = math.exp2 %fwd_qk_temp2_71 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc193)
+    %fwd_float16 = arith.truncf %fwd_qk {autogradVisited = true, isCloned = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc194)
+    %fwd_qvk_offset_72 = tt.addptr %arg2, %fwd_qvk_offset_temp3 {autogradVisited = true, isCloned = true} : !tt.ptr<f16>, i64 loc(#loc151)
+    %fwd_V_block_ptr = tt.splat %fwd_qvk_offset_72 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc195)
+    %fwd_V_block_ptr_temp1 = arith.addi %fwd_unnamed_36, %fwd_unnamed_37 {autogradVisited = true, isCloned = true} : i64 loc(#loc196)
+    %fwd_V_block_ptr_73 = tt.splat %fwd_V_block_ptr_temp1 {autogradVisited = true, isCloned = true} : i64 -> tensor<16xi64> loc(#loc195)
+    %fwd_V_block_ptr_74 = arith.addi %fwd_V_block_ptr_73, %fwd_Q_block_ptr_5 {autogradVisited = true, isCloned = true} : tensor<16xi64> loc(#loc195)
+    %fwd_V_block_ptr_75 = tt.expand_dims %fwd_V_block_ptr_74 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc195)
+    %fwd_V_block_ptr_temp13 = arith.extsi %arg11 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc154)
+    %fwd_V_block_ptr_76 = tt.splat %fwd_V_block_ptr_temp13 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64> loc(#loc195)
+    %fwd_V_block_ptr_77 = arith.muli %fwd_V_block_ptr_75, %fwd_V_block_ptr_76 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> loc(#loc195)
+    %fwd_V_block_ptr_78 = tt.broadcast %fwd_V_block_ptr_77 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_temp13_79 = arith.extsi %arg12 {autogradVisited = true, isCloned = true} : i32 to i64 loc(#loc154)
+    %fwd_V_block_ptr_80 = tt.splat %fwd_V_block_ptr_temp13_79 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_81 = arith.muli %fwd_Q_block_ptr_11, %fwd_V_block_ptr_80 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_82 = tt.broadcast %fwd_V_block_ptr_81 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_83 = arith.addi %fwd_V_block_ptr_78, %fwd_V_block_ptr_82 {autogradVisited = true, isCloned = true} : tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_84 = tt.addptr %fwd_V_block_ptr, %fwd_V_block_ptr_83 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_85 = tt.load %fwd_V_block_ptr_84 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc195)
+    %fwd_qk_scale_86 = arith.mulf %fwd_k_65, %fwd_unnamed_49 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc185)
+    %fwd_qk_temp3_87 = tt.expand_dims %fwd_m_ij_temp1 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc191)
+    %fwd_qk_temp2_88 = tt.broadcast %fwd_qk_temp3_87 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc192)
+    %fwd_qk_temp2_89 = arith.subf %fwd_qk_scale_86, %fwd_qk_temp2_88 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc192)
+    %fwd_qk_90 = math.exp2 %fwd_qk_temp2_89 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc193)
+    %fwd_float16_91 = arith.truncf %fwd_qk_90 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc194)
+    %fwd_V_block_ptr_92 = tt.splat %fwd_qvk_offset_72 {autogradVisited = true, isCloned = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc195)
+    %fwd_V_block_ptr_93 = tt.splat %fwd_unnamed_36 {autogradVisited = true, isCloned = true} : i64 -> tensor<16xi64> loc(#loc195)
+    %fwd_V_block_ptr_94 = arith.addi %fwd_V_block_ptr_93, %fwd_Q_block_ptr_5 {autogradVisited = true, isCloned = true} : tensor<16xi64> loc(#loc195)
+    %fwd_V_block_ptr_95 = tt.expand_dims %fwd_V_block_ptr_94 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xi64> -> tensor<16x1xi64> loc(#loc195)
+    %fwd_V_block_ptr_96 = tt.splat %fwd_V_block_ptr_temp13 {autogradVisited = true, isCloned = true} : i64 -> tensor<16x1xi64> loc(#loc195)
+    %fwd_V_block_ptr_97 = arith.muli %fwd_V_block_ptr_95, %fwd_V_block_ptr_96 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> loc(#loc195)
+    %fwd_V_block_ptr_98 = tt.broadcast %fwd_V_block_ptr_97 {autogradVisited = true, isCloned = true} : tensor<16x1xi64> -> tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_99 = tt.splat %fwd_V_block_ptr_temp13_79 {autogradVisited = true, isCloned = true} : i64 -> tensor<1x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_100 = arith.muli %fwd_Q_block_ptr_11, %fwd_V_block_ptr_99 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_101 = tt.broadcast %fwd_V_block_ptr_100 {autogradVisited = true, isCloned = true} : tensor<1x16xi64> -> tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_102 = arith.addi %fwd_V_block_ptr_98, %fwd_V_block_ptr_101 {autogradVisited = true, isCloned = true} : tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_103 = tt.addptr %fwd_V_block_ptr_92, %fwd_V_block_ptr_102 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc195)
+    %fwd_V_block_ptr_104 = tt.load %fwd_V_block_ptr_103 {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc195)
+    %fwd_m_ij = arith.subf %fwd_unnamed_50, %fwd_m_ij_temp1 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc197)
+    %fwd_alpha_temp1 = math.exp2 %fwd_m_ij {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc198)
+    %fwd_acc_temp2 = tt.expand_dims %fwd_alpha_temp1 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc199)
+    %fwd_acc_temp1 = tt.broadcast %fwd_acc_temp2 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc200)
+    %fwd_acc_temp1_105 = arith.mulf %fwd_unnamed_48, %fwd_acc_temp1 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc200)
+    %fwd_acc = tt.dot %fwd_float16_91, %fwd_V_block_ptr_104, %fwd_acc_temp1_105, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32> loc(#loc201)
+    %fwd_m_ij_106 = arith.subf %fwd_m_ij_temp1, %fwd_m_ij_temp1_70 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc197)
+    %fwd_alpha_temp1_107 = math.exp2 %fwd_m_ij_106 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc198)
+    %fwd_acc_temp2_108 = tt.expand_dims %fwd_alpha_temp1_107 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc199)
+    %fwd_acc_temp1_109 = tt.broadcast %fwd_acc_temp2_108 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc200)
+    %fwd_acc_temp1_110 = arith.mulf %fwd_acc, %fwd_acc_temp1_109 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc200)
+    %fwd_acc_111 = tt.dot %fwd_float16, %fwd_V_block_ptr_85, %fwd_acc_temp1_110, inputPrecision = tf32 {autogradVisited = true, isCloned = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32> loc(#loc201)
+    %fwd_unnamed_112 = arith.constant {autogradVisited = true, isCloned = true} dense<1.000000e+00> : tensor<16xf32> loc(#loc12)
+    %fwd_alpha = arith.mulf %fwd_unnamed_112, %fwd_alpha_temp1 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc202)
+    %fwd__sum_combine = "tt.reduce"(%fwd_qk_90) <{axis = 1 : i32}> ({
+    ^bb0(%l_ij_temp1: f32 loc(callsite(#loc162 at #loc80)), %l_ij_temp1_309: f32 loc(callsite(#loc162 at #loc80))):
+      %b = arith.addf %l_ij_temp1, %l_ij_temp1_309 : f32 loc(#loc226)
+      tt.reduce.return %b : f32 loc(#loc203)
+    }) {autogradVisited = true, isCloned = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc225)
+    %fwd_l_ij = arith.addf %fwd_alpha, %fwd__sum_combine {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc206)
+    %fwd_alpha_113 = arith.mulf %fwd_l_ij, %fwd_alpha_temp1_107 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc202)
+    %fwd__sum_combine_114 = "tt.reduce"(%fwd_qk) <{axis = 1 : i32}> ({
+    ^bb0(%l_ij_temp1: f32 loc(callsite(#loc162 at #loc80)), %l_ij_temp1_309: f32 loc(callsite(#loc162 at #loc80))):
+      %b = arith.addf %l_ij_temp1, %l_ij_temp1_309 : f32 loc(#loc226)
+      tt.reduce.return %b : f32 loc(#loc203)
+    }) {autogradVisited = true, isCloned = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc225)
+    %fwd_l_ij_115 = arith.addf %fwd_alpha_113, %fwd__sum_combine_114 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc206)
+    %fwd_acc_temp2_116 = tt.expand_dims %fwd_l_ij_115 {autogradVisited = true, axis = 1 : i32, isCloned = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc165)
+    %fwd_acc_temp1_117 = tt.broadcast %fwd_acc_temp2_116 {autogradVisited = true, isCloned = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc166)
+    %fwd_acc_temp1_118 = arith.divf %fwd_acc_111, %fwd_acc_temp1_117 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> loc(#loc166)
+    %fwd_element_ty = arith.truncf %fwd_acc_temp1_118 {autogradVisited = true, isCloned = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc167)
+    tt.store %fwd_O_block_ptr_17, %fwd_element_ty {autogradVisited = true, isCloned = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc128)
+    %fwd_unnamed_119 = arith.constant {autogradVisited = true, isCloned = true} 32 : i32 loc(#loc12)
+    %fwd_N_CTX = arith.muli %fwd_off_hz_temp1, %fwd_unnamed_119 {autogradVisited = true, isCloned = true} : i32 loc(#loc168)
+    %fwd_m_ptrs_temp2 = tt.addptr %arg3, %fwd_N_CTX {autogradVisited = true, isCloned = true} : !tt.ptr<f32>, i32 loc(#loc169)
+    %fwd_offs_m = tt.splat %fwd_m_ptrs_temp2 {autogradVisited = true, isCloned = true} : !tt.ptr<f32> -> tensor<16x!tt.ptr<f32>> loc(#loc170)
+    %fwd_offs_m_temp2 = tt.splat %fwd_BLOCK_M {autogradVisited = true, isCloned = true} : i32 -> tensor<16xi32> loc(#loc171)
+    %fwd_offs_m_temp2_120 = arith.addi %fwd_offs_m_temp2, %fwd_BLOCK_M_4 {autogradVisited = true, isCloned = true} : tensor<16xi32> loc(#loc171)
+    %fwd_offs_m_121 = tt.addptr %fwd_offs_m, %fwd_offs_m_temp2_120 {autogradVisited = true, isCloned = true} : tensor<16x!tt.ptr<f32>>, tensor<16xi32> loc(#loc170)
+    %fwd_l_i = math.log2 %fwd_l_ij_115 {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc172)
+    %fwd_m_i = arith.addf %fwd_m_ij_temp1_70, %fwd_l_i {autogradVisited = true, isCloned = true} : tensor<16xf32> loc(#loc173)
+    tt.store %fwd_offs_m_121, %fwd_m_i {autogradVisited = true, isCloned = true} : tensor<16x!tt.ptr<f32>> loc(#loc174)
+    %fwd_m_ptrs_temp2_122 = tt.addptr %arg20, %fwd_N_CTX {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32>, i32 loc(#loc169)
+    %fwd_offs_m_123 = tt.splat %fwd_m_ptrs_temp2_122 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f32> -> tensor<16x!tt.ptr<f32>> loc(#loc170)
+    %fwd_offs_m_124 = tt.addptr %fwd_offs_m_123, %fwd_offs_m_temp2_120 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x!tt.ptr<f32>>, tensor<16xi32> loc(#loc170)
+    %bwd_m_i = tt.load %fwd_offs_m_124 {autogradVisited = true, isInserted = true} : tensor<16x!tt.ptr<f32>> loc(#loc175)
+    %bwd_l_i = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32 loc(#loc176)
+    %bwd_l_i_125 = tt.splat %bwd_l_i {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc176)
+    %bwd_l_i_126 = arith.mulf %fwd_l_ij_115, %bwd_l_i_125 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc176)
+    %bwd_l_i_127 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32 loc(#loc176)
+    %bwd_l_i_128 = tt.splat %bwd_l_i_127 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc176)
+    %bwd_l_i_129 = arith.divf %bwd_l_i_128, %bwd_l_i_126 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc176)
+    %bwd_l_i_130 = arith.mulf %bwd_l_i_129, %bwd_m_i {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc176)
+    %fwd_qvk_offset_131 = tt.addptr %arg21, %fwd_qvk_offset_temp3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64 loc(#loc127)
+    %fwd_O_block_ptr_132 = tt.splat %fwd_qvk_offset_131 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc128)
+    %fwd_O_block_ptr_133 = tt.addptr %fwd_O_block_ptr_132, %fwd_O_block_ptr_16 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc128)
+    %bwd_O_block_ptr = tt.load %fwd_O_block_ptr_133 {autogradVisited = true, isInserted = true} : tensor<16x16x!tt.ptr<f16>> loc(#loc177)
+    %bwd_element_ty = arith.extf %bwd_O_block_ptr {autogradVisited = true, isInserted = true} : tensor<16x16xf16> to tensor<16x16xf32> loc(#loc178)
+    %bwd_acc_temp1 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32 loc(#loc179)
+    %bwd_acc_temp1_134 = tt.splat %bwd_acc_temp1 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_135 = arith.divf %bwd_acc_temp1_134, %fwd_acc_temp1_117 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_136 = arith.mulf %bwd_acc_temp1_135, %bwd_element_ty {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc179)
+    %bwd_acc = arith.truncf %bwd_acc_temp1_136 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_137 = tt.trans %fwd_V_block_ptr_85 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_138 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc207)
+    %bwd_acc_139 = tt.splat %bwd_acc_138 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_140 = tt.dot %bwd_acc, %bwd_acc_137, %bwd_acc_139, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_float16 = arith.extf %bwd_acc_140 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> to tensor<16x16xf32> loc(#loc208)
+    %bwd_acc_141 = tt.trans %fwd_float16 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_142 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc207)
+    %bwd_acc_143 = tt.splat %bwd_acc_142 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_144 = tt.dot %bwd_acc_141, %bwd_acc, %bwd_acc_143, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_temp1_145 = arith.mulf %fwd_acc_temp1_117, %fwd_acc_temp1_117 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_146 = arith.divf %fwd_acc_111, %bwd_acc_temp1_145 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_147 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32 loc(#loc179)
+    %bwd_acc_temp1_148 = tt.splat %bwd_acc_temp1_147 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_149 = arith.mulf %bwd_acc_temp1_148, %bwd_acc_temp1_146 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_150 = arith.mulf %bwd_acc_temp1_149, %bwd_element_ty {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc179)
+    %bwd_acc_temp1_151 = "tt.reduce"(%bwd_acc_temp1_150) <{axis = 1 : i32}> ({
+    ^bb0(%acc_temp1: f32 loc("acc_temp1"(#loc51)), %acc_temp1_309: f32 loc("acc_temp1"(#loc51))):
+      %bwd_acc_temp1_310 = arith.addf %acc_temp1, %acc_temp1_309 : f32 loc(#loc179)
+      tt.reduce.return %bwd_acc_temp1_310 : f32 loc(#loc179)
+    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc179)
+    %bwd_acc_temp1_152 = tt.expand_dims %bwd_acc_temp1_151 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc179)
+    %bwd_acc_temp2 = tt.reshape %bwd_acc_temp1_152 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16xf32> loc(#loc180)
+    %bwd_l_i_153 = arith.addf %bwd_l_i_130, %bwd_acc_temp2 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc176)
+    %bwd__sum_combine = tt.expand_dims %bwd_l_i_153 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc227)
+    %bwd__sum_combine_154 = tt.broadcast %bwd__sum_combine {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc227)
+    %bwd_float16_155 = arith.addf %bwd_float16, %bwd__sum_combine_154 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc208)
+    %bwd_qk = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32 loc(#loc209)
+    %bwd_qk_156 = tt.splat %bwd_qk {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc209)
+    %bwd_qk_157 = arith.mulf %bwd_qk_156, %fwd_qk {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc209)
+    %bwd_qk_158 = arith.mulf %bwd_qk_157, %bwd_float16_155 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc209)
+    %bwd_qk_temp2 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32 loc(#loc210)
+    %bwd_qk_temp2_159 = tt.splat %bwd_qk_temp2 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc210)
+    %bwd_qk_temp2_160 = arith.mulf %bwd_qk_158, %bwd_qk_temp2_159 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc210)
+    %bwd_qk_temp2_161 = "tt.reduce"(%bwd_qk_temp2_160) <{axis = 1 : i32}> ({
+    ^bb0(%qk_temp2: f32 loc(callsite(#loc91 at #loc80)), %qk_temp2_309: f32 loc(callsite(#loc91 at #loc80))):
+      %bwd_qk_temp2_310 = arith.addf %qk_temp2, %qk_temp2_309 : f32 loc(#loc210)
+      tt.reduce.return %bwd_qk_temp2_310 : f32 loc(#loc210)
+    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc210)
+    %bwd_qk_temp2_162 = tt.expand_dims %bwd_qk_temp2_161 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc210)
+    %bwd_qk_temp3 = tt.reshape %bwd_qk_temp2_162 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16xf32> loc(#loc211)
+    %bwd_qk_scale = arith.mulf %fwd_k, %bwd_qk_158 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_qk_scale_163 = arith.mulf %fwd_unnamed_49, %bwd_qk_158 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_alpha = arith.mulf %fwd_l_ij, %bwd_l_i_153 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc213)
+    %bwd_acc_temp1_164 = arith.mulf %fwd_acc, %bwd_acc_temp1_136 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc214)
+    %bwd_acc_temp1_165 = "tt.reduce"(%bwd_acc_temp1_164) <{axis = 1 : i32}> ({
+    ^bb0(%acc_temp1: f32 loc(callsite(#loc101 at #loc80)), %acc_temp1_309: f32 loc(callsite(#loc101 at #loc80))):
+      %bwd_acc_temp1_310 = arith.addf %acc_temp1, %acc_temp1_309 : f32 loc(#loc214)
+      tt.reduce.return %bwd_acc_temp1_310 : f32 loc(#loc214)
+    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc214)
+    %bwd_acc_temp1_166 = tt.expand_dims %bwd_acc_temp1_165 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc214)
+    %bwd_acc_temp2_167 = tt.reshape %bwd_acc_temp1_166 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16xf32> loc(#loc215)
+    %bwd_acc_temp2_168 = arith.addf %bwd_acc_temp2_167, %bwd_alpha {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc215)
+    %bwd_alpha_temp1 = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32 loc(#loc216)
+    %bwd_alpha_temp1_169 = tt.splat %bwd_alpha_temp1 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc216)
+    %bwd_alpha_temp1_170 = arith.mulf %bwd_alpha_temp1_169, %fwd_alpha_temp1_107 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_alpha_temp1_171 = arith.mulf %bwd_alpha_temp1_170, %bwd_acc_temp2_168 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_m_ij = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32 loc(#loc217)
+    %bwd_m_ij_172 = tt.splat %bwd_m_ij {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc217)
+    %bwd_m_ij_173 = arith.mulf %bwd_alpha_temp1_171, %bwd_m_ij_172 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc217)
+    %bwd_m_i_174 = arith.addf %bwd_m_i, %bwd_m_ij_173 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc175)
+    %bwd_m_i_175 = arith.addf %bwd_m_i_174, %bwd_qk_temp3 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc175)
+    %bwd_m_ij_temp1 = arith.cmpf oge, %fwd_m_ij_temp1, %fwd_qk_scale_69 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_176 = arith.cmpf ogt, %fwd_qk_scale_69, %fwd_m_ij_temp1 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_177 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32 loc(#loc218)
+    %bwd_m_ij_temp1_178 = tt.splat %bwd_m_ij_temp1_177 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_179 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32 loc(#loc218)
+    %bwd_m_ij_temp1_180 = tt.splat %bwd_m_ij_temp1_179 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_181 = arith.select %bwd_m_ij_temp1, %bwd_m_ij_temp1_178, %bwd_m_ij_temp1_180 {autogradVisited = true, isInserted = true} : tensor<16xi1>, tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_182 = arith.select %bwd_m_ij_temp1_176, %bwd_m_ij_temp1_178, %bwd_m_ij_temp1_180 {autogradVisited = true, isInserted = true} : tensor<16xi1>, tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_183 = tt.broadcast %bwd_m_i_175 {autogradVisited = true, isInserted = true} : tensor<16xf32> -> tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_184 = arith.mulf %bwd_m_ij_temp1_181, %bwd_m_ij_temp1_183 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_alpha_temp1_185 = arith.addf %bwd_alpha_temp1_171, %bwd_m_ij_temp1_184 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_m_ij_temp1_186 = arith.mulf %bwd_m_ij_temp1_182, %bwd_m_ij_temp1_183 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_qk_scale_187 = arith.mulf %fwd__elementwise_max_68, %bwd_m_ij_temp1_186 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc219)
+    %bwd_qk_scale_188 = arith.mulf %fwd_unnamed_66, %bwd_m_ij_temp1_186 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc219)
+    %bwd__elementwise_max = tt.expand_dims %fwd__elementwise_max_68 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc228)
+    %bwd__elementwise_max_189 = tt.broadcast %bwd__elementwise_max {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_190 = arith.cmpf oeq, %fwd_k, %bwd__elementwise_max_189 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_191 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32 loc(#loc228)
+    %bwd__elementwise_max_192 = tt.splat %bwd__elementwise_max_191 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_193 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32 loc(#loc228)
+    %bwd__elementwise_max_194 = tt.splat %bwd__elementwise_max_193 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_195 = arith.select %bwd__elementwise_max_190, %bwd__elementwise_max_192, %bwd__elementwise_max_194 {autogradVisited = true, isInserted = true} : tensor<16x16xi1>, tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_196 = tt.expand_dims %bwd_qk_scale_188 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc228)
+    %bwd__elementwise_max_197 = tt.broadcast %bwd__elementwise_max_196 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_198 = arith.mulf %bwd__elementwise_max_195, %bwd__elementwise_max_197 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc228)
+    %bwd_qk_scale_199 = arith.addf %bwd_qk_scale_163, %bwd__elementwise_max_198 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_k = arith.truncf %bwd_qk_scale_199 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc220)
+    %bwd_k_200 = tt.trans %fwd_K_block_ptr_47 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_201 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc220)
+    %bwd_k_202 = tt.splat %bwd_k_201 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_203 = tt.dot %bwd_k, %bwd_k_200, %bwd_k_202, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_204 = tt.trans %fwd_Q_block_ptr_30 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_205 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc220)
+    %bwd_k_206 = tt.splat %bwd_k_205 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_207 = tt.dot %bwd_k_204, %bwd_k, %bwd_k_206, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_alpha_208 = arith.mulf %fwd_alpha_temp1_107, %bwd_l_i_153 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc213)
+    %bwd__sum_combine_209 = tt.expand_dims %bwd_alpha_208 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc227)
+    %bwd__sum_combine_210 = tt.broadcast %bwd__sum_combine_209 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc227)
+    %bwd_acc_temp1_211 = arith.mulf %fwd_acc_temp1_109, %bwd_acc_temp1_136 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc214)
+    %bwd_acc_212 = arith.truncf %bwd_acc_temp1_211 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_213 = tt.trans %fwd_V_block_ptr_104 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_214 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc207)
+    %bwd_acc_215 = tt.splat %bwd_acc_214 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_216 = tt.dot %bwd_acc_212, %bwd_acc_213, %bwd_acc_215, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_float16_217 = arith.extf %bwd_acc_216 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> to tensor<16x16xf32> loc(#loc208)
+    %bwd_float16_218 = arith.addf %bwd_float16_217, %bwd__sum_combine_210 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc208)
+    %bwd_qk_219 = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32 loc(#loc209)
+    %bwd_qk_220 = tt.splat %bwd_qk_219 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc209)
+    %bwd_qk_221 = arith.mulf %bwd_qk_220, %fwd_qk_90 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc209)
+    %bwd_qk_222 = arith.mulf %bwd_qk_221, %bwd_float16_218 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc209)
+    %bwd_qk_temp2_223 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32 loc(#loc210)
+    %bwd_qk_temp2_224 = tt.splat %bwd_qk_temp2_223 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc210)
+    %bwd_qk_temp2_225 = arith.mulf %bwd_qk_222, %bwd_qk_temp2_224 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc210)
+    %bwd_qk_temp2_226 = "tt.reduce"(%bwd_qk_temp2_225) <{axis = 1 : i32}> ({
+    ^bb0(%qk_temp2: f32 loc(callsite(#loc91 at #loc80)), %qk_temp2_309: f32 loc(callsite(#loc91 at #loc80))):
+      %bwd_qk_temp2_310 = arith.addf %qk_temp2, %qk_temp2_309 : f32 loc(#loc210)
+      tt.reduce.return %bwd_qk_temp2_310 : f32 loc(#loc210)
+    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc210)
+    %bwd_qk_temp2_227 = tt.expand_dims %bwd_qk_temp2_226 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc210)
+    %bwd_qk_temp3_228 = tt.reshape %bwd_qk_temp2_227 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16xf32> loc(#loc211)
+    %bwd_qk_scale_229 = arith.mulf %fwd_k_65, %bwd_qk_222 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_qk_scale_230 = arith.addf %bwd_qk_scale, %bwd_qk_scale_229 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_qk_scale_231 = arith.mulf %fwd_unnamed_49, %bwd_qk_222 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_alpha_232 = arith.mulf %fwd_unnamed_112, %bwd_alpha_208 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc213)
+    %bwd_acc_233 = tt.trans %fwd_float16_91 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_234 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc207)
+    %bwd_acc_235 = tt.splat %bwd_acc_234 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_236 = tt.dot %bwd_acc_233, %bwd_acc_212, %bwd_acc_235, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc207)
+    %bwd_acc_temp1_237 = arith.mulf %fwd_unnamed_48, %bwd_acc_temp1_211 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc214)
+    %bwd_acc_temp1_238 = "tt.reduce"(%bwd_acc_temp1_237) <{axis = 1 : i32}> ({
+    ^bb0(%acc_temp1: f32 loc(callsite(#loc101 at #loc80)), %acc_temp1_309: f32 loc(callsite(#loc101 at #loc80))):
+      %bwd_acc_temp1_310 = arith.addf %acc_temp1, %acc_temp1_309 : f32 loc(#loc214)
+      tt.reduce.return %bwd_acc_temp1_310 : f32 loc(#loc214)
+    }) {autogradVisited = true, isInserted = true} : (tensor<16x16xf32>) -> tensor<16xf32> loc(#loc214)
+    %bwd_acc_temp1_239 = tt.expand_dims %bwd_acc_temp1_238 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc214)
+    %bwd_acc_temp2_240 = tt.reshape %bwd_acc_temp1_239 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16xf32> loc(#loc215)
+    %bwd_acc_temp2_241 = arith.addf %bwd_acc_temp2_240, %bwd_alpha_232 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc215)
+    %bwd_alpha_temp1_242 = arith.constant {autogradVisited = true, isInserted = true} 6.931470e-01 : f32 loc(#loc216)
+    %bwd_alpha_temp1_243 = tt.splat %bwd_alpha_temp1_242 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc216)
+    %bwd_alpha_temp1_244 = arith.mulf %bwd_alpha_temp1_243, %fwd_alpha_temp1 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_alpha_temp1_245 = arith.mulf %bwd_alpha_temp1_244, %bwd_acc_temp2_241 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_m_ij_246 = arith.constant {autogradVisited = true, isInserted = true} -1.000000e+00 : f32 loc(#loc217)
+    %bwd_m_ij_247 = tt.splat %bwd_m_ij_246 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc217)
+    %bwd_m_ij_248 = arith.mulf %bwd_alpha_temp1_245, %bwd_m_ij_247 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc217)
+    %bwd_alpha_temp1_249 = arith.addf %bwd_alpha_temp1_185, %bwd_m_ij_248 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_alpha_temp1_250 = arith.addf %bwd_alpha_temp1_249, %bwd_qk_temp3_228 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_m_ij_temp1_251 = arith.cmpf oge, %fwd_unnamed_50, %fwd_qk_scale_67 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_252 = arith.cmpf ogt, %fwd_qk_scale_67, %fwd_unnamed_50 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_253 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32 loc(#loc218)
+    %bwd_m_ij_temp1_254 = tt.splat %bwd_m_ij_temp1_253 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_255 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32 loc(#loc218)
+    %bwd_m_ij_temp1_256 = tt.splat %bwd_m_ij_temp1_255 {autogradVisited = true, isInserted = true} : f32 -> tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_257 = arith.select %bwd_m_ij_temp1_251, %bwd_m_ij_temp1_254, %bwd_m_ij_temp1_256 {autogradVisited = true, isInserted = true} : tensor<16xi1>, tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_258 = arith.select %bwd_m_ij_temp1_252, %bwd_m_ij_temp1_254, %bwd_m_ij_temp1_256 {autogradVisited = true, isInserted = true} : tensor<16xi1>, tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_259 = tt.broadcast %bwd_alpha_temp1_250 {autogradVisited = true, isInserted = true} : tensor<16xf32> -> tensor<16xf32> loc(#loc218)
+    %bwd_m_ij_temp1_260 = arith.mulf %bwd_m_ij_temp1_257, %bwd_m_ij_temp1_259 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_alpha_temp1_261 = arith.addf %bwd_alpha_temp1_245, %bwd_m_ij_temp1_260 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc216)
+    %bwd_m_ij_temp1_262 = arith.mulf %bwd_m_ij_temp1_258, %bwd_m_ij_temp1_259 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc218)
+    %bwd_qk_scale_263 = arith.mulf %fwd__elementwise_max, %bwd_m_ij_temp1_262 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc219)
+    %bwd_qk_scale_264 = arith.addf %bwd_qk_scale_187, %bwd_qk_scale_263 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc219)
+    %bwd_qk_scale_265 = arith.mulf %fwd_unnamed_66, %bwd_m_ij_temp1_262 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc219)
+    %bwd__elementwise_max_266 = tt.expand_dims %fwd__elementwise_max {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc228)
+    %bwd__elementwise_max_267 = tt.broadcast %bwd__elementwise_max_266 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_268 = arith.cmpf oeq, %fwd_k_65, %bwd__elementwise_max_267 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_269 = arith.constant {autogradVisited = true, isInserted = true} 1.000000e+00 : f32 loc(#loc228)
+    %bwd__elementwise_max_270 = tt.splat %bwd__elementwise_max_269 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_271 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f32 loc(#loc228)
+    %bwd__elementwise_max_272 = tt.splat %bwd__elementwise_max_271 {autogradVisited = true, isInserted = true} : f32 -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_273 = arith.select %bwd__elementwise_max_268, %bwd__elementwise_max_270, %bwd__elementwise_max_272 {autogradVisited = true, isInserted = true} : tensor<16x16xi1>, tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_274 = tt.expand_dims %bwd_qk_scale_265 {autogradVisited = true, axis = 1 : i32, isInserted = true} : tensor<16xf32> -> tensor<16x1xf32> loc(#loc228)
+    %bwd__elementwise_max_275 = tt.broadcast %bwd__elementwise_max_274 {autogradVisited = true, isInserted = true} : tensor<16x1xf32> -> tensor<16x16xf32> loc(#loc228)
+    %bwd__elementwise_max_276 = arith.mulf %bwd__elementwise_max_273, %bwd__elementwise_max_275 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc228)
+    %bwd_qk_scale_277 = arith.addf %bwd_qk_scale_231, %bwd__elementwise_max_276 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_k_278 = arith.truncf %bwd_qk_scale_277 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> to tensor<16x16xf16> loc(#loc220)
+    %bwd_k_279 = tt.trans %fwd_K_block_ptr_64 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_280 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc220)
+    %bwd_k_281 = tt.splat %bwd_k_280 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_282 = tt.dot %bwd_k_278, %bwd_k_279, %bwd_k_281, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_283 = arith.addf %bwd_k_203, %bwd_k_282 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> loc(#loc220)
+    %bwd_k_284 = tt.trans %fwd_Q_block_ptr_30 {autogradVisited = true, isInserted = true, order = array<i32: 1, 0>} : tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_285 = arith.constant {autogradVisited = true, isInserted = true} 0.000000e+00 : f16 loc(#loc220)
+    %bwd_k_286 = tt.splat %bwd_k_285 {autogradVisited = true, isInserted = true} : f16 -> tensor<16x16xf16> loc(#loc220)
+    %bwd_k_287 = tt.dot %bwd_k_284, %bwd_k_278, %bwd_k_286, inputPrecision = tf32 {autogradVisited = true, isInserted = true} : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf16> loc(#loc220)
+    %bwd_alpha_288 = arith.mulf %fwd_alpha_temp1, %bwd_alpha_208 {autogradVisited = true, isInserted = true} : tensor<16xf32> loc(#loc213)
+    %bwd_acc_temp1_289 = arith.mulf %fwd_acc_temp1, %bwd_acc_temp1_211 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc214)
+    %bwd_qk_scale_290 = arith.addf %bwd_qk_scale_199, %bwd_acc_temp1_289 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %bwd_qk_scale_291 = arith.addf %bwd_qk_scale_290, %bwd_qk_scale_277 {autogradVisited = true, isInserted = true} : tensor<16x16xf32> loc(#loc212)
+    %fwd_qvk_offset_292 = tt.addptr %arg18, %fwd_qvk_offset_temp3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64 loc(#loc136)
+    %fwd_K_block_ptr_293 = tt.splat %fwd_qvk_offset_292 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc182)
+    %fwd_K_block_ptr_294 = tt.addptr %fwd_K_block_ptr_293, %fwd_K_block_ptr_45 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc182)
+    %bwd_K_block_ptr = tt.atomic_rmw fadd, acq_rel, gpu, %fwd_K_block_ptr_294, %bwd_k_207 {autogradVisited = true, gradOf = "%K_block_ptr_365 = tt.load %K_block_ptr_364 : tensor<16x16x!tt.ptr<f16>> loc(callsite(\22K_block_ptr\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:94:20) at \22N_CTX\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:190:63)))", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16> loc(#loc221)
+    %fwd_qvk_offset_295 = tt.addptr %arg19, %fwd_qvk_offset_temp3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64 loc(#loc151)
+    %fwd_V_block_ptr_296 = tt.splat %fwd_qvk_offset_295 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc195)
+    %fwd_V_block_ptr_297 = tt.addptr %fwd_V_block_ptr_296, %fwd_V_block_ptr_83 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc195)
+    %bwd_V_block_ptr = tt.atomic_rmw fadd, acq_rel, gpu, %fwd_V_block_ptr_297, %bwd_acc_144 {autogradVisited = true, gradOf = "%V_block_ptr_395 = tt.load %V_block_ptr_394 : tensor<16x16x!tt.ptr<f16>> loc(callsite(\22V_block_ptr\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:108:20) at \22N_CTX\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:190:63)))", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16> loc(#loc222)
+    %fwd_qvk_offset_298 = tt.addptr %arg18, %fwd_qvk_offset_temp3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64 loc(#loc136)
+    %fwd_K_block_ptr_299 = tt.splat %fwd_qvk_offset_298 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc182)
+    %fwd_K_block_ptr_300 = tt.addptr %fwd_K_block_ptr_299, %fwd_K_block_ptr_62 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc182)
+    %bwd_K_block_ptr_301 = tt.atomic_rmw fadd, acq_rel, gpu, %fwd_K_block_ptr_300, %bwd_k_287 {autogradVisited = true, gradOf = "%K_block_ptr_336 = tt.load %K_block_ptr_335 : tensor<16x16x!tt.ptr<f16>> loc(callsite(\22K_block_ptr\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:94:20) at \22N_CTX\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:190:63)))", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16> loc(#loc221)
+    %fwd_qvk_offset_302 = tt.addptr %arg19, %fwd_qvk_offset_temp3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64 loc(#loc151)
+    %fwd_V_block_ptr_303 = tt.splat %fwd_qvk_offset_302 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc195)
+    %fwd_V_block_ptr_304 = tt.addptr %fwd_V_block_ptr_303, %fwd_V_block_ptr_102 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc195)
+    %bwd_V_block_ptr_305 = tt.atomic_rmw fadd, acq_rel, gpu, %fwd_V_block_ptr_304, %bwd_acc_236 {autogradVisited = true, gradOf = "%V_block_ptr_351 = tt.load %V_block_ptr_350 : tensor<16x16x!tt.ptr<f16>> loc(callsite(\22V_block_ptr\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:108:20) at \22N_CTX\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:190:63)))", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16> loc(#loc222)
+    %fwd_qvk_offset_306 = tt.addptr %arg17, %fwd_qvk_offset_temp3 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16>, i64 loc(#loc135)
+    %fwd_Q_block_ptr_307 = tt.splat %fwd_qvk_offset_306 {autogradVisited = true, isGradPtrRebase = true} : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>> loc(#loc132)
+    %fwd_Q_block_ptr_308 = tt.addptr %fwd_Q_block_ptr_307, %fwd_Q_block_ptr_28 {autogradVisited = true, isGradPtrRebase = true} : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi64> loc(#loc132)
+    %bwd_Q_block_ptr = tt.atomic_rmw fadd, acq_rel, gpu, %fwd_Q_block_ptr_308, %bwd_k_283 {autogradVisited = true, gradOf = "%Q_block_ptr_323 = tt.load %Q_block_ptr_322 : tensor<16x16x!tt.ptr<f16>> loc(\22Q_block_ptr\22(\22triton/third_party/autodiff/test/flash_attention_v2/utils.py\22:184:16))", isInserted = true} : (tensor<16x16x!tt.ptr<f16>>, tensor<16x16xf16>) -> tensor<16x16xf16> loc(#loc181)
+    tt.return loc(#loc118)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":135:27)
+#loc2 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":136:22)
+#loc3 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:26)
+#loc4 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:38)
+#loc5 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":137:21)
+#loc6 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:59)
+#loc7 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:71)
+#loc8 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":138:50)
+#loc9 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":166:19)
+#loc10 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":199:13)
+#loc11 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":134:28)
+#loc12 = loc("fwd_unnamed")
+#loc13 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":145:27)
+#loc14 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":147:8)
+#loc15 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":184:16)
+#loc16 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":174:46)
+#loc17 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":171:8)
+#loc18 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":142:17)
+#loc19 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":158:17)
+#loc20 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":94:20)
+#loc22 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":163:8)
+#loc23 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":114:46)
+#loc24 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":95:23)
+#loc25 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":98:18)
+#loc26 = loc("triton/python/triton/language/standard.py":184:40)
+#loc29 = loc("triton/python/triton/language/standard.py":163:27)
+#loc30 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":97:47)
+#loc31 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":97:31)
+#loc32 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":98:34)
+#loc34 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":100:25)
+#loc35 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":109:17)
+#loc36 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":150:17)
+#loc37 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":108:20)
+#loc38 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":113:46)
+#loc39 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":155:8)
+#loc40 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":103:35)
+#loc41 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":103:29)
+#loc42 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":106:26)
+#loc44 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":110:27)
+#loc45 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":104:20)
+#loc46 = loc("triton/python/triton/language/standard.py":286:36)
+#loc48 = loc("triton/python/triton/language/standard.py":256:15)
+#loc49 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":104:28)
+#loc50 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":195:20)
+#loc52 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":199:33)
+#loc53 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:26)
+#loc54 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:17)
+#loc55 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:34)
+#loc56 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":174:33)
+#loc57 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":194:24)
+#loc58 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":194:11)
+#loc59 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":198:21)
+#loc60 = loc("triton/third_party/autodiff/test/flash_attention_v2/utils.py":197:4)
+#loc61 = loc("off_hz_temp1"(#loc1))
+#loc62 = loc("H"(#loc2))
+#loc63 = loc("int64"(#loc3))
+#loc64 = loc("stride_qz"(#loc4))
+#loc65 = loc("H"(#loc5))
+#loc66 = loc("int64"(#loc6))
+#loc67 = loc("stride_qh"(#loc7))
+#loc68 = loc("qvk_offset_temp3"(#loc8))
+#loc69 = loc("qvk_offset"(#loc9))
+#loc70 = loc("O_block_ptr"(#loc10))
+#loc71 = loc("start_m_temp1"(#loc11))
+#loc72 = loc("BLOCK_M"(#loc13))
+#loc73 = loc("Q_block_ptr_temp13"(#loc14))
+#loc74 = loc("Q_block_ptr"(#loc15))
+#loc75 = loc("BLOCK_M"(#loc16))
+#loc76 = loc("O_block_ptr_temp13"(#loc17))
+#loc77 = loc("qvk_offset"(#loc18))
+#loc78 = loc("qvk_offset"(#loc19))
+#loc79 = loc("K_block_ptr"(#loc20))
+#loc81 = loc("K_block_ptr_temp13"(#loc22))
+#loc82 = loc("K_block_ptr_temp1"(#loc23))
+#loc83 = loc("k"(#loc24))
+#loc84 = loc("qk_scale"(#loc25))
+#loc85 = loc("_elementwise_max"(#loc26))
+#loc87 = loc("b"(#loc29))
+#loc88 = loc("qk_scale"(#loc30))
+#loc89 = loc("m_ij_temp1"(#loc31))
+#loc90 = loc("qk_temp3"(#loc32))
+#loc92 = loc("qk"(#loc34))
+#loc93 = loc("float16"(#loc35))
+#loc94 = loc("qvk_offset"(#loc36))
+#loc95 = loc("V_block_ptr"(#loc37))
+#loc96 = loc("V_block_ptr_temp1"(#loc38))
+#loc97 = loc("V_block_ptr_temp13"(#loc39))
+#loc98 = loc("m_ij"(#loc40))
+#loc99 = loc("alpha_temp1"(#loc41))
+#loc100 = loc("acc_temp2"(#loc42))
+#loc102 = loc("acc"(#loc44))
+#loc103 = loc("alpha"(#loc45))
+#loc104 = loc("_sum_combine"(#loc46))
+#loc106 = loc("b"(#loc48))
+#loc107 = loc("l_ij"(#loc49))
+#loc108 = loc("acc_temp2"(#loc50))
+#loc110 = loc("element_ty"(#loc52))
+#loc111 = loc("N_CTX"(#loc53))
+#loc112 = loc("m_ptrs_temp2"(#loc54))
+#loc113 = loc("offs_m"(#loc55))
+#loc114 = loc("offs_m_temp2"(#loc56))
+#loc115 = loc("l_i"(#loc57))
+#loc116 = loc("m_i"(#loc58))
+#loc117 = loc("m_i"(#loc59))
+#loc118 = loc("m_ptrs"(#loc60))
+#loc119 = loc("fwd_off_hz_temp1"(#loc61))
+#loc120 = loc("fwd_H"(#loc62))
+#loc121 = loc("fwd_int64"(#loc63))
+#loc122 = loc("fwd_stride_qz"(#loc64))
+#loc123 = loc("fwd_H"(#loc65))
+#loc124 = loc("fwd_int64"(#loc66))
+#loc125 = loc("fwd_stride_qh"(#loc67))
+#loc126 = loc("fwd_qvk_offset_temp3"(#loc68))
+#loc127 = loc("fwd_qvk_offset"(#loc69))
+#loc128 = loc("fwd_O_block_ptr"(#loc70))
+#loc129 = loc("fwd_start_m_temp1"(#loc71))
+#loc130 = loc("fwd_BLOCK_M"(#loc72))
+#loc131 = loc("fwd_Q_block_ptr_temp13"(#loc73))
+#loc132 = loc("fwd_Q_block_ptr"(#loc74))
+#loc133 = loc("fwd_BLOCK_M"(#loc75))
+#loc134 = loc("fwd_O_block_ptr_temp13"(#loc76))
+#loc135 = loc("fwd_qvk_offset"(#loc77))
+#loc136 = loc("fwd_qvk_offset"(#loc78))
+#loc137 = loc(callsite(#loc79 at #loc80))
+#loc138 = loc("fwd_K_block_ptr_temp13"(#loc81))
+#loc139 = loc(callsite(#loc82 at #loc80))
+#loc140 = loc(callsite(#loc83 at #loc80))
+#loc141 = loc(callsite(#loc84 at #loc80))
+#loc142 = loc(callsite(#loc85 at #loc86))
+#loc144 = loc(callsite(#loc87 at #loc85))
+#loc145 = loc(callsite(#loc88 at #loc80))
+#loc146 = loc(callsite(#loc89 at #loc80))
+#loc147 = loc(callsite(#loc90 at #loc80))
+#loc149 = loc(callsite(#loc92 at #loc80))
+#loc150 = loc(callsite(#loc93 at #loc80))
+#loc151 = loc("fwd_qvk_offset"(#loc94))
+#loc152 = loc(callsite(#loc95 at #loc80))
+#loc153 = loc(callsite(#loc96 at #loc80))
+#loc154 = loc("fwd_V_block_ptr_temp13"(#loc97))
+#loc155 = loc(callsite(#loc98 at #loc80))
+#loc156 = loc(callsite(#loc99 at #loc80))
+#loc157 = loc(callsite(#loc100 at #loc80))
+#loc159 = loc(callsite(#loc102 at #loc80))
+#loc160 = loc(callsite(#loc103 at #loc80))
+#loc161 = loc(callsite(#loc104 at #loc105))
+#loc163 = loc(callsite(#loc106 at #loc104))
+#loc164 = loc(callsite(#loc107 at #loc80))
+#loc165 = loc("fwd_acc_temp2"(#loc108))
+#loc166 = loc("fwd_acc_temp1"(#loc109))
+#loc167 = loc("fwd_element_ty"(#loc110))
+#loc168 = loc("fwd_N_CTX"(#loc111))
+#loc169 = loc("fwd_m_ptrs_temp2"(#loc112))
+#loc170 = loc("fwd_offs_m"(#loc113))
+#loc171 = loc("fwd_offs_m_temp2"(#loc114))
+#loc172 = loc("fwd_l_i"(#loc115))
+#loc173 = loc("fwd_m_i"(#loc116))
+#loc174 = loc("fwd_m_i"(#loc117))
+#loc175 = loc("bwd_m_i"(#loc117))
+#loc176 = loc("bwd_l_i"(#loc115))
+#loc177 = loc("bwd_O_block_ptr"(#loc70))
+#loc178 = loc("bwd_element_ty"(#loc110))
+#loc179 = loc("bwd_acc_temp1"(#loc109))
+#loc180 = loc("bwd_acc_temp2"(#loc108))
+#loc181 = loc("bwd_Q_block_ptr"(#loc74))
+#loc182 = loc("fwd_K_block_ptr"(#loc137))
+#loc183 = loc("fwd_K_block_ptr_temp1"(#loc139))
+#loc184 = loc("fwd_k"(#loc140))
+#loc185 = loc("fwd_qk_scale"(#loc141))
+#loc186 = loc(callsite(#loc142 at #loc80))
+#loc188 = loc(callsite(#loc144 at #loc86))
+#loc189 = loc("fwd_qk_scale"(#loc145))
+#loc190 = loc("fwd_m_ij_temp1"(#loc146))
+#loc191 = loc("fwd_qk_temp3"(#loc147))
+#loc192 = loc("fwd_qk_temp2"(#loc148))
+#loc193 = loc("fwd_qk"(#loc149))
+#loc194 = loc("fwd_float16"(#loc150))
+#loc195 = loc("fwd_V_block_ptr"(#loc152))
+#loc196 = loc("fwd_V_block_ptr_temp1"(#loc153))
+#loc197 = loc("fwd_m_ij"(#loc155))
+#loc198 = loc("fwd_alpha_temp1"(#loc156))
+#loc199 = loc("fwd_acc_temp2"(#loc157))
+#loc200 = loc("fwd_acc_temp1"(#loc158))
+#loc201 = loc("fwd_acc"(#loc159))
+#loc202 = loc("fwd_alpha"(#loc160))
+#loc203 = loc(callsite(#loc161 at #loc80))
+#loc205 = loc(callsite(#loc163 at #loc105))
+#loc206 = loc("fwd_l_ij"(#loc164))
+#loc207 = loc("bwd_acc"(#loc159))
+#loc208 = loc("bwd_float16"(#loc150))
+#loc209 = loc("bwd_qk"(#loc149))
+#loc210 = loc("bwd_qk_temp2"(#loc148))
+#loc211 = loc("bwd_qk_temp3"(#loc147))
+#loc212 = loc("bwd_qk_scale"(#loc141))
+#loc213 = loc("bwd_alpha"(#loc160))
+#loc214 = loc("bwd_acc_temp1"(#loc158))
+#loc215 = loc("bwd_acc_temp2"(#loc157))
+#loc216 = loc("bwd_alpha_temp1"(#loc156))
+#loc217 = loc("bwd_m_ij"(#loc155))
+#loc218 = loc("bwd_m_ij_temp1"(#loc146))
+#loc219 = loc("bwd_qk_scale"(#loc145))
+#loc220 = loc("bwd_k"(#loc140))
+#loc221 = loc("bwd_K_block_ptr"(#loc137))
+#loc222 = loc("bwd_V_block_ptr"(#loc152))
+#loc223 = loc("fwd__elementwise_max"(#loc186))
+#loc224 = loc(callsite(#loc188 at #loc80))
+#loc225 = loc("fwd__sum_combine"(#loc203))
+#loc226 = loc(callsite(#loc205 at #loc80))
+#loc227 = loc("bwd__sum_combine"(#loc203))
+#loc228 = loc("bwd__elementwise_max"(#loc186))
 
