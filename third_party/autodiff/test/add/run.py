@@ -15,11 +15,10 @@ DEVICE = torch.device("cuda:0")
 def kernel(
         x_ptr,  # *Pointer* to first input vector.
         output_ptr,  # *Pointer* to output vector.
-        # BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
+        BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
         # NOTE: `constexpr` so it can be used as a shape value.
     ):
-    # offsets = tl.arange(0, BLOCK_SIZE)
-    offsets = tl.arange(0, 4)
+    offsets = tl.arange(0, BLOCK_SIZE)
     # Load x and y from DRAM, masking out any extra elements in case the input is not a multiple of the block size.
     x = tl.load(x_ptr + offsets)
     output = x + 42
@@ -41,8 +40,8 @@ def stub(kernel, x):
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    # todo-now: support pasing ", BLOCK_SIZE=4"
-    kernel[grid](x, output)
+    # kernel[grid](x, output, BLOCK_SIZE=4)
+    kernel(x, output, BLOCK_SIZE=4)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
 
