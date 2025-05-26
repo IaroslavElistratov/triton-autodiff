@@ -11,6 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
+@autodiff(idx_upstream=2)
 @triton.jit
 def kernel(
         a_ptr,
@@ -35,7 +36,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, y, mask=offsets<10)
 
-def stub(kernel, a, b, BLOCK_SIZE=4):
+def stub(a, b, BLOCK_SIZE=4):
     output = torch.empty_like(a)
     assert a.device == DEVICE and output.device == DEVICE
     n_elements = output.numel()
@@ -45,9 +46,6 @@ def stub(kernel, a, b, BLOCK_SIZE=4):
     print("grid: ", grid)
     kernel[grid](a, b, output, BLOCK_SIZE)
     return output
-
-my_op = autodiff(kernel, stub, idx_upstream=2)
-
 
 size = 10
 a = torch.rand(size, device=DEVICE)
@@ -59,7 +57,7 @@ def torch_fn(torch_a, torch_b):
     return (torch_a + 0.5) * torch_b
 
 output_torch = torch_fn(a, b)
-output_triton = stub(my_op, a, b)
+output_triton = stub(a, b)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print(output_torch)
@@ -80,7 +78,7 @@ upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
 
-my_out = stub(my_op, a, b)
+my_out = stub(a, b)
 my_out.backward(upstream)
 
 # print("grad a: ", grad_a)

@@ -2,8 +2,7 @@ import numpy as np
 import torch
 import triton
 
-from triton.backends.autodiff import autodiff
-from utils import kernel, stub
+from utils import stub
 
 
 torch.manual_seed(20)
@@ -47,13 +46,10 @@ def torch_fn(q, k, v, causal, sm_scale):
     return ref_out
 
 
-my_op = autodiff(kernel, stub, idx_upstream=5, idxs_buffers=[3])
-
-
 #### test forward ####
 print("\n" * 4, "forward:")
 output_torch = torch_fn(q, k, v, causal, sm_scale)
-output_triton = stub(my_op, q, k, v, causal, sm_scale)
+output_triton = stub(q, k, v, causal, sm_scale)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 print("output_torch:", output_torch[0, 0, :4, :4])
@@ -78,7 +74,7 @@ k.requires_grad = True
 v.requires_grad = True
 
 
-my_out = stub(my_op, q, k, v, causal, sm_scale)
+my_out = stub(q, k, v, causal, sm_scale)
 my_out.backward(upstream)
 print("grad q[0, 0, :4, :4]: ", q.grad[0, 0, :4, :4])
 print("grad k[0, 0, :4, :4]: ", k.grad[0, 0, :4, :4])

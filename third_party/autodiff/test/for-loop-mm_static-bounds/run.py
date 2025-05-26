@@ -13,8 +13,9 @@ DEVICE = torch.device("cuda:0")
 # - removed
 #   - masks
 #   - % M, % N
-#   - hardcoded block sizes instead of providing them as meta params
 
+
+@autodiff(idx_upstream=2)
 @triton.jit
 def kernel(
         # Pointers to matrices
@@ -80,7 +81,6 @@ def kernel(
     tl.store(c_ptrs, c)
 
 def stub(
-        kernel,
         a,
         b,
         BLOCK_SIZE_M=16,
@@ -96,6 +96,7 @@ def stub(
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
+    # todo: passing grid with meta args isn't supported yet
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
     print("grid: ", grid)
     kernel[grid](
@@ -111,8 +112,6 @@ def stub(
     )
     return c
 
-# todo: passing grid with meta args isn't supported yet
-my_op = autodiff(kernel, stub, idx_upstream=2)
 
 a = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
 b = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
@@ -120,7 +119,7 @@ b = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
 def torch_fn(a, b):
     return torch.matmul(a, b)
 
-triton_output = stub(my_op, a, b)
+triton_output = stub(a, b)
 torch_output = torch_fn(a, b)
 # print(f"triton_output_with_fp16_inputs={triton_output[:4, :4]}")
 # print(f"torch_output_with_fp16_inputs={torch_output[:4, :4]}")
@@ -138,7 +137,7 @@ upstream = torch.randn_like(torch_output)
 a.requires_grad = True
 b.requires_grad = True
 
-my_out = stub(my_op, a, b)
+my_out = stub(a, b)
 my_out.backward(upstream)
 print("grad a: ", a.grad)
 print("grad b: ", b.grad)

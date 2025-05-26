@@ -15,6 +15,10 @@ import torch
 import triton
 import triton.language as tl
 
+from triton.backends.autodiff import autodiff
+
+
+
 DEVICE = torch.device("cuda:0")
 
 
@@ -87,6 +91,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
+@autodiff(idx_upstream=5, idxs_buffers=[3])
 # todo: rm do_not_specialize
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
@@ -179,9 +184,7 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 BLOCK_M = 16
 BLOCK_N = 16
 
-
-
-def stub(kernel, q, k, v, causal, sm_scale):
+def stub(q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
     # when v is in float8_e5m2 it is transposed.
@@ -196,7 +199,7 @@ def stub(kernel, q, k, v, causal, sm_scale):
     print("grid: ", grid)
 
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-    kernel[grid](
+    _attn_fwd[grid](
         q, k, v, sm_scale, M, o,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
         # k.stride(0), k.stride(1), 
@@ -214,11 +217,8 @@ def stub(kernel, q, k, v, causal, sm_scale):
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N)
 
-    return o # , M
+    return o
 
-
-kernel = _attn_fwd
-attention = stub
 
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 128, 64)])
 @pytest.mark.parametrize("causal", [True])
@@ -244,7 +244,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     ref_dq, q.grad = q.grad.clone(), None
 
     # triton implementation
-    tri_out = attention(kernel, q, k, v, causal, sm_scale).half()
+    tri_out = stub(q, k, v, causal, sm_scale).half()
     # comment: commented this out bc I'm using smaller shapes now but the bwd has this assert (requires a larger shape)
     #    PRE_BLOCK = 128
     #    assert N_CTX % PRE_BLOCK == 0

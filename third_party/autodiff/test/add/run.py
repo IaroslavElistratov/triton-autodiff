@@ -11,6 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
+@autodiff(idx_upstream=1)
 @triton.jit
 def kernel(
         x_ptr,  # *Pointer* to first input vector.
@@ -46,13 +47,6 @@ def stub(x):
 
     print("[usr stub] output", output)
     return output
-
-# returns a pytorch.autograd.Function with its forward and backward defined
-differentiated_kernel = autodiff(kernel, stub, idx_upstream=1)
-# here you can overwrite the original kernel with that autograd.Function, so that
-# stub calls the pytorch.autograd.Function instead of the original kernels --
-# to avoid needing to modify the stub signature to explicitly pipe that differentiated_kernel
-kernel = differentiated_kernel
 
 # fits in a single block -- less complex kernel (and thus the IR) bc not computing idx using block_size and pid in this case;
 # Also, bc it's exactly the size of the block -- no need to add masks when loading -- further simplifies loading

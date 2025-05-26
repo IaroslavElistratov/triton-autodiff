@@ -11,6 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
+@autodiff(idx_upstream=1)
 @triton.jit
 def kernel(
       a_ptr,
@@ -33,9 +34,10 @@ def kernel(
     tl.store(output_ptr + offsets, accum)
 
 
-def stub(kernel, a):
+def stub(a):
     output = torch.zeros_like(a)
     n_elements = output.numel()
+    # todo-high: grid with meta is not supported when calling bwd kernel (presumably BLOCK_SIZE got already inlined)
     # grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
     grid = (1, )
     print("grid: ", grid)
@@ -50,14 +52,11 @@ def torch_fn(torch_a):
     return accum
 
 
-# todo-high: grid with meta is not supported when calling bwd kernel (presumably BLOCK_SIZE got already inlined)
-my_op = autodiff(kernel, stub, idx_upstream=1)
-
 size = 4
 a = torch.randn(size, device=DEVICE)
 
 output_torch = torch_fn(a)
-output_triton = stub(my_op, a)
+output_triton = stub(a)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print("output_torch:", output_torch[:3, :3])
@@ -91,7 +90,7 @@ print()
 
 # triton autograd
 
-my_out = stub(my_op, a)
+my_out = stub(a)
 # todo-now: calling this doubles torch grad!
 my_out.backward(upstream)
 print("grad a: ", a.grad)

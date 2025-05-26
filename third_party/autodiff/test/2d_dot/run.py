@@ -11,6 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
+@autodiff(idx_upstream=2)
 @triton.jit
 def kernel(
         a_ptr,
@@ -27,14 +28,12 @@ def kernel(
     l = tl.dot(a, b)
     tl.store(output_ptr + offsets_2d, l)
 
-def stub(kernel, a, b):
+def stub(a, b):
     output = torch.empty(a.shape[0], b.shape[1]).to(dtype=torch.float32, device='cuda:0')
     # grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
     grid = (1, 1, 1)
     kernel[grid](a, b, output) # BLOCK_SIZE=4
     return output
-
-my_op = autodiff(kernel, stub, idx_upstream=2)
 
 
 # fits in a single block -- less complex kernel (and thus the IR) bc not computing idx using block_size and pid in this case;
@@ -50,7 +49,7 @@ def torch_fn(a, b):
 #### test forward ####
 
 output_torch = torch_fn(a, b)
-output_triton = stub(my_op, a, b)
+output_triton = stub(a, b)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print("output_torch:", output_torch[:3, :3])
@@ -71,7 +70,7 @@ upstream = torch.randn_like(output_torch)
 a.requires_grad = True
 b.requires_grad = True
 
-my_out = stub(my_op, a, b)
+my_out = stub(a, b)
 my_out.backward(upstream)
 print("grad a[:3, :3]: ", a.grad[:3, :3])
 print("grad b[:3, :3]: ", b.grad[:3, :3])

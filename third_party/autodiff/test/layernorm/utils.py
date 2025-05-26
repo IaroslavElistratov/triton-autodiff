@@ -3,8 +3,12 @@ import torch
 import triton
 import triton.language as tl
 
+from triton.backends.autodiff import autodiff
+
+
 DEVICE = torch.device("cuda:0")
 
+@autodiff(idx_upstream=1, idxs_buffers=[4,5])
 @triton.jit
 def _layer_norm_fwd_fused(
     X,  # pointer to the input
@@ -59,10 +63,7 @@ def _layer_norm_fwd_fused(
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
-kernel = _layer_norm_fwd_fused
-
-
-def stub(kernel, x, weight, bias, eps=1e-5):
+def stub(x, weight, bias, eps=1e-5):
     # allocate output
     y = torch.empty_like(x)
     # reshape input data into 2D tensor
@@ -82,7 +83,7 @@ def stub(kernel, x, weight, bias, eps=1e-5):
     # enqueue kernel
     grid = (M, )
     print("grid:", grid)
-    kernel[grid](  #
+    _layer_norm_fwd_fused[grid](  #
         x_arg, y, weight, bias, mean, rstd,  #
         x_arg.stride(0), N, eps,  #
         # todo-now: commenting out "num_warps=num_warps, num_ctas=1" solves the error!
