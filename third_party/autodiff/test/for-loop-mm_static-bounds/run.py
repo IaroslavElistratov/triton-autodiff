@@ -2,12 +2,13 @@ import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
 import torch
-DEVICE = torch.device("cuda:0")
-
 import triton
 import triton.language as tl
 
+from triton.backends.autodiff import autodiff
 
+torch.manual_seed(0)
+DEVICE = torch.device("cuda:0")
 
 # - removed
 #   - masks
@@ -110,14 +111,16 @@ def stub(
     )
     return c
 
-torch.manual_seed(0)
+# todo: passing grid with meta args isn't supported yet
+my_op = autodiff(kernel, stub, idx_upstream=2)
+
 a = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
 b = torch.randn((32, 32), device=DEVICE, dtype=torch.float16)
 
 def torch_fn(a, b):
     return torch.matmul(a, b)
 
-triton_output = stub(kernel, a, b)
+triton_output = stub(my_op, a, b)
 torch_output = torch_fn(a, b)
 # print(f"triton_output_with_fp16_inputs={triton_output[:4, :4]}")
 # print(f"torch_output_with_fp16_inputs={torch_output[:4, :4]}")
@@ -130,17 +133,12 @@ else:
 
 #### test backward ####
 
-from triton.backends.autodiff import autodiff
-
-# todo: passing grid with meta args isn't supported yet
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(4, 1, 1), idx_upstream=2)
 
 upstream = torch.randn_like(torch_output)
 a.requires_grad = True
 b.requires_grad = True
 
-stub(bwd_kernel, a, b)
-my_out = my_op(a, b)
+my_out = stub(my_op, a, b)
 my_out.backward(upstream)
 print("grad a: ", a.grad)
 print("grad b: ", b.grad)

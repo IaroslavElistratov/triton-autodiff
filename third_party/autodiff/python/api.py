@@ -669,14 +669,3 @@ def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
     # make_indexable is needed to enable wrapped_bwd_kernel support this calling convention
     # return make_indexable(op)
     return op
-
-
-
-
-
-#### utils  ####
-
-from functools import partial
-
-def right_partial(func, *args):
-    return lambda *fargs: func(*fargs, *args)

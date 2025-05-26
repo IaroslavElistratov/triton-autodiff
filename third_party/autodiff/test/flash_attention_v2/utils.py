@@ -3,24 +3,10 @@
 
 # - this is non causal only (so no need for the 2nd call to _attn_fwd_inner)
 
-# // one block + sm_scale (float arg) is constexpr
-
-# // !!! non causal
-
-
-
 # CHANGE LOG
-#   - made kernels args that are used as loop bounds -- to be tl.constexpr
+#   - made kernels args that are used as loop bounds -- tl.constexpr
 #     - start_m
 #     - almost all args to _attn_fwd
-#
-#   - reduced the range of inputs for benchmark (for speed of iter)
-
-#   - ==> yeah problem is that variable needed for loop boundaries "start_m = tl.program_id(0)" -- 
-
-
-
-# Made sm_scale a constepr (it was the only non ptr arg) -- so need special handing to compute grad wrt it
 
 # %%
 import pytest
@@ -29,9 +15,6 @@ import torch
 import triton
 import triton.language as tl
 
-print(triton.__path__)
-
-# DEVICE = triton.runtime.driver.active.get_active_torch_device()
 DEVICE = torch.device("cuda:0")
 
 
@@ -63,14 +46,6 @@ def keep(conf):
 # https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
 
 
-# %% [markdown]
-# ## Simplified
-# 
-# - this is non causal only (so no need for the 2nd call to _attn_fwd_inner)
-
-# %%
-
-
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q,  #
                     K_block_ptr, V_block_ptr,  #
@@ -80,9 +55,6 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
                     N_CTX: tl.constexpr):
     # range of values handled by this stage
     # causal = False
-    # answer-now: hardcoded N_CTX=16, here bc even though I'm passing compiled time constant -- it still shomehow makes the bounds dynamic
-    #   _attn_fwd_inner is inlined into the outer kernel, but its N_CTX is forwarded as an SSA argument so the entry point keeps a uniform parameter that the host sets at launch (just like grid size).
-    #   Until the very last “constant-prop + canonicalize” sweep runs, the loop boundary therefore looks dynamic
     lo, hi = 0, N_CTX
 
     K_block_ptr = tl.advance(K_block_ptr, (0, lo))
@@ -115,7 +87,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
-# answer-now: added do not specilize, other wise trtion adds them as constants as oppose to arguments -- and this is different from my causal=True case -- thus to avoid chaning what params I pass to the bwd kenrel in my bwd.py every time I filp "causal" flag -- thus here I just specialized them
+# todo: rm do_not_specialize
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
               stride_qz, stride_qh, stride_qm, stride_qk,  # 
@@ -200,10 +172,7 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 
 
 
-
-_COMPILED_KERNEL = None
-
-# answer-now: this works but unrolls the loop too many times
+# todo: unrolls the loop too many times
 # BLOCK_M = 128
 # BLOCK_N = 64
 
@@ -223,14 +192,11 @@ def stub(kernel, q, k, v, causal, sm_scale):
     stage = 3 if causal else 1
     print("stage: ", stage)
 
-
-    # answer-now: lauch only one block in PID-1 -- to make loops unrollable
     grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
     print("grid: ", grid)
 
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-    global _COMPILED_KERNEL
-    _COMPILED_KERNEL = kernel[grid](
+    kernel[grid](
         q, k, v, sm_scale, M, o,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
         # k.stride(0), k.stride(1), 
@@ -279,7 +245,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
 
     # triton implementation
     tri_out = attention(kernel, q, k, v, causal, sm_scale).half()
-    # comment: commented this out bc I'm using smaller shapes now but the bwd has this assert (requries a larger shape)
+    # comment: commented this out bc I'm using smaller shapes now but the bwd has this assert (requires a larger shape)
     #    PRE_BLOCK = 128
     #    assert N_CTX % PRE_BLOCK == 0
 
@@ -299,21 +265,13 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     # assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol)
     return tri_out, ref_out
 
-# NOTE: this works but unrolls for loop too many -- so try smaller shapes
-# tri_out, ref_out = test_op(1, 1, 128, 64, True)
+# todo: works but unrolls for loop too many -- so try smaller shapes
+# tri_out, ref_out = test_op(1, 1, 128, 64, causal=True)
 
-
-
-
-# NOTE: causal False
-tri_out, ref_out = test_op(1, 1, 16, 16, False)
-
+tri_out, ref_out = test_op(1, 1, 16, 16, causal=False)
 
 # # %%
 # tri_out[0, 0, :4, :4]
 
 # # %%
 # ref_out[0, 0, :4, :4]
-
-# %%
-# print("IR", _COMPILED_KERNEL.asm['ttir']) # triton IR

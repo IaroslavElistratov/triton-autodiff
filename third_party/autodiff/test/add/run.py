@@ -2,12 +2,12 @@ import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
 import torch
-torch.manual_seed(0)
-
 import triton
 import triton.language as tl
+
 from triton.backends.autodiff import autodiff
 
+torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
@@ -47,8 +47,8 @@ def stub(kernel, x):
     print("[usr stub] output", output)
     return output
 
-my_op = autodiff(kernel, stub, idx_upstream=1)
 
+my_op = autodiff(kernel, stub, idx_upstream=1)
 
 # fits in a single block -- less complex kernel (and thus the IR) bc not computing idx using block_size and pid in this case;
 # Also, bc it's exactly the size of the block -- no need to add masks when loading -- further simplifies loading
@@ -78,12 +78,10 @@ else:
 
 #### test backward ####
 
-
 upstream = torch.randn(4, device=DEVICE)
 a.requires_grad = True
 
 my_out = stub(my_op, a)
-# print("my_out.grad_fn", my_out.grad_fn)
 my_out.backward(upstream)
 print("grad a: ", a.grad)
 print()

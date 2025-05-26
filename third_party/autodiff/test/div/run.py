@@ -1,13 +1,15 @@
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
-
 import torch
-
 import triton
 import triton.language as tl
 
+from triton.backends.autodiff import autodiff
+
+
 DEVICE = torch.device("cuda:0")
+torch.manual_seed(0)
 
 
 @triton.jit
@@ -26,13 +28,16 @@ def kernel(
 
     tl.store(output_ptr + offsets, z)
 
-def stub(kernel, a, b):
+def stub(kernel, a, b, BLOCK_SIZE=4):
     output = torch.empty_like(a)
-    grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
+    # todo: support meta
+    # grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
+    grid = (triton.cdiv(output.numel(), BLOCK_SIZE), )
     kernel[grid](a, b, output, BLOCK_SIZE=4)
     return output
 
-torch.manual_seed(0)
+my_op = autodiff(kernel, stub, idx_upstream=2)
+
 size = 4
 a = torch.rand(size, device=DEVICE)
 b = torch.rand(size, device=DEVICE)
@@ -43,8 +48,8 @@ b = torch.rand(size, device=DEVICE)
 def torch_fn(a, b):
     return a / b
 
-output_torch =  torch_fn(a, b)
-output_triton = stub(kernel, a, b)
+output_torch = torch_fn(a, b)
+output_triton = stub(my_op, a, b)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print(output_torch)
@@ -66,14 +71,7 @@ upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
 
-from triton.backends.autodiff import autodiff
-
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=2)
-
-# todo: rm warmup
-stub(bwd_kernel, a, b)
-
-my_out = my_op(a, b)
+my_out = stub(my_op, a, b)
 my_out.backward(upstream)
 # print("grad a: ", a.grad)
 # print("grad b: ", b.grad)
