@@ -586,16 +586,15 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
 
 
-
-def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
+def autodiff(idx_upstream, idxs_buffers=None):
 
     def helper(AutogradFunc, spec, kernels, idxs):
         # returns a subclass of `AutogradFunc` whose .apply accepts keywords
         # AutogradFunc.forward stays (ctx, *args, **kwargs) -- fine as long as it can consume the ordered list I pass in
 
         target_sig = inspect.signature(spec)
-        if VERBOSE: print("[helper] target_sig", target_sig)
         params = target_sig.parameters.values()
+        if VERBOSE: print("[helper] target_sig", target_sig)
         if VERBOSE: print("[helper] params", params)
 
         class _Helper(AutogradFunc):
@@ -625,47 +624,53 @@ def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
 
         return _Helper
 
+    def inner(fwd_kernel):
 
-    # make my assumption explicit (same as api-v2)
-    assert isinstance(idx_upstream, int), "idx_upstream must be a single value"
+        nonlocal idx_upstream
+        nonlocal idxs_buffers
 
-    # new object, empty cache -- each JITFunction instance owns its own device_caches dict
-    bwd_kernel = clone_jit_function(fwd_kernel)
+        # make my assumption explicit (same as api-v2)
+        assert isinstance(idx_upstream, int), "idx_upstream must be a single value"
 
-    # device = torch.cuda.current_device()
-    # print("[autodiff] bwd_kernel cache:", bwd_kernel.device_caches[device][0])
+        # new object, empty cache -- each JITFunction instance owns its own device_caches dict
+        bwd_kernel = clone_jit_function(fwd_kernel)
 
-    # allows to associate a bwd JITFcuntion with this specific fwdKernel
-    # so that, from inside the compile hook (which will be triggered on the fwd JITFunciton)
-    # I can install the bwd CompiledKernel **on the backward JITFcuntion** (NOT fwd JITFcuntion)
-    fwd_kernel._bwd_kernel = bwd_kernel
+        # device = torch.cuda.current_device()
+        # print("[autodiff] bwd_kernel cache:", bwd_kernel.device_caches[device][0])
 
-    # I'm registering compile hook on all JITFunction[s] (both forward and backward);
-    # this flag is needed to be able to early exit from the hook (avoids triggering
-    # the autograd machinery on already differentiated kernels)
-    fwd_kernel._is_fwd_kernel = True
+        # allows to associate a bwd JITFcuntion with this specific fwdKernel
+        # so that, from inside the compile hook (which will be triggered on the fwd JITFunciton)
+        # I can install the bwd CompiledKernel **on the backward JITFcuntion** (NOT fwd JITFcuntion)
+        fwd_kernel._bwd_kernel = bwd_kernel
 
-    # idxs_buffers includes but not limited to idx_upstream -- see e.g. layer-norm example;
-    #
-    # todo-high: can determine automatically:
-    #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
-    #   - Or, in mlir pass output idx of all inputs which are used in store nodes
-    if idxs_buffers is None:
-        idxs_buffers = []
-    idxs_buffers.append(idx_upstream)
+        # I'm registering compile hook on all JITFunction[s] (both forward and backward);
+        # this flag is needed to be able to early exit from the hook (avoids triggering
+        # the autograd machinery on already differentiated kernels)
+        fwd_kernel._is_fwd_kernel = True
 
-    wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idx_upstream)
+        # idxs_buffers includes but not limited to idx_upstream -- see e.g. layer-norm example;
+        #
+        # todo-high: can determine automatically:
+        #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
+        #   - Or, in mlir pass output idx of all inputs which are used in store nodes
+        if idxs_buffers is None:
+            idxs_buffers = []
+        idxs_buffers.append(idx_upstream)
+
+        wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idx_upstream)
 
 
-    kernels = (fwd_kernel, wrapped_bwd_kernel)
-    idxs = (idx_upstream, idxs_buffers)
+        kernels = (fwd_kernel, wrapped_bwd_kernel)
+        idxs = (idx_upstream, idxs_buffers)
 
-    # takes the signature form fwd_kernel's python fn
-    op = helper(DifferentiatedCompiledKernel, fwd_kernel.fn, kernels, idxs)
+        # takes the signature form fwd_kernel's python fn
+        op = helper(DifferentiatedCompiledKernel, fwd_kernel.fn, kernels, idxs)
 
-    # avoid user needing to pass grid parameter explicitly
-    # because wrapped_bwd_kernel will called from inside the user stub inplace of the original
-    # kernel -- it will be called like so "wrapped_bwd_kernel[grid](...)";
-    # make_indexable is needed to enable wrapped_bwd_kernel support this calling convention
-    # return make_indexable(op)
-    return op
+        # avoid user needing to pass grid parameter explicitly
+        # because wrapped_bwd_kernel will called from inside the user stub inplace of the original
+        # kernel -- it will be called like so "wrapped_bwd_kernel[grid](...)";
+        # make_indexable is needed to enable wrapped_bwd_kernel support this calling convention
+        # return make_indexable(op)
+        return op
+
+    return inner
