@@ -112,7 +112,7 @@ def clone_jit_function(jit_func):
     return cloned
 
 # it's not as much as a stub, but more like helper to wrap_bwd_kernel from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, kernel_inputs, upstream):
+def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, kernel_inputs, upstream):
 
 
     # # todo: understand more
@@ -179,7 +179,7 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, kernel_i
     if VERBOSE: print("[wrap_bwd_kernel] fwd_args:", kernel_inputs)
     if VERBOSE: print("[wrap_bwd_kernel] bwd_args:", bwd_args)
 
-    bwd_kernel[(1,)](*kernel_inputs, *bwd_args)
+    bwd_kernel[grid](*kernel_inputs, *bwd_args)
     # bwd_kernel.run(grid=grid, warmup=False, *kernel_inputs, *bwd_args)
 
     print("[wrap_bwd_kernel] bwd_args (after calling bwd_kernel): ", bwd_args)
@@ -202,7 +202,7 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, kernel_i
     # #       but kernel actually sees (q, k, v, M, OUT, [other non-tensor arguments]) -- and your wrap_bwd_kernel create grad tensors for all tensor arguments (to feed to bwd_kernel) and then returns all added grad_tensor arguments
     # #       (which would also contain grad_M, grad_OUT) but because these M or OUT weren't passed to the autograd.Function.forwad, in autograd.Function.backward, it's incorrect to return grads wrt these values
     # #       so need a way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
-    
+
     # # use reverse to avoid shifting issues
     # # for i in reversed(non_stub_args_idxs):
     # #     # for the stub args which are **after** the popped upstream_idx,
@@ -483,10 +483,8 @@ triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, kernels, idxs, *fwd_kernel_inputs): # , grid
+    def forward(ctx, kernels, idxs, grid, *fwd_kernel_inputs): # , grid
         if VERBOSE: print("\n"*3, "Op.forward")
-
-        grid = (1, )
 
         fwd_kernel, wrapped_bwd_kernel = kernels
         idx_upstream, idxs_buffers = idxs
@@ -571,13 +569,13 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
         # wrapped_bwd_kernel does return grad_inputs that it initialized, after running the
         # generated_bwd_kernel these are populated -- and contain grads wrt original tensor inputs
-        grads = ctx.wrapped_bwd_kernel(ctx.idxs_buffers, fwd_kernel_inputs, upstream) # ctx.grid, 
+        grads = ctx.wrapped_bwd_kernel(ctx.idxs_buffers, ctx.grid, fwd_kernel_inputs, upstream) # ctx.grid, 
         if VERBOSE: print("[Op.backward] grads", grads)
 
         # at this point your "grads" value has grads wrt args of fwd kernel (including grad wrt kernel out itself
         # -- not popping it in wrap_bwd_kernel because here I'm required to return grads wrt ALL inputs which passed to AG.fwd)
         # todo-now: need to return grad for non tensor inputs
-        return (None, None, *grads, None)
+        return (None, None, None, *grads, None)
 
 
 
@@ -585,47 +583,41 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
 def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
 
-    def kwargify(AutogradFunc, spec=None):
+    def helper(AutogradFunc, spec, kernels, idxs):
         # returns a subclass of `AutogradFunc` whose .apply accepts keywords
         # AutogradFunc.forward stays (ctx, *args, **kwargs) -- fine as long as it can consume the ordered list I pass in
 
         target_sig = inspect.signature(spec)
-        print("[kwargify] target_sig", target_sig)
+        if VERBOSE: print("[helper] target_sig", target_sig)
         params = target_sig.parameters.values()
-        print("[kwargify] params", params)
+        if VERBOSE: print("[helper] params", params)
 
-        class _Kwargify(AutogradFunc):
+        class _Helper(AutogradFunc):
             # __signature__ = target_sig          # IDE/help friendly
             __doc__       = AutogradFunc.__doc__
             __name__      = AutogradFunc.__name__
             __qualname__  = AutogradFunc.__qualname__
 
-            # todo-now: add args to sig for: kernels, idxs, grid
             @classmethod
-            def apply(cls, kernels, idxs, *args, **kwargs): # grid, 
-                print("[_Kwargify.apply] args", args)
-                print("[_Kwargify.apply] kwargs", kwargs)
-                # print("[_Kwargify.apply] grid", grid)
+            def apply(cls, *args, **kwargs):
+                if VERBOSE: print("[_Helper.apply] args", args)
+                if VERBOSE: print("[_Helper.apply] kwargs", kwargs)
+                # if VERBOSE: print("[_Helper.apply] grid", cls.grid)
                 bound = target_sig.bind_partial(*args, **kwargs)
                 bound.apply_defaults()
                 # fixed positional order for c++ apply
                 ordered = [bound.arguments[p.name] for p in params]
-                return super().apply(kernels, idxs, *ordered) # grid,
+                return super().apply(kernels, idxs, cls.grid, *ordered)
 
-        return _Kwargify
+            # operates on the class level -- not on the instances of the class,
+            # because in pytorch instances of torch.autograd.Function never created
+            @classmethod
+            def __class_getitem__(cls, grid):
+                # mutate the existing class
+                cls.grid = grid
+                return cls.apply
 
-    def make_indexable(fn):
-        class Indexable:
-            def __getitem__(self, grid):
-                # return lambda *args, **kwargs: fn(grid, [*args, kwargs])
-                # below is needed for debugging:
-                def wrapper(*args, **kwargs):
-                    out = fn(grid, *args, **kwargs)
-                    for o in out:
-                        print("[Indexable] o.grad_fn", o) # o.grad_fn)
-                    # note returns nothing -- as regular triton kernels do
-                return wrapper
-        return Indexable()
+        return _Helper
 
 
     # make my assumption explicit (same as api-v2)
@@ -658,12 +650,12 @@ def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
 
     wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idx_upstream)
 
-    # takes the signature form fwd_kernel's python fn
-    kwargified_op = kwargify(DifferentiatedCompiledKernel, fwd_kernel.fn)
 
     kernels = (fwd_kernel, wrapped_bwd_kernel)
     idxs = (idx_upstream, idxs_buffers)
-    op = partial(kwargified_op.apply, kernels, idxs)
+
+    # takes the signature form fwd_kernel's python fn
+    op = helper(DifferentiatedCompiledKernel, fwd_kernel.fn, kernels, idxs)
 
     # avoid user needing to pass grid parameter explicitly
     # because wrapped_bwd_kernel will called from inside the user stub inplace of the original

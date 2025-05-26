@@ -40,8 +40,7 @@ def stub(kernel, x):
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    # kernel[grid](x, output, BLOCK_SIZE=4)
-    kernel(x, output, BLOCK_SIZE=4)
+    kernel[grid](x, output, BLOCK_SIZE=4)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
 
