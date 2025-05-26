@@ -1,5 +1,3 @@
-from triton.backends.autodiff import autodiff
-
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
@@ -8,6 +6,7 @@ torch.manual_seed(0)
 
 import triton
 import triton.language as tl
+from triton.backends.autodiff import autodiff
 
 DEVICE = torch.device("cuda:0")
 
@@ -50,11 +49,6 @@ def stub(kernel, x):
     print("[usr stub] output", output)
     return output
 
-
-device = torch.cuda.current_device()
-print("[main] fwd_kernel cache:", kernel.device_caches[device][0])
-
-
 my_op = autodiff(kernel, stub, idx_upstream=1)
 
 
@@ -90,15 +84,8 @@ else:
 upstream = torch.randn(4, device=DEVICE)
 a.requires_grad = True
 
-
-
-
-# # todo: rm warmup
-# print("\n" * 3, "bwd_kernel warmup")
-# stub(bwd_kernel, a)
-
 my_out = stub(my_op, a)
-print("my_out.grad_fn", my_out.grad_fn)
+# print("my_out.grad_fn", my_out.grad_fn)
 my_out.backward(upstream)
 print("grad a: ", a.grad)
 print()
