@@ -112,7 +112,7 @@ def clone_jit_function(jit_func):
     return cloned
 
 # it's not as much as a stub, but more like helper to wrap_bwd_kernel from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, kernel_inputs, upstream):
+def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, kernel_inputs, all_upstream):
 
 
     # # todo: understand more
@@ -163,9 +163,17 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
     # if VERBOSE: print("[wrap_bwd_kernel] idx_folded", idx_folded)
     # if VERBOSE: print("num_folded_before_upstream:", num_folded_before_upstream)
 
+    # because in AG.fwd I'm returning ALL the kernel tensor args, in the AG.bwd,
+    # I need to input grads wrt ALL OF THEM -- not just grad wrt the single
+    # output returned form the user stub;
+    # AG.bwd expects same num of args (upstream grads) as the outputs of
+    # AG.fwd -- so here select upstream of the actual output of the kernel:
+    idx_upstream -= num_folded_before_upstream
+    upstream = all_upstream[idx_upstream]
+
     bwd_args = []
     for i, arg in enumerate(kernel_inputs):
-        if i == (idx_upstream - num_folded_before_upstream):
+        if i == idx_upstream:
             bwd_args.append(upstream)
             continue
         if isinstance(arg, torch.Tensor):
@@ -182,7 +190,7 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
     # bwd_kernel.run(grid=grid, warmup=False, *kernel_inputs, *bwd_args)
 
-    print("[wrap_bwd_kernel] bwd_args (after calling bwd_kernel): ", bwd_args)
+    if VERBOSE: print("[wrap_bwd_kernel] bwd_args (after calling bwd_kernel): ", bwd_args)
 
     # don't need to pop grad wrt upstream anymore bc now (when my AG.Function works on lvl of kernels, but not stubs)
     # I actually do need to return grads wrt each of the inputs of the kernel inputs (including the out buffers):
@@ -209,9 +217,6 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
     # #     # shift them by 1 to account for the grad_out that I popped just above
     # #     bwd_args.pop(i) if i < idx_upstream else bwd_args.pop(i - 1)
 
-    print("[wrap_bwd_kernel] returning", bwd_args)
-
-    # unpack
     return (*bwd_args,)
 
 
@@ -541,13 +546,6 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *all_upstream):
 
-        # because in AG.fwd I'm returning ALL the kernel tensor args, in the AG.bwd,
-        # I need to input grads wrt ALL OF THEM -- not just grad wrt the single
-        # output returned form the user stub;
-        # AG.bwd expects same num of args (upstream grads) as the outputs of
-        # AG.fwd -- so here select upstream of the actual output of the kernel:
-        upstream = all_upstream[ctx.idx_upstream]
-
         if VERBOSE: print("\n"*3, "Op.backward")
 
         # reconstruct all fwd kernel args
@@ -569,13 +567,21 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
         # wrapped_bwd_kernel does return grad_inputs that it initialized, after running the
         # generated_bwd_kernel these are populated -- and contain grads wrt original tensor inputs
-        grads = ctx.wrapped_bwd_kernel(ctx.idxs_buffers, ctx.grid, fwd_kernel_inputs, upstream) # ctx.grid, 
+        grads = ctx.wrapped_bwd_kernel(ctx.idxs_buffers, ctx.grid, fwd_kernel_inputs, all_upstream)
         if VERBOSE: print("[Op.backward] grads", grads)
 
         # at this point your "grads" value has grads wrt args of fwd kernel (including grad wrt kernel out itself
         # -- not popping it in wrap_bwd_kernel because here I'm required to return grads wrt ALL inputs which passed to AG.fwd)
-        # todo-now: need to return grad for non tensor inputs
-        return (None, None, None, *grads, None)
+        all_outs = []
+        tensor_idx = 0
+        for i, is_tensor in enumerate(ctx.arg_types):
+            if is_tensor:
+                all_outs.append(grads[tensor_idx])
+                tensor_idx += 1
+            else:
+                all_outs.append(None)
+
+        return (None, None, None, *all_outs, )
 
 
 
@@ -600,7 +606,7 @@ def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
 
             @classmethod
             def apply(cls, *args, **kwargs):
-                if VERBOSE: print("[_Helper.apply] args", args)
+                # if VERBOSE: print("[_Helper.apply] args", args)
                 if VERBOSE: print("[_Helper.apply] kwargs", kwargs)
                 # if VERBOSE: print("[_Helper.apply] grid", cls.grid)
                 bound = target_sig.bind_partial(*args, **kwargs)
