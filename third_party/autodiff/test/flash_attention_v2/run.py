@@ -1,16 +1,14 @@
-
 import numpy as np
 import torch
 import triton
-# torch.set_printoptions(sci_mode=False, linewidth=1000)
 
-# comment: at import this also runs asserts comparing fwd out with torch's
-from utils import kernel, stub, BLOCK_M
+from triton.backends.autodiff import autodiff
+from utils import kernel, stub
 
 
 torch.manual_seed(20)
+# torch.set_printoptions(sci_mode=False, linewidth=1000)
 DEVICE = torch.device("cuda:0")
-
 
 # comment: M tensor is float32 -- while others are float16
 
@@ -26,9 +24,6 @@ sm_scale=0.5
 q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
 k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
 v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-
-grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
-
 
 
 # reference implementation
@@ -52,11 +47,13 @@ def torch_fn(q, k, v, causal, sm_scale):
     return ref_out
 
 
+my_op = autodiff(kernel, stub, idx_upstream=5, idxs_buffers=[3])
+
 
 #### test forward ####
 print("\n" * 4, "forward:")
 output_torch = torch_fn(q, k, v, causal, sm_scale)
-output_triton = stub(kernel, q, k, v, causal, sm_scale)
+output_triton = stub(my_op, q, k, v, causal, sm_scale)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 print("output_torch:", output_torch[0, 0, :4, :4])
@@ -73,33 +70,15 @@ else:
 
 
 #### test backward ####
-print("\n" * 4, "backward warmup:")
+print("\n" * 4, "backward:")
 
 upstream = torch.randn_like(q)
 q.requires_grad = True
 k.requires_grad = True
 v.requires_grad = True
 
-from triton.backends.autodiff import autodiff
 
-
-# todo: need to support passing no grad args (in this case "causal, sm_scale") -- and my torch.Function needs to know to not output derivatives wrt them
-# my_out = my_op(q, k, v, causal, sm_scale)
-from functools import partial
-# here binding trailing arguments (not arguments at the beginning), bc kernel happen to have these at the end
-def right_partial(func, *args):
-    return lambda *fargs: func(*fargs, *args)
-stub = right_partial(stub, causal, sm_scale)
-
-# now this uses the stub which only needs grad args (non grad args have been bound)
-my_op, bwd_kernel = autodiff(kernel, stub, grid, idx_upstream=5, non_stub_args_idxs=[3])
-
-# todo: rm warmup
-stub(bwd_kernel, q, k, v)
-
-print("\n" * 4, "backward:")
-
-my_out = my_op(q, k, v)
+my_out = stub(my_op, q, k, v, causal, sm_scale)
 my_out.backward(upstream)
 print("grad q[0, 0, :4, :4]: ", q.grad[0, 0, :4, :4])
 print("grad k[0, 0, :4, :4]: ", k.grad[0, 0, :4, :4])

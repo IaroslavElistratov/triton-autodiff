@@ -1,13 +1,13 @@
-# 5) masked and multi-block: Add + Mull
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
-
 
 import torch
 
 import triton
 import triton.language as tl
+from triton.backends.autodiff import autodiff
 
+torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
@@ -46,8 +46,8 @@ def stub(kernel, a, b, BLOCK_SIZE=4):
     kernel[grid](a, b, output, BLOCK_SIZE)
     return output
 
+my_op = autodiff(kernel, stub, idx_upstream=2)
 
-torch.manual_seed(0)
 
 size = 10
 a = torch.rand(size, device=DEVICE)
@@ -59,7 +59,7 @@ def torch_fn(torch_a, torch_b):
     return (torch_a + 0.5) * torch_b
 
 output_torch = torch_fn(a, b)
-output_triton = stub(kernel, a, b)
+output_triton = stub(my_op, a, b)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print(output_torch)
@@ -80,13 +80,7 @@ upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
 
-from triton.backends.autodiff import autodiff
-
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(3, 1, 1), idx_upstream=2)
-
-# todo: rm warmup
-stub(bwd_kernel, a, b)
-my_out = my_op(a, b)
+my_out = stub(my_op, a, b)
 my_out.backward(upstream)
 
 # print("grad a: ", grad_a)

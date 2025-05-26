@@ -1,13 +1,16 @@
 import numpy as np
 import torch
 import triton
-# torch.set_printoptions(sci_mode=False, linewidth=1000)
 
+from triton.backends.autodiff import autodiff
 from utils import kernel, stub
 
 torch.manual_seed(20)
+# torch.set_printoptions(sci_mode=False, linewidth=1000)
 DEVICE = torch.device("cuda:0")
 
+
+my_op = autodiff(kernel, stub, idx_upstream=1, idxs_buffers=[4,5])
 
 M = 1151 # 256 # 32
 N = 8192 # 256 # 32
@@ -31,7 +34,7 @@ upstream = .1 * torch.randn_like(x)
 
 #### test forward ####
 
-output_triton = stub(kernel, x, weight, bias, eps=1e-5)
+output_triton = stub(my_op, x, weight, bias, eps=1e-5)
 output_torch = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps=1e-5)
 
 # print("output_torch:", output_torch[:3, :3])
@@ -54,13 +57,7 @@ weight.requires_grad = True
 bias.requires_grad = True
 
 
-from triton.backends.autodiff import autodiff
-
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(M,), non_stub_args_idxs=[4,5], idx_upstream=1)
-
-# todo: rm warmup
-stub(bwd_kernel, x, weight, bias)
-my_out = my_op(x, weight, bias)
+my_out = stub(my_op, x, weight, bias)
 my_out.backward(upstream)
 
 print("x grad: ", x.grad)

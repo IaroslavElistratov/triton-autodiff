@@ -1,12 +1,13 @@
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
-
 import torch
-
 import triton
 import triton.language as tl
 
+from triton.backends.autodiff import autodiff
+
+torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
@@ -33,7 +34,9 @@ def stub(kernel, a, b):
     kernel[grid](a, b, output) # BLOCK_SIZE=4
     return output
 
-torch.manual_seed(0)
+my_op = autodiff(kernel, stub, idx_upstream=2)
+
+
 # fits in a single block -- less complex kernel (and thus the IR) bc not computing idx using block_size and pid in this case;
 # Also, bc it's exactly the size of the block -- no need to add masks when loading -- further simplifies loading
 size = 16
@@ -47,7 +50,7 @@ def torch_fn(a, b):
 #### test forward ####
 
 output_torch = torch_fn(a, b)
-output_triton = stub(kernel, a, b)
+output_triton = stub(my_op, a, b)
 max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print("output_torch:", output_torch[:3, :3])
@@ -68,13 +71,7 @@ upstream = torch.randn_like(output_torch)
 a.requires_grad = True
 b.requires_grad = True
 
-from triton.backends.autodiff import autodiff
-
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(1,), idx_upstream=2)
-
-# todo: rm warmup
-stub(bwd_kernel, a, b)
-my_out = my_op(a, b)
+my_out = stub(my_op, a, b)
 my_out.backward(upstream)
 print("grad a[:3, :3]: ", a.grad[:3, :3])
 print("grad b[:3, :3]: ", b.grad[:3, :3])

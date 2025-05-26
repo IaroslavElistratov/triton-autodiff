@@ -2,12 +2,13 @@
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
-
 import torch
-
 import triton
 import triton.language as tl
 
+from triton.backends.autodiff import autodiff
+
+torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
@@ -49,7 +50,8 @@ def stub(kernel, a, b, BLOCK_SIZE=4):
     # running asynchronously at this point.
     return output
 
-torch.manual_seed(0)
+
+my_op = autodiff(kernel, stub, idx_upstream=2)
 
 size = 8
 a = torch.rand(size, device=DEVICE)
@@ -63,7 +65,7 @@ def torch_fn(a, b):
 # forward
 
 output_torch = torch_fn(a, b)
-output_triton = stub(kernel, a, b)
+output_triton = stub(my_op, a, b)
 # print(output_torch)
 # print(output_triton)
 
@@ -84,14 +86,7 @@ upstream = torch.randn_like(a)
 a.requires_grad = True
 b.requires_grad = True
 
-
-from triton.backends.autodiff import autodiff
-
-my_op, bwd_kernel = autodiff(kernel, stub, grid=(2,), idx_upstream=2)
-
-# todo: rm warmup
-stub(bwd_kernel, a, b)
-my_out = my_op(a, b)
+my_out = stub(my_op, a, b)
 my_out.backward(upstream)
 
 # print("grad a: ", grad_a)
