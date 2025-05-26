@@ -6,7 +6,7 @@ This work clones the main Triton repository, but intends to minimize
 divergences in the core. Most of the autodiff work is in [third_party/autodiff](third_party/autodiff)
 subdirectory.
 
-**NOTE: This project is in its early stages and under heavy development -- it is not stable, not feature complete, and APIs will change.**
+**NOTE: This project is in its early stages and under heavy development -- it is not yet stable, not yet feature complete, and APIs will change.**
 
 
 # Motivation
@@ -370,19 +370,11 @@ q.requires_grad = True
 k.requires_grad = True
 v.requires_grad = True
 
-+ from triton.backends.autodiff import autodiff, right_partial
++ from triton.backends.autodiff import autodiff
 
-+ # temporary limitation:
-+ #   here need right_partial because binding trailing arguments (not arguments at the beginning), because kernel signature
-+ #   happen to have these at the end. Now this uses the stub which only needs grad args (non grad args have been bound)
-+ stub = right_partial(stub, causal, sm_scale)
++ my_op = autodiff(kernel, stub, idx_upstream=5, idxs_buffers=[3])
 
-+ my_op, bwd_kernel = autodiff(kernel, stub, grid, idx_upstream=5, non_stub_args_idxs=[3])
-
-+ # temporary limitation: run stub once before calling my_op
-+ stub(bwd_kernel, q, k, v)
-
-+ my_out = my_op(q, k, v)
++ my_out = stub(my_op, q, k, v)
 + my_out.backward(upstream)
 
 + # now grads have been populated for: q.grad, k.grad, v.grad
@@ -579,12 +571,9 @@ bias.requires_grad = True
 
 + from triton.backends.autodiff import autodiff
 
-+ my_op, bwd_kernel = autodiff(kernel, stub, grid=(M,), non_stub_args_idxs=[4,5], idx_upstream=1)
++ my_op = autodiff(kernel, stub, idx_upstream=1, idxs_buffers=[4, 5])
 
-+ # temporary limitation: run stub once before calling my_op
-+ stub(bwd_kernel, x, weight, bias)
-
-+ my_out = my_op(x, weight, bias)
++ my_out = stub(my_op, x, weight, bias)
 + my_out.backward(upstream)
 
 + # now grads have been populated for: x.grad, weight.grad, bias.grad
