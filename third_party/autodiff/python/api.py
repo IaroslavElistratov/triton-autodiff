@@ -483,8 +483,11 @@ triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, fwd_kernel, wrapped_bwd_kernel, idxs_buffers, grid, *fwd_kernel_inputs):
+    def forward(ctx, kernels, idxs, grid, *fwd_kernel_inputs):
         if VERBOSE: print("\n"*3, "Op.forward")
+
+        fwd_kernel, wrapped_bwd_kernel = kernels
+        idx_upstream, idxs_buffers = idxs
 
         # todo-now:
         # bc calling the fwd kernel will write output inplace of some original arguments (the
@@ -514,7 +517,9 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         ctx.save_for_backward(*tensor_fwd_kernel_inputs)
         ctx.non_tensor_inputs = [a for a in fwd_kernel_inputs if not isinstance(a, torch.Tensor)]
         ctx.arg_types = [isinstance(a, torch.Tensor) for a in fwd_kernel_inputs]
+
         ctx.idxs_buffers = idxs_buffers
+        ctx.idx_upstream = idx_upstream
 
         ctx.wrapped_bwd_kernel = wrapped_bwd_kernel
         ctx.grid = grid
@@ -541,8 +546,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         # output returned form the user stub;
         # AG.bwd expects same num of args (upstream grads) as the outputs of
         # AG.fwd -- so here select upstream of the actual output of the kernel:
-        upstream_idx = 1
-        upstream = all_upstream[upstream_idx]
+        upstream = all_upstream[ctx.idx_upstream]
 
         if VERBOSE: print("\n"*3, "Op.backward")
 
@@ -570,7 +574,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
         # at this point your "grads" value has grads wrt args of fwd kernel (including grad wrt kernel out itself
         # -- not popping it in wrap_bwd_kernel because here I'm required to return grads wrt ALL inputs which passed to AG.fwd)
-        return (None, None, None,  None, *grads,)
+        return (None, None, None, *grads,)
 
 
 
@@ -593,11 +597,11 @@ def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
         return Indexable()
 
 
-
     # make my assumption explicit (same as api-v2)
     assert isinstance(idx_upstream, int), "idx_upstream must be a single value"
 
-    bwd_kernel = clone_jit_function(fwd_kernel) # new object, empty cache
+    # new object, empty cache -- each JITFunction instance owns its own device_caches dict
+    bwd_kernel = clone_jit_function(fwd_kernel)
 
     # device = torch.cuda.current_device()
     # print("[autodiff] bwd_kernel cache:", bwd_kernel.device_caches[device][0])
@@ -623,7 +627,9 @@ def autodiff(fwd_kernel, stub, idx_upstream, idxs_buffers=None):
 
     wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idx_upstream)
 
-    my_op = partial(DifferentiatedCompiledKernel.apply, fwd_kernel, wrapped_bwd_kernel, idxs_buffers)
+    kernels = (fwd_kernel, wrapped_bwd_kernel)
+    idxs = (idx_upstream, idxs_buffers)
+    my_op = partial(DifferentiatedCompiledKernel.apply, kernels, idxs)
 
     # avoid user needing to pass grid parameter explicitly
     # because wrapped_bwd_kernel will called from inside the user stub inplace of the original
