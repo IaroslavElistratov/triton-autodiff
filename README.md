@@ -30,18 +30,21 @@ I'll show code snippets below. **For end to end example see: [autodiff/test/flas
   <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
 
 ```diff
++ from triton.backends.autodiff import autodiff
+
 
 + # Define your forward kernel as usual:
 
-+ # Unchanged (omitted for brevity)
 @triton.jit
++ # Unchanged (omitted for brevity)
 def _attn_fwd_inner
   ...
 
-+ # Unchanged (omitted for brevity)
++ @autodiff(idx_upstream=5, idxs_buffers=[3])
 + # temporary limitation: autotune is not supported for now
 - @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
++ # Unchanged (omitted for brevity)
 def _attn_fwd
   ...
 
@@ -298,13 +301,8 @@ def _attn_fwd
 
 + # Define your forward stub as usual:
 
-+ # The only change to your stub is to explicitly pass kernel function as the first argument
-+ # Everything else is unchanged (omitted for brevity below "...")
-- def stub_forward(ctx, q, k, v, causal, sm_scale):
-+ def stub_forward(kernel, ctx, q, k, v, causal, sm_scale):
-  ...
--  _attn_fwd[grid](
-+  kernel[grid](
++ # Unchanged (omitted for brevity)
+def stub_forward
   ...
 
 
@@ -370,11 +368,7 @@ q.requires_grad = True
 k.requires_grad = True
 v.requires_grad = True
 
-+ from triton.backends.autodiff import autodiff
-
-+ my_op = autodiff(kernel, stub, idx_upstream=5, idxs_buffers=[3])
-
-+ my_out = stub(my_op, q, k, v)
++ my_out = stub(q, k, v)
 + my_out.backward(upstream)
 
 + # now grads have been populated for: q.grad, k.grad, v.grad
@@ -396,12 +390,16 @@ I'll show code snippets below. **For end to end example see: [autodiff/test/laye
 
 ```diff
 
++ from triton.backends.autodiff import autodiff
+
+
 + # Define your forward kernel as usual:
 
-+ # Unchanged (omitted for brevity)
-
++ @ autodiff(idx_upstream=1, idxs_buffers=[4, 5])
 @triton.jit
++ # Unchanged (omitted for brevity)
 def _layer_norm_fwd_fused
+  ...
 
 
 + # No need to write backward kernels and backward stubs by hand anymore!
@@ -503,13 +501,8 @@ def _layer_norm_fwd_fused
 
 + # Define your forward stub as usual:
 
-+ # The only change to your stub is to explicitly pass kernel function as the first argument
-+ # Everything else is unchanged (omitted for brevity below "...")
-- def stub_forward(ctx, x, normalized_shape, weight, bias, eps):
-+ def stub_forward(kernel, ctx, x, normalized_shape, weight, bias, eps):
-  ...
--  _layer_norm_fwd_fused[grid](
-+  kernel[grid](
+def stub_forward
++ # Unchanged (omitted for brevity)
   ...
 
 
@@ -569,11 +562,7 @@ x.requires_grad = True
 weight.requires_grad = True
 bias.requires_grad = True
 
-+ from triton.backends.autodiff import autodiff
-
-+ my_op = autodiff(kernel, stub, idx_upstream=1, idxs_buffers=[4, 5])
-
-+ my_out = stub(my_op, x, weight, bias)
++ my_out = stub(x, weight, bias)
 + my_out.backward(upstream)
 
 + # now grads have been populated for: x.grad, weight.grad, bias.grad
