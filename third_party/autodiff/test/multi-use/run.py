@@ -36,21 +36,20 @@ def stub(a):
 
 size = 4
 a = torch.rand(size, device=DEVICE)
-# print("a: ", a)
 
-def torch_fn(a):
-    return a * (a + 0.5)
+def torch_fn(torch_a):
+    return torch_a * (torch_a + 0.5)
 
 output_torch = torch_fn(a)
 output_triton = stub(a)
-max_difference = torch.max(torch.abs(output_torch - output_triton))
-
 # print(output_torch)
 # print(output_triton)
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
 
+max_difference = torch.max(torch.abs(output_torch - output_triton))
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.0
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:

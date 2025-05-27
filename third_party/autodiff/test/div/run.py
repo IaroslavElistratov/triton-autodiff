@@ -41,23 +41,20 @@ def stub(a, b, BLOCK_SIZE=4):
 size = 4
 a = torch.rand(size, device=DEVICE)
 b = torch.rand(size, device=DEVICE)
-# print("a: ", a)
-# print("b: ", b)
-# print()
 
 def torch_fn(a, b):
     return a / b
 
 output_torch = torch_fn(a, b)
 output_triton = stub(a, b)
-max_difference = torch.max(torch.abs(output_torch - output_triton))
-
 # print(output_torch)
 # print(output_triton)
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
 
+max_difference = torch.max(torch.abs(output_torch - output_triton))
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.01
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
@@ -68,11 +65,13 @@ else:
 #### test backward ####
 
 upstream = torch.randn_like(a)
+
 a.requires_grad = True
 b.requires_grad = True
 
 my_out = stub(a, b)
 my_out.backward(upstream)
+
 # print("grad a: ", a.grad)
 # print("grad b: ", b.grad)
 # print()
@@ -89,7 +88,6 @@ torch_output.backward(upstream)
 # print("torch grad a: ", torch_a.grad)
 # print("torch grad b: ", torch_b.grad)
 # print()
-
 
 if torch.allclose(a.grad, torch_a.grad, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")

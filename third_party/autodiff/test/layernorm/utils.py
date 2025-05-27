@@ -6,7 +6,7 @@ import triton.language as tl
 from triton.backends.autodiff import autodiff
 
 
-DEVICE = torch.device("cuda:0")
+# NOTE: copied from official triton tutorial -- https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py
 
 @autodiff(idx_upstream=1, idxs_buffers=[4,5])
 @triton.jit
@@ -69,7 +69,7 @@ def stub(x, weight, bias, eps=1e-5):
     # reshape input data into 2D tensor
     x_arg = x.reshape(-1, x.shape[-1])
     M, N = x_arg.shape
-    # answer-now: some input types to the fn are float16 and some are float32
+    # some input types to the fn are float16 and some are float32
     mean = torch.empty((M, ), dtype=torch.float32, device=x.device)
     rstd = torch.empty((M, ), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
@@ -89,6 +89,4 @@ def stub(x, weight, bias, eps=1e-5):
         # todo-now: commenting out "num_warps=num_warps, num_ctas=1" solves the error!
         BLOCK_SIZE=BLOCK_SIZE #, num_warps=num_warps, num_ctas=1
     )
-
     return y
-

@@ -51,30 +51,31 @@ def torch_fn(a, b):
 
 output_torch = torch_fn(a, b)
 output_triton = stub(a, b)
-max_difference = torch.max(torch.abs(output_torch - output_triton))
 
 # print(output_torch)
 # print(output_triton)
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
 
+max_difference = torch.max(torch.abs(output_torch - output_triton))
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.0
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
 
 
-
-
 #### test backward ####
 
 upstream = torch.randn_like(a)
+
 a.requires_grad = True
 b.requires_grad = True
 
 my_out = stub(a, b)
 my_out.backward(upstream)
+
 print("grad a: ", a.grad)
 print("grad b: ", b.grad)
 print()

@@ -58,16 +58,15 @@ def torch_fn(a):
 
 output_torch = torch_fn(a)
 output_triton = stub(a)
-# print(output_torch)
-# print(output_triton)
 
 print("torch", output_torch)
 print("trition", output_triton)
 
 max_difference = torch.max(torch.abs(output_torch - output_triton))
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.0
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:

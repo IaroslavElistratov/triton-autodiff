@@ -24,10 +24,10 @@ def kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
     # 10 here is numel in the input;
-    # because I'm launching ceil(10, 4) -- 3 instances of this fn
-    # because each fn processes 4 elements, 3 instances will process 3*4=12
-    # elements. But the input only has 10 elements.
-    # So for the 3rd instance need to mask of last two elements
+    # I'm launching cdiv(10, 4) -- 3 instances of this fn
+    # bc each fn processes 4 elements, 3 instances will process
+    # 3*4=12 elements. But the input only has 10 elements.
+    # So for the 3rd instance need to mask the last two elements
     a = tl.load(a_ptr + offsets, mask=offsets<10)
     b = tl.load(b_ptr + offsets, mask=offsets<10)
 
@@ -58,14 +58,14 @@ def torch_fn(torch_a, torch_b):
 
 output_torch = torch_fn(a, b)
 output_triton = stub(a, b)
-max_difference = torch.max(torch.abs(output_torch - output_triton))
-
 # print(output_torch)
 # print(output_triton)
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
 
+max_difference = torch.max(torch.abs(output_torch - output_triton))
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.0
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
