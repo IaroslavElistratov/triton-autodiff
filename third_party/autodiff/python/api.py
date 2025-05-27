@@ -89,11 +89,11 @@ def run_mlir_pass(path):
 
 
 
-def clone_jit_function(jit_func):
+def create_new_jitfn(jit_func):
     assert isinstance(jit_func, JITFunction)
 
     # Create a new JITFunction with the same base function and parameters
-    cloned = JITFunction(
+    new = JITFunction(
         jit_func.fn,
         version=jit_func.version,
         do_not_specialize=jit_func.do_not_specialize,
@@ -104,12 +104,12 @@ def clone_jit_function(jit_func):
         launch_metadata=jit_func.launch_metadata
     )
 
-    cloned._autodiff_info = []
+    new._autodiff_info = []
 
     # Copy any pre-run hooks
-    cloned.pre_run_hooks = list(jit_func.pre_run_hooks)
+    new.pre_run_hooks = list(jit_func.pre_run_hooks)
 
-    return cloned
+    return new
 
 # it's not as much as a stub, but more like helper to wrap_bwd_kernel from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
 def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, all_upstream):
@@ -582,20 +582,20 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 #   - Or, in mlir pass output idx of all inputs which are used in store nodes
 def autodiff(idxs_buffers):
 
-    def helper(AutogradFunc, spec, kernels, idxs):
-        # returns a subclass of `AutogradFunc` whose .apply accepts keywords;
-        # AutogradFunc.forward signature staying (ctx, *args, **kwargs) -- fine as long as it can consume the ordered list I pass in
+    def helper(spec, kernels, idxs):
+        # returns a subclass of `DifferentiatedCompiledKernel` whose .apply accepts keywords;
+        # DifferentiatedCompiledKernel.forward signature staying (ctx, *args, **kwargs) -- fine as long as it can consume the ordered list I pass in
 
         target_sig = inspect.signature(spec)
         params = target_sig.parameters.values()
         if VERBOSE: print("[helper] target_sig", target_sig)
         if VERBOSE: print("[helper] params", params)
 
-        class _Helper(AutogradFunc):
+        class _Helper(DifferentiatedCompiledKernel):
             # __signature__ = target_sig          # IDE/help friendly
-            __doc__       = AutogradFunc.__doc__
-            __name__      = AutogradFunc.__name__
-            __qualname__  = AutogradFunc.__qualname__
+            __doc__       = DifferentiatedCompiledKernel.__doc__
+            __name__      = DifferentiatedCompiledKernel.__name__
+            __qualname__  = DifferentiatedCompiledKernel.__qualname__
 
             @classmethod
             def apply(cls, *args, **kwargs):
@@ -627,7 +627,7 @@ def autodiff(idxs_buffers):
             idxs_buffers = (idxs_buffers, )
 
         # new object, empty cache -- each JITFunction instance owns its own device_caches dict
-        bwd_kernel = clone_jit_function(fwd_kernel)
+        bwd_kernel = create_new_jitfn(fwd_kernel)
 
         # device = torch.cuda.current_device()
         # print("[autodiff] bwd_kernel cache:", bwd_kernel.device_caches[device][0])
@@ -646,7 +646,7 @@ def autodiff(idxs_buffers):
         kernels = (fwd_kernel, wrapped_bwd_kernel)
 
         # takes the signature form fwd_kernel's python fn
-        op = helper(DifferentiatedCompiledKernel, fwd_kernel.fn, kernels, idxs_buffers)
+        op = helper(fwd_kernel.fn, kernels, idxs_buffers)
 
         # avoid user needing to pass grid parameter explicitly
         # because wrapped_bwd_kernel will called from inside the user stub inplace of the original
