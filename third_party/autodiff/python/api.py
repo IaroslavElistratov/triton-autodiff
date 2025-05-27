@@ -112,7 +112,7 @@ def clone_jit_function(jit_func):
     return cloned
 
 # it's not as much as a stub, but more like helper to wrap_bwd_kernel from kernel_inputs -- the true stub is the user thing, this thing just piggy backs on the true stub
-def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, kernel_inputs, all_upstream):
+def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, all_upstream):
 
 
     # # todo: understand more
@@ -128,7 +128,6 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
     # todo-low: add input checks
     # assert a.device == DEVICE and b.device == DEVICE and upstream.device == DEVICE
 
-
     # todo-high: [support re-tracing]
     # for now still relying on bwd_kernel._autodiff_info, but for re-tracing seems need a more general
     # appraoch (supports interleaving calls to different CompiledKernels in the cache), but the bwd_kernel._autodiff_info is
@@ -142,40 +141,51 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
     #   specized in the fwd -- so that you don't need to pass that specialized idx (for a particular fwd CompiledKernel)
     #   through some global dict
 
-    if VERBOSE:  print("[wrap_bwd_kernel] kernel_inputs", kernel_inputs)
+    # if VERBOSE:  print("[wrap_bwd_kernel] kernel_inputs", kernel_inputs)
 
     # fwd specializes away some arguments (so that they aren't arguments in the fwd TTIR,
     # and thus not arguments in bwd TTIR as well) -- so don't pass them to bwd TTIR
     if VERBOSE: print("[wrap_bwd_kernel] bwd_kernel._autodiff_info: ", bwd_kernel._autodiff_info)
     idx_folded = bwd_kernel._autodiff_info[-1]
     if VERBOSE: print("[wrap_bwd_kernel] idx_folded: ", idx_folded)
-    # user provided idx of output (idx_upstream) in terms of all args to fwd python kernel
+    # user provided idx of outputs (idx_folded) in terms of all args to fwd python kernel
     # (JITFunction), when it compiled, some of the args potentially got specialized away.
     # Thus here need to shift that user specified index to account for these args (that got
     # specialized away) if they were located before the user provided idx_upstream
-    num_folded_before_upstream = 0
-    # reverse to prevent shifting issues when popping
-    for i in reversed(idx_folded):
+
+    # reverse to prevent shifting issues when popping;
+    for i in reversed(sorted(idx_folded)):
         kernel_inputs.pop(i)
-        if i < idx_upstream:
-            num_folded_before_upstream += 1
+
+
+    # for upstream each idx, shift it by how many args
+    # before it has been folded
+
+    # sort because usr can pass idxs in arbitrary order
+    idxs_buffers = reversed(sorted(idxs_buffers))
+
+    shifted_idxs_buffers = []
+    for idx in idxs_buffers:
+        num_folded_before = sum(x < idx for x in idx_folded)
+        idx_shifted = idx - num_folded_before
+        shifted_idxs_buffers.append(idx_shifted)
+        print(f"output-buffer at idx {idx} was shifted by {num_folded_before}")
 
     # if VERBOSE: print("[wrap_bwd_kernel] idx_folded", idx_folded)
     # if VERBOSE: print("num_folded_before_upstream:", num_folded_before_upstream)
 
-    # because in AG.fwd I'm returning ALL the kernel tensor args, in the AG.bwd,
-    # I need to input grads wrt ALL OF THEM -- not just grad wrt the single
-    # output returned form the user stub;
-    # AG.bwd expects same num of args (upstream grads) as the outputs of
-    # AG.fwd -- so here select upstream of the actual output of the kernel:
-    idx_upstream -= num_folded_before_upstream
-    upstream = all_upstream[idx_upstream]
+    print("all_upstream: ", all_upstream)
 
+    # pass (from the AG.bwd inputs) upstream grads wrt to all (not just one) outputs
     bwd_args = []
+    # idx_upstream = 0
     for i, arg in enumerate(kernel_inputs):
-        if i == idx_upstream:
-            bwd_args.append(upstream)
+        # grad wrt an output -- fill with upstream
+        if i in shifted_idxs_buffers:
+            bwd_args.append(all_upstream[i]) # all_upstream[idx_upstream]
+            # idx_upstream += 1
             continue
+        # grad wrt an input -- fill with zeros
         if isinstance(arg, torch.Tensor):
             bwd_args.append(torch.zeros_like(arg))
 
@@ -184,7 +194,7 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
     #   with that signature yet -- so my wrapping didnt' take place -- so
     #   calling the bellow will fail
 
-    if VERBOSE: print("[wrap_bwd_kernel] fwd_args:", kernel_inputs)
+    # if VERBOSE: print("[wrap_bwd_kernel] fwd_args:", kernel_inputs)
     if VERBOSE: print("[wrap_bwd_kernel] bwd_args:", bwd_args)
 
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
@@ -203,20 +213,12 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idx_upstream, idxs_buffers, grid, ke
 
     # print("[wrap_bwd_kernel] bwd_args (after popping grad wrt out): ", bwd_args)
 
-
     # #   capture stub and wrap_bwd_kernel args by closure -- instead of passing them as inputs to forward() -- otherwise autograd requires to return same number of grads
     # #   cannot just pass "def forward(ctx, stub, wrap_bwd_kernel, *stub_inputs)" and later bind stub and wrap_bwd_kernel -- bc even if bind and thus won't need to feed them them at runtime, autograd expect I should return 4 args (as the number of args to autograd.Function.forward)
     # #   E.g. for flash aten kernel user fwd stub creates some additional tensor args and passes them to the kernel (e.g. M, OUT) and feeds them to the kernel but the user calls stub with "my_op(q, k, v)" -- so the autograd.Function.forward also only expects "q, k, v"
     # #       but kernel actually sees (q, k, v, M, OUT, [other non-tensor arguments]) -- and your wrap_bwd_kernel create grad tensors for all tensor arguments (to feed to bwd_kernel) and then returns all added grad_tensor arguments
     # #       (which would also contain grad_M, grad_OUT) but because these M or OUT weren't passed to the autograd.Function.forwad, in autograd.Function.backward, it's incorrect to return grads wrt these values
     # #       so need a way to only return grad wrt fwd stub args (and NOT wrt all bwd_kernel tensor args)
-
-    # # use reverse to avoid shifting issues
-    # # for i in reversed(non_stub_args_idxs):
-    # #     # for the stub args which are **after** the popped upstream_idx,
-    # #     # shift them by 1 to account for the grad_out that I popped just above
-    # #     bwd_args.pop(i) if i < idx_upstream else bwd_args.pop(i - 1)
-
     return (*bwd_args,)
 
 
@@ -476,32 +478,22 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
 
 
-# todo-med: user interface of adding a deco to their stub seems cleaner than having them call a separate callable
-# def grad(stub, idx_upstream):
-#     def inner(kernel):
-#         return
-#     return inner
-
-
-
-
 class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, kernels, idxs, grid, *fwd_kernel_inputs): # , grid
+    def forward(ctx, kernels, idxs_buffers, grid, *fwd_kernel_inputs):
         if VERBOSE: print("\n"*3, "Op.forward")
 
         fwd_kernel, wrapped_bwd_kernel = kernels
-        idx_upstream, idxs_buffers = idxs
 
-        # todo-now:
+        # todo:
         # bc calling the fwd kernel will write output inplace of some original arguments (the
         # ones which are output buffers) -- but my bwd expects a cleanly initialized buffers
         #  - clone them and store on the ctx BEFORE they got overwritten by calling the fwd kernel?
         #  - actually maybe even better: on cpp side remove the entire fwd subgraph leaning the ouput?
         #    Bc fwd result which I re-compute during bwd will not be used anywhere anyway -- wasted computations
 
-        if VERBOSE: print("[Op.forward] fwd_kernel_inputs (before calling kernel)", *fwd_kernel_inputs)
+        # if VERBOSE: print("[Op.forward] fwd_kernel_inputs (before calling kernel)", *fwd_kernel_inputs)
         # calling wrap_bwd_kernel inside AG is also nice because clary separates roles:
         #   - diff'ing everything what's called inside this AG class (kernel) -- I take care of
         #   - diff'ing anything outside this class (i.e. stub logic including pre/post processing) -- torch's responsibility
@@ -509,10 +501,9 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         fwd_kernel[grid](*fwd_kernel_inputs)
         # self.run(grid=grid, warmup=False, *args, **kwargs)
 
-        if VERBOSE: print("[Op.forward] fwd_kernel_inputs (after calling kernel)", *fwd_kernel_inputs)
+        # if VERBOSE: print("[Op.forward] fwd_kernel_inputs (after calling kernel)", *fwd_kernel_inputs)
 
-        # input a list of idx_buffer_args -- from user so that here you'd use it for mark_dirty
-        # and in AG.backward you can return none wrt all of them
+        # todo: in AG.backward you can return none wrt all of them
         for i in idxs_buffers:
             ctx.mark_dirty(fwd_kernel_inputs[i])
 
@@ -522,9 +513,6 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
         ctx.save_for_backward(*tensor_fwd_kernel_inputs)
         ctx.non_tensor_inputs = [a for a in fwd_kernel_inputs if not isinstance(a, torch.Tensor)]
         ctx.arg_types = [isinstance(a, torch.Tensor) for a in fwd_kernel_inputs]
-
-        ctx.idxs_buffers = idxs_buffers
-        ctx.idx_upstream = idx_upstream
 
         ctx.wrapped_bwd_kernel = wrapped_bwd_kernel
         ctx.grid = grid
@@ -545,8 +533,12 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *all_upstream):
-
         if VERBOSE: print("\n"*3, "Op.backward")
+
+        # because in AG.fwd I'm returning ALL the kernel tensor args, in the AG.bwd,
+        # I need to input grads wrt ALL OF THEM -- not just grad wrt the single
+        # output returned form the user stub;
+        # AG.bwd expects same num of args (upstream grads) as the outputs of AG.fwd
 
         # reconstruct all fwd kernel args
         fwd_kernel_inputs = []
@@ -561,13 +553,13 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
                 non_tensor_idx += 1
 
         # todo-now: note output buffers (in this case at idx=1) have my grad_fn attached -- but in AG.bwd I'll be runnign kernel on them again: undesirable?
-        if VERBOSE: print("[Op.backward] reconstructed fwd_kernel_inputs", fwd_kernel_inputs)
+        # if VERBOSE: print("[Op.backward] reconstructed fwd_kernel_inputs", fwd_kernel_inputs)
         # > tensor([...], device='cuda:0', requires_grad=True),
         # > tensor([...], device='cuda:0', grad_fn=<DifferentiatedCompiledKernelBackward>)]
 
         # wrapped_bwd_kernel does return grad_inputs that it initialized, after running the
         # generated_bwd_kernel these are populated -- and contain grads wrt original tensor inputs
-        grads = ctx.wrapped_bwd_kernel(ctx.idxs_buffers, ctx.grid, fwd_kernel_inputs, all_upstream)
+        grads = ctx.wrapped_bwd_kernel(ctx.grid, fwd_kernel_inputs, all_upstream)
         if VERBOSE: print("[Op.backward] grads", grads)
 
         # at this point your "grads" value has grads wrt args of fwd kernel (including grad wrt kernel out itself
@@ -585,12 +577,14 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
 
 
-
-def autodiff(idx_upstream, idxs_buffers=None):
+# todo-low: can determine automatically:
+#   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
+#   - Or, in mlir pass output idx of all inputs which are used in store nodes
+def autodiff(idxs_buffers):
 
     def helper(AutogradFunc, spec, kernels, idxs):
-        # returns a subclass of `AutogradFunc` whose .apply accepts keywords
-        # AutogradFunc.forward stays (ctx, *args, **kwargs) -- fine as long as it can consume the ordered list I pass in
+        # returns a subclass of `AutogradFunc` whose .apply accepts keywords;
+        # AutogradFunc.forward signature staying (ctx, *args, **kwargs) -- fine as long as it can consume the ordered list I pass in
 
         target_sig = inspect.signature(spec)
         params = target_sig.parameters.values()
@@ -626,11 +620,11 @@ def autodiff(idx_upstream, idxs_buffers=None):
 
     def inner(fwd_kernel):
 
-        nonlocal idx_upstream
         nonlocal idxs_buffers
-
-        # make my assumption explicit (same as api-v2)
-        assert isinstance(idx_upstream, int), "idx_upstream must be a single value"
+        assert isinstance(idxs_buffers, (tuple, int)), f"idxs_buffers must be either tuple or int, got {type(idxs_buffers)}"
+        # make the most common case slightly more convenient for usr
+        if isinstance(idxs_buffers, int):
+            idxs_buffers = (idxs_buffers, )
 
         # new object, empty cache -- each JITFunction instance owns its own device_caches dict
         bwd_kernel = clone_jit_function(fwd_kernel)
@@ -648,29 +642,16 @@ def autodiff(idx_upstream, idxs_buffers=None):
         # the autograd machinery on already differentiated kernels)
         fwd_kernel._is_fwd_kernel = True
 
-        # idxs_buffers includes but not limited to idx_upstream -- see e.g. layer-norm example;
-        #
-        # todo-high: can determine automatically:
-        #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
-        #   - Or, in mlir pass output idx of all inputs which are used in store nodes
-        if idxs_buffers is None:
-            idxs_buffers = []
-        idxs_buffers.append(idx_upstream)
-
-        wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idx_upstream)
-
-
+        wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idxs_buffers)
         kernels = (fwd_kernel, wrapped_bwd_kernel)
-        idxs = (idx_upstream, idxs_buffers)
 
         # takes the signature form fwd_kernel's python fn
-        op = helper(DifferentiatedCompiledKernel, fwd_kernel.fn, kernels, idxs)
+        op = helper(DifferentiatedCompiledKernel, fwd_kernel.fn, kernels, idxs_buffers)
 
         # avoid user needing to pass grid parameter explicitly
         # because wrapped_bwd_kernel will called from inside the user stub inplace of the original
         # kernel -- it will be called like so "wrapped_bwd_kernel[grid](...)";
         # make_indexable is needed to enable wrapped_bwd_kernel support this calling convention
-        # return make_indexable(op)
         return op
 
     return inner

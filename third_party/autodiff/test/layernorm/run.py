@@ -71,13 +71,13 @@ print("torch_weight.grad: ", torch_weight.grad)
 print("torch_bias.grad: ", torch_bias.grad)
 print()
 
-print("grad_x norm difference:", torch.norm(x - torch_x.grad).item())
-print("grad_weight norm difference:", torch.norm(weight - torch_weight.grad).item())
-print("grad_bias norm difference:", torch.norm(bias - torch_bias.grad).item())
+# print("grad_x norm difference:", torch.norm(x - torch_x.grad).item())
+# print("grad_weight norm difference:", torch.norm(weight - torch_weight.grad).item())
+# print("grad_bias norm difference:", torch.norm(bias - torch_bias.grad).item())
 
-print("grad_x abs difference:", (x.grad - torch_x.grad).abs().mean())
-print("grad_weight abs difference:", (weight - torch_weight.grad).abs().mean())
-print("grad_bias abs difference:", (bias - torch_bias.grad).abs().mean())
+# print("grad_x abs difference:", (x.grad - torch_x.grad).abs().mean())
+# print("grad_weight abs difference:", (weight - torch_weight.grad).abs().mean())
+# print("grad_bias abs difference:", (bias - torch_bias.grad).abs().mean())
 
 
 # todo: rtol is high because there's a bug how I handle truncation (see issue #10)

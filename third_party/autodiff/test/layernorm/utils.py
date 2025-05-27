@@ -8,7 +8,7 @@ from triton.backends.autodiff import autodiff
 
 # NOTE: copied from official triton tutorial -- https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py
 
-@autodiff(idx_upstream=1, idxs_buffers=[4,5])
+@autodiff(idxs_buffers=(1,4,5))
 @triton.jit
 def _layer_norm_fwd_fused(
     X,  # pointer to the input

@@ -11,7 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-@autodiff(idx_upstream=1)
+@autodiff(idxs_buffers=1)
 @triton.jit
 def kernel(
       a_ptr,

@@ -16,7 +16,7 @@ DEVICE = torch.device("cuda:0")
 #   - masks
 #   - % M, % N
 
-@autodiff(idx_upstream=2)
+@autodiff(idxs_buffers=2)
 @triton.jit
 def kernel(
         # Pointers to matrices
