@@ -182,7 +182,11 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, a
     for i, arg in enumerate(kernel_inputs):
         # grad wrt an output -- fill with upstream
         if i in shifted_idxs_buffers:
-            bwd_args.append(all_upstream[i]) # all_upstream[idx_upstream]
+            # clone them because torch's custom AG.Func contract is to
+            # "NEVER to modify these in-place" -- https://docs.pytorch.org/docs/stable/notes/extending.html;
+            # Otherwise doubles grads when later executing torch_fn reference impls;
+            bwd_args.append(all_upstream[i].clone())
+            # bwd_args.append(all_upstream[idx_upstream])
             # idx_upstream += 1
             continue
         # grad wrt an input -- fill with zeros
