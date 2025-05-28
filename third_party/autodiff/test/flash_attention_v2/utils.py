@@ -87,15 +87,15 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
-@autodiff(idx_upstream=5, idxs_buffers=[4])
+@autodiff(idxs_buffers=(4, 5))
 # todo: rm do_not_specialize
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
-              stride_qz, stride_qh, stride_qm, stride_qk,  # 
+              stride_qz, stride_qh, stride_qm, stride_qk,  #
               stride_kn, stride_kk,  #
               stride_vk, stride_vn,  #
               stride_om, stride_on,  #
-              Z, H, N_CTX: tl.constexpr,  #,  #
+              Z, H, N_CTX: tl.constexpr,  #
               HEAD_DIM: tl.constexpr,  #
               BLOCK_M: tl.constexpr,  #
               BLOCK_N: tl.constexpr,  #
@@ -259,4 +259,4 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
 # todo: works but unrolls for loop too many -- so try smaller shapes
 # test_op(1, 1, 128, 64, causal=True)
 
-test_op(1, 1, 16, 16, causal=False)
+test_op(1, 1, 32, 16, causal=False)
