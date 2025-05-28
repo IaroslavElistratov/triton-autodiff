@@ -507,9 +507,7 @@ class DifferentiatedCompiledKernel(torch.autograd.Function):
 
         # if VERBOSE: print("[Op.forward] fwd_kernel_inputs (after calling kernel)", *fwd_kernel_inputs)
 
-        # todo: in AG.backward you can return none wrt all of them
-        for i in idxs_buffers:
-            ctx.mark_dirty(fwd_kernel_inputs[i])
+        ctx.mark_dirty(*[fwd_kernel_inputs[i] for i in idxs_buffers])
 
         # if VERBOSE: print("saving for bwd: ", fwd_kernel_inputs)
         # ugly workaround because save_for_backward only works for tensor inputs
