@@ -9,7 +9,7 @@ if __name__ == "__main__":
   tests = [
     "add", "add-mul", "div", "add-mul-div", "math-ops",
     "multiblock_add-mul", "mask_multiblock_add-mul",
-    "2d_dot", "multi-use", "multi-output_multi-use",
+    "2d_dot", "2d_dot_interleave", "multi-use", "multi-output_multi-use",
     "for-loop", "for-loop-mm_static-bounds",
     "flash_attention_v2", "layernorm"
   ]
