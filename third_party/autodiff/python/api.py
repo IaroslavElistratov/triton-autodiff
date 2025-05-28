@@ -86,6 +86,46 @@ def run_mlir_pass(path):
 
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
+    def remove_constexpr(jit_fn, bwd_jit_fn, key):
+        # remove constexpr -- bc backward signature or key should not
+        # have them (bc they will NOT be provided to the bwd kernel)
+
+        if VERBOSE: print("[remove_constexpr] key: ", key)
+        # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
+        #   > in JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
+
+        # key = key.replace(", ('constexpr', 4)", "")
+
+        # replaces all occurrences of , ('constexpr', [some integer]) in the string
+        sub_strs = key.split("[")[1].split("]")[0].split("), (")
+        # if VERBOSE: print('sub_strs: ', sub_strs)
+        # >>> ["('*fp32', 'D'", "'*fp32', 'D'", "'constexpr', 4", "'*fp32', 'D'", "'*fp32', 'D')"]
+
+        # iterate over dict whose keys are tuples of ints, and
+        # extract all ints from all keys into a single list
+        idx_const_ints = [i for key in compile_dict['constants'].keys() for i in key]
+        num_const_args = len(idx_const_ints)
+        if VERBOSE: print("[remove_constexpr] idx_const_ints", idx_const_ints)
+
+        sig_params = list(jit_fn.signature.parameters.values())
+        # reverse to avoid shifting issues
+        for i, s in reversed(list(enumerate(sig_params))):
+            if i in idx_const_ints:
+                sub_strs.pop(i)
+                sig_params.pop(i)
+                bwd_jit_fn.params.pop(i)
+        new_key = "[" + "), (".join(sub_strs)
+        new_key += "]" if new_key[-1] == ")" else ")]"
+        new_key += key.split("]")[1]
+        bwd_jit_fn.signature = bwd_jit_fn.signature.replace(parameters=sig_params)
+
+        if VERBOSE:
+            print("[remove_constexpr] new_key", new_key)
+            print("[remove_constexpr] bwd_jit_fn.signature: ", bwd_jit_fn.signature)
+            print("[remove_constexpr] bwd_jit_fn self.params:", bwd_jit_fn.params)
+
+        return new_key, num_const_args
+
     def key_add_args(key):
 
         # can't run the binder to automatically create specialization and options (both needed to create key)
@@ -207,52 +247,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # corresponding cache entry (with differentiated CompiledKernel) to
         # cache of bwd JITFunction
 
-        #   5.1. remove constexpr from: key, signature, params
-
-        def remove_constexpr(jit_fn, bwd_jit_fn, key):
-            # remove constexpr -- bc backward signature or key should not
-            # have them (bc they will NOT be provided to the bwd kernel)
-
-            if VERBOSE: print("[remove_constexpr] key: ", key)
-            # need to also modify self.signature bc it's used in create_binder -> create_function_from_signature
-            #   > in JITFunction.run "binder = create_function_from_signature(self.signature, self.params, backend)"
-
-            # key = key.replace(", ('constexpr', 4)", "")
-
-            # replaces all occurrences of , ('constexpr', [some integer]) in the string
-            sub_strs = key.split("[")[1].split("]")[0].split("), (")
-            # if VERBOSE: print('sub_strs: ', sub_strs)
-            # >>> ["('*fp32', 'D'", "'*fp32', 'D'", "'constexpr', 4", "'*fp32', 'D'", "'*fp32', 'D')"]
-
-            # iterate over dict whose keys are tuples of ints, and
-            # extract all ints from all keys into a single list
-            idx_const_ints = [i for key in compile_dict['constants'].keys() for i in key]
-            num_const_args = len(idx_const_ints)
-            if VERBOSE: print("[remove_constexpr] idx_const_ints", idx_const_ints)
-
-            sig_params = list(jit_fn.signature.parameters.values())
-            # reverse to avoid shifting issues
-            for i, s in reversed(list(enumerate(sig_params))):
-                if i in idx_const_ints:
-                    sub_strs.pop(i)
-                    sig_params.pop(i)
-                    bwd_jit_fn.params.pop(i)
-            new_key = "[" + "), (".join(sub_strs)
-            new_key += "]" if new_key[-1] == ")" else ")]"
-            new_key += key.split("]")[1]
-            bwd_jit_fn.signature = bwd_jit_fn.signature.replace(parameters=sig_params)
-
-            if VERBOSE:
-                print("[remove_constexpr] new_key", new_key)
-                print("[remove_constexpr] bwd_jit_fn.signature: ", bwd_jit_fn.signature)
-                print("[remove_constexpr] bwd_jit_fn self.params:", bwd_jit_fn.params)
-
-            return new_key, num_const_args
-
+        # 5.1. remove constexpr from: key, signature, params
         new_key, num_const_args = remove_constexpr(jit_fn, bwd_jit_fn, key)
 
-        #   5.2. add new args to: key, signature, params
-
+        # 5.2. add new args to: key, signature, params
         # add new args to key
         new_key = key_add_args(new_key)
 
@@ -263,7 +261,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         new_binder = rebuild_binder(bwd_jit_fn, num_added_args, backend)
 
-        #   5.3. add to bwd CompiledKernel into the cache
+        # 5.3. add to bwd CompiledKernel into the cache
 
         # keep forward cache entry as is, don't delete it
 
