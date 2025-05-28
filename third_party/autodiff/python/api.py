@@ -174,8 +174,6 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, a
     # if VERBOSE: print("[wrap_bwd_kernel] idx_folded", idx_folded)
     # if VERBOSE: print("num_folded_before_upstream:", num_folded_before_upstream)
 
-    print("all_upstream: ", all_upstream)
-
     # pass (from the AG.bwd inputs) upstream grads wrt to all (not just one) outputs
     bwd_args = []
     # idx_upstream = 0
@@ -323,6 +321,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         device = driver.active.get_current_device()
         fwd_kernel_cache, target, backend, _binder = jit_fn.device_caches[device]
         bwd_kernel_cache, target, backend, _binder = bwd_jit_fn.device_caches[device]
+
+        assert len(fwd_kernel_cache) == 1, "Temporary limitation: retracing is not yet supported."
 
         # Get the kernel using the same key
         fwd_compiled_kernel = fwd_kernel_cache[key]
