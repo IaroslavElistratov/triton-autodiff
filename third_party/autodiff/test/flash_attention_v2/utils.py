@@ -1,9 +1,9 @@
 # %%
-## Simplified
-
-# - this is non causal only (so no need for the 2nd call to _attn_fwd_inner)
+# Copied from official triton tutorial (before blackwell support):
+# https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
 
 # CHANGE LOG
+#   - non causal only (so no need for the 2nd call to _attn_fwd_inner)
 #   - made kernels args that are used as loop bounds -- tl.constexpr
 #     - start_m
 #     - almost all args to _attn_fwd
@@ -14,6 +14,10 @@ import torch
 
 import triton
 import triton.language as tl
+
+from triton.backends.autodiff import autodiff
+
+
 
 DEVICE = torch.device("cuda:0")
 
@@ -40,10 +44,6 @@ def keep(conf):
     if BLOCK_M * BLOCK_N < 128 * 128 and conf.num_warps == 8:
         return False
     return True
-
-# %% [markdown]
-# # Official tutorial (before blackwell support)
-# https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
 
 
 @triton.jit
@@ -87,14 +87,15 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
+@autodiff(idxs_buffers=(4, 5))
 # todo: rm do_not_specialize
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
-              stride_qz, stride_qh, stride_qm, stride_qk,  # 
+              stride_qz, stride_qh, stride_qm, stride_qk,  #
               stride_kn, stride_kk,  #
               stride_vk, stride_vn,  #
               stride_om, stride_on,  #
-              Z, H, N_CTX: tl.constexpr,  #,  #
+              Z, H, N_CTX: tl.constexpr,  #
               HEAD_DIM: tl.constexpr,  #
               BLOCK_M: tl.constexpr,  #
               BLOCK_N: tl.constexpr,  #
@@ -171,17 +172,10 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 
-
-# todo: unrolls the loop too many times
-# BLOCK_M = 128
-# BLOCK_N = 64
-
 BLOCK_M = 16
 BLOCK_N = 16
 
-
-
-def stub(kernel, q, k, v, causal, sm_scale):
+def stub(q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
     # when v is in float8_e5m2 it is transposed.
@@ -196,12 +190,12 @@ def stub(kernel, q, k, v, causal, sm_scale):
     print("grid: ", grid)
 
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
-    kernel[grid](
+    _attn_fwd[grid](
         q, k, v, sm_scale, M, o,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-        # k.stride(0), k.stride(1), 
+        # k.stride(0), k.stride(1),
         k.stride(2), k.stride(3),  #
-        # v.stride(0), v.stride(1), 
+        # v.stride(0), v.stride(1),
         v.stride(2), v.stride(3),  #
         # o.stride(0), o.stride(1),
         o.stride(2), o.stride(3),  #
@@ -212,14 +206,15 @@ def stub(kernel, q, k, v, causal, sm_scale):
         HEAD_DIM=HEAD_DIM_K,  #
         STAGE=stage,  #
         BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N)
+        BLOCK_N=BLOCK_N,
+    )
 
-    return o # , M
+    return o
 
 
-kernel = _attn_fwd
-attention = stub
-
+# NOTE:
+#   this test was part of the official tutorial so I included it here as well;
+#   my actual forward / backward test is in run.py
 @pytest.mark.parametrize("Z, H, N_CTX, HEAD_DIM", [(1, 2, 128, 64)])
 @pytest.mark.parametrize("causal", [True])
 def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
@@ -238,40 +233,30 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     p = torch.softmax(p.float(), dim=-1).half()
     # p = torch.exp(p)
     ref_out = torch.matmul(p, v)
-    ref_out.backward(dout)
-    ref_dv, v.grad = v.grad.clone(), None
-    ref_dk, k.grad = k.grad.clone(), None
-    ref_dq, q.grad = q.grad.clone(), None
 
-    # triton implementation
-    tri_out = attention(kernel, q, k, v, causal, sm_scale).half()
-    # comment: commented this out bc I'm using smaller shapes now but the bwd has this assert (requires a larger shape)
-    #    PRE_BLOCK = 128
-    #    assert N_CTX % PRE_BLOCK == 0
+    # todo: commented this out bc I'm using smaller shapes now but the bwd
+    #   has this assert (requires a larger shape)
+    # PRE_BLOCK = 128
+    # assert N_CTX % PRE_BLOCK == 0
 
+    tri_out = stub(q, k, v, causal, sm_scale).half()
+    assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
+
+    # ref_out.backward(dout)
     # tri_out.backward(dout)
-    # tri_dv, v.grad = v.grad.clone(), None
-    # tri_dk, k.grad = k.grad.clone(), None
-    # tri_dq, q.grad = q.grad.clone(), None
-    # compare
-    # assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
-    rtol = 0.0
+
+    # rtol = 0.0
     # Relative tolerance workaround for known hardware limitation of MI200 GPU.
     # For details see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
-    if torch.version.hip is not None and triton.runtime.driver.active.get_current_target().arch == "gfx90a":
-        rtol = 1e-2
+    # if torch.version.hip is not None and triton.runtime.driver.active.get_current_target().arch == "gfx90a":
+    #     rtol = 1e-2
     # assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=rtol)
     # assert torch.allclose(ref_dk, tri_dk, atol=1e-2, rtol=rtol)
     # assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=rtol)
+
     return tri_out, ref_out
 
 # todo: works but unrolls for loop too many -- so try smaller shapes
-# tri_out, ref_out = test_op(1, 1, 128, 64, causal=True)
+# test_op(1, 1, 128, 64, causal=True)
 
-tri_out, ref_out = test_op(1, 1, 16, 16, causal=False)
-
-# # %%
-# tri_out[0, 0, :4, :4]
-
-# # %%
-# ref_out[0, 0, :4, :4]
+test_op(1, 1, 32, 16, causal=False)

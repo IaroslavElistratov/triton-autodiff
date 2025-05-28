@@ -11,6 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
+@autodiff(idxs_buffers=3)
 @triton.jit
 def kernel(
         a_ptr,
@@ -39,7 +40,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, l)
 
-def stub(kernel, a, b, c):
+def stub(a, b, c):
     output = torch.empty_like(a)
     # grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
     grid = (1, 1, 1)
@@ -47,17 +48,10 @@ def stub(kernel, a, b, c):
     return output
 
 
-my_op = autodiff(kernel, stub, idx_upstream=3)
-
-
 size = 4
 a = torch.rand(size, device=DEVICE)
 b = torch.rand(size, device=DEVICE)
 c = torch.rand(size, device=DEVICE)
-# print("a: ", a)
-# print("b: ", b)
-# print("c: ", c)
-# print()
 
 def torch_fn(a, b, c):
     x = a + 0.5
@@ -73,15 +67,15 @@ def torch_fn(a, b, c):
 
 
 output_torch = torch_fn(a, b, c)
-output_triton = stub(my_op, a, b, c)
-max_difference = torch.max(torch.abs(output_torch - output_triton))
-
+output_triton = stub(a, b, c)
 # print(output_torch)
 # print(output_triton)
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
 
+max_difference = torch.max(torch.abs(output_torch - output_triton))
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.0
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
@@ -95,7 +89,7 @@ a.requires_grad = True
 b.requires_grad = True
 c.requires_grad = True
 
-my_out = stub(my_op, a, b, c)
+my_out = stub(a, b, c)
 my_out.backward(upstream)
 
 # print("grad a: ", a.grad)

@@ -3,8 +3,12 @@ import torch
 import triton
 import triton.language as tl
 
-DEVICE = torch.device("cuda:0")
+from triton.backends.autodiff import autodiff
 
+
+# NOTE: copied from official triton tutorial -- https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py
+
+@autodiff(idxs_buffers=(1,4,5))
 @triton.jit
 def _layer_norm_fwd_fused(
     X,  # pointer to the input
@@ -59,16 +63,13 @@ def _layer_norm_fwd_fused(
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
-kernel = _layer_norm_fwd_fused
-
-
-def stub(kernel, x, weight, bias, eps=1e-5):
+def stub(x, weight, bias, eps=1e-5):
     # allocate output
     y = torch.empty_like(x)
     # reshape input data into 2D tensor
     x_arg = x.reshape(-1, x.shape[-1])
     M, N = x_arg.shape
-    # answer-now: some input types to the fn are float16 and some are float32
+    # some input types to the fn are float16 and some are float32
     mean = torch.empty((M, ), dtype=torch.float32, device=x.device)
     rstd = torch.empty((M, ), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
@@ -82,12 +83,10 @@ def stub(kernel, x, weight, bias, eps=1e-5):
     # enqueue kernel
     grid = (M, )
     print("grid:", grid)
-    kernel[grid](  #
+    _layer_norm_fwd_fused[grid](  #
         x_arg, y, weight, bias, mean, rstd,  #
         x_arg.stride(0), N, eps,  #
         # todo-now: commenting out "num_warps=num_warps, num_ctas=1" solves the error!
         BLOCK_SIZE=BLOCK_SIZE #, num_warps=num_warps, num_ctas=1
     )
-
     return y
-

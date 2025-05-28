@@ -6,14 +6,14 @@ This work clones the main Triton repository, but intends to minimize
 divergences in the core. Most of the autodiff work is in [third_party/autodiff](third_party/autodiff)
 subdirectory.
 
-**NOTE: This project is in its early stages and under heavy development -- it is not yet stable, not yet feature complete, and APIs will change.**
+**NOTE: This project is in its early stages and under heavy development -- it is not yet stable, and not yet feature complete.**
 
 
 # Motivation
 
 This repo aims to take in an arbitrary triton kernel and return a callable that supports automatic differentiation out of the box.
 
-Given a triton kernel and its stub:
+Given a triton kernel:
   - creates a corresponding backward_triton_kernel
   - then wraps this pair of forward / backward triton kernels into a torch.autograd.Function
 
@@ -24,29 +24,34 @@ Below I show how this repo helps to simplify your kernel definitions. The projec
 
 Let's look at flash attention v2 impl from [official triton tutorial](https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py).
 
-I'll show code snippets below. **For end to end example see: [autodiff/test/flash_attention_v2/run.py](third_party/autodiff/test/flash_attention_v2/run.py)**
+I'll show code snippets below. **For end to end example see: [autodiff/test/flash_attention_v2](third_party/autodiff/test/flash_attention_v2)**
 
 <details>
   <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
 
 ```diff
++ from triton.backends.autodiff import autodiff
 
-+ # Define your forward kernel as usual:
+
++ # Define your forward kernel as usual, decorate it with `@autodiff`
++ # (if you have a nested kernel, decorate the outer one)
+
+
++ @autodiff(idxs_buffers=(4, 5))
++ # temporary limitation: autotune is not supported for now
+- @triton.autotune(...)
+@triton.jit
+def _attn_fwd
+  ...
+
 
 + # Unchanged (omitted for brevity)
 @triton.jit
 def _attn_fwd_inner
   ...
 
-+ # Unchanged (omitted for brevity)
-+ # temporary limitation: autotune is not supported for now
-- @triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
-@triton.jit
-def _attn_fwd
-  ...
 
-
-+ # No need to write backward kernels and backward stubs by hand anymore!
++ # No need to write backward kernels by hand anymore!
 
 -@triton.jit
 -def _attn_bwd_preprocess(O, DO,  #
@@ -296,17 +301,12 @@ def _attn_fwd
 -    tl.store(dq_ptrs, dq)
 
 
-+ # Define your forward stub as usual:
-
-+ # The only change to your stub is to explicitly pass kernel function as the first argument
-+ # Everything else is unchanged (omitted for brevity below "...")
-- def stub_forward(ctx, q, k, v, causal, sm_scale):
-+ def stub_forward(kernel, ctx, q, k, v, causal, sm_scale):
-  ...
--  _attn_fwd[grid](
-+  kernel[grid](
++ # Define your forward stub as usual (omitted for brevity)
+def stub_forward
   ...
 
+
++ # No need to write backward stubs by hand anymore!
 
 -def stub_backward(ctx, do):
 -    q, k, v, o, M = ctx.saved_tensors
@@ -370,11 +370,7 @@ q.requires_grad = True
 k.requires_grad = True
 v.requires_grad = True
 
-+ from triton.backends.autodiff import autodiff
-
-+ my_op = autodiff(kernel, stub, idx_upstream=5, idxs_buffers=[3])
-
-+ my_out = stub(my_op, q, k, v)
++ my_out = stub(q, k, v)
 + my_out.backward(upstream)
 
 + # now grads have been populated for: q.grad, k.grad, v.grad
@@ -389,22 +385,26 @@ v.requires_grad = True
 
 Let's look at layer-norm impl from [official triton tutorial](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py).
 
-I'll show code snippets below. **For end to end example see: [autodiff/test/layernorm/run.py](third_party/autodiff/test/layernorm/run.py)**
+I'll show code snippets below. **For end to end example see: [autodiff/test/layernorm](third_party/autodiff/test/layernorm)**
 
 <details>
   <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
 
 ```diff
 
-+ # Define your forward kernel as usual:
++ from triton.backends.autodiff import autodiff
 
-+ # Unchanged (omitted for brevity)
 
++ # Define your forward kernel as usual, decorate it with `@autodiff`
++ # the rest of the kernel is unchanged (omitted for brevity)
+
++ @autodiff(idxs_buffers=(1,4,5))
 @triton.jit
 def _layer_norm_fwd_fused
+  ...
 
 
-+ # No need to write backward kernels and backward stubs by hand anymore!
++ # No need to write backward kernels by hand anymore!
 
 -@triton.jit
 -def _layer_norm_bwd_dx_fused(DX,  # pointer to the input gradient
@@ -499,19 +499,13 @@ def _layer_norm_fwd_fused
 
 
 
-
-
 + # Define your forward stub as usual:
-
-+ # The only change to your stub is to explicitly pass kernel function as the first argument
-+ # Everything else is unchanged (omitted for brevity below "...")
-- def stub_forward(ctx, x, normalized_shape, weight, bias, eps):
-+ def stub_forward(kernel, ctx, x, normalized_shape, weight, bias, eps):
-  ...
--  _layer_norm_fwd_fused[grid](
-+  kernel[grid](
++ # Unchanged (omitted for brevity)
+def stub_forward
   ...
 
+
++ # No need to write backward stubs by hand anymore!
 
 -def stub_backward(ctx, dy):
 -    x, w, b, m, v = ctx.saved_tensors
@@ -569,11 +563,7 @@ x.requires_grad = True
 weight.requires_grad = True
 bias.requires_grad = True
 
-+ from triton.backends.autodiff import autodiff
-
-+ my_op = autodiff(kernel, stub, idx_upstream=1, idxs_buffers=[4, 5])
-
-+ my_out = stub(my_op, x, weight, bias)
++ my_out = stub(x, weight, bias)
 + my_out.backward(upstream)
 
 + # now grads have been populated for: x.grad, weight.grad, bias.grad
@@ -596,16 +586,18 @@ For more examples see [third_party/autodiff/test](third_party/autodiff/test).
 git clone --depth 1 https://github.com/IaroslavElistratov/triton-autodiff
 cd triton-autodiff
 
-// build
+# build
 pip install -e python
 
-// todo: cleanup
+# todo: cleanup
 export TRITON_AUTODIFF_DIR=$(pwd)
 ln -s $TRITON_AUTODIFF_DIR/third_party/autodiff/python/api.py $TRITON_AUTODIFF_DIR/python/triton/backends/autodiff.py
 
 cd third_party/autodiff/test
 python run_all_tests.py
 ```
+
+Please file an issue if the above doesn't work on your machine.
 
 
 # Current limitations

@@ -11,6 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
+@autodiff(idxs_buffers=1)
 @triton.jit
 def kernel(
         x_ptr,  # *Pointer* to first input vector.
@@ -25,7 +26,7 @@ def kernel(
     # Write x + y back to DRAM.
     tl.store(output_ptr + offsets, output)
 
-def stub(kernel, x):
+def stub(x):
     # We need to preallocate the output.
     output = torch.empty_like(x)
     assert x.device == DEVICE and output.device == DEVICE
@@ -47,9 +48,6 @@ def stub(kernel, x):
     print("[usr stub] output", output)
     return output
 
-
-my_op = autodiff(kernel, stub, idx_upstream=1)
-
 # fits in a single block -- less complex kernel (and thus the IR) bc not computing idx using block_size and pid in this case;
 # Also, bc it's exactly the size of the block -- no need to add masks when loading -- further simplifies loading
 size = 4
@@ -59,17 +57,16 @@ def torch_fn(a):
     return a + 42
 
 output_torch = torch_fn(a)
-output_triton = stub(my_op, a)
-# print(output_torch)
-# print(output_triton)
+output_triton = stub(a)
 
 print("torch", output_torch)
 print("trition", output_triton)
 
 max_difference = torch.max(torch.abs(output_torch - output_triton))
-# print(f'The maximum difference between torch and triton is '
-#       f'{max_difference}')
+print(f'The maximum difference between torch and triton is '
+      f'{max_difference}')
 # assert max_difference == 0.0
+
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
@@ -81,7 +78,7 @@ else:
 upstream = torch.randn(4, device=DEVICE)
 a.requires_grad = True
 
-my_out = stub(my_op, a)
+my_out = stub(a)
 my_out.backward(upstream)
 print("grad a: ", a.grad)
 print()
