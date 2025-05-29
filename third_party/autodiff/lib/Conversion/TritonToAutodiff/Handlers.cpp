@@ -41,7 +41,7 @@ namespace triton {
     //   - using substituteBasePtr in handleStoreBackward is needed so that I LOAD **UPSTREAM** grads NOT from the "out" fwd arg directly, but from the additional argument representing grad wrt to "out"
     //   - ==> these can be looked at as two separate goals
     Value clonedPtr = pass.origToCloned.lookup(storeOp.getPtr());
-    Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, ptrToAddedPtrMap);
+    Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, pass.ptrToAddedPtrMap);
     Value clonedPtrRebased = clonedPtrOpRebased->getResult(0);
 
     // remember the semantics:
@@ -113,7 +113,7 @@ namespace triton {
     //  graph (accessed via pass.origToCloned)
 
     Value clonedPtr = pass.origToCloned.lookup(loadOp.getPtr());
-    Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, ptrToAddedPtrMap);
+    Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, pass.ptrToAddedPtrMap);
     Value clonedPtrRebased = clonedPtrOpRebased->getResult(0);
 
     // Create an AtomicRMWOp with FADD operation instead of StoreOp
