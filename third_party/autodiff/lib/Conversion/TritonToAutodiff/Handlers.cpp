@@ -29,6 +29,7 @@ namespace triton {
   Operation* handleStoreBackward(triton::StoreOp storeOp,
                               Operation *lastBwdOp, ConvertTritonToAutodiff& pass){
 
+    OpBuilder builder = pass.builder;
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
     builder.setInsertionPointAfter(lastBwdOp);
     if (DEBUG_PRINTS) llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
@@ -84,6 +85,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.load op\n";
 
     Value upstream = getUpstreamGrad(loadOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
 
     // Create a builder without setting insertion point at first, then set insertion point
     // Seems no constructor to specify "InsertionPointAfter" at the time of construction
@@ -152,6 +154,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.addf op\n";
 
     Value upstream = getUpstreamGrad(addfOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
 
     // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
     // float local_grad = 1.;
@@ -167,6 +170,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.truncf op\n";
 
     Value upstream = getUpstreamGrad(truncfOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = truncfOp.getOperand();
@@ -203,6 +207,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.mulf op\n";
 
     Value upstream = getUpstreamGrad(mulfOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     // insert operations after the gradient value, they depend on, is defined
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -235,6 +240,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.divf op\n";
 
     Value upstream = getUpstreamGrad(divfOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     // insert operations after the gradient value, they depend on, is defined
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -278,6 +284,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.cos op\n";
 
     Value upstream = getUpstreamGrad(cosOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = cosOp.getOperand();
@@ -300,6 +307,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sin op\n";
 
     Value upstream = getUpstreamGrad(sinOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sinOp.getOperand();
@@ -318,6 +326,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sqrt op\n";
 
     Value upstream = getUpstreamGrad(sqrtOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sqrtOp.getOperand();
@@ -342,6 +351,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log op\n";
 
     Value upstream = getUpstreamGrad(logOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = logOp.getOperand();
@@ -361,6 +371,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp op\n";
 
     Value upstream = getUpstreamGrad(expOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = expOp.getOperand();
@@ -382,6 +393,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.dot op\n";
 
     Value upstream = getUpstreamGrad(mmOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Extract matrix multiplication operands
@@ -488,6 +500,7 @@ namespace triton {
   void handleMaxBackward(arith::MaxNumFOp maxOp, ConvertTritonToAutodiff& pass) {
 
       Value upstream = getUpstreamGrad(maxOp->getResult(0), pass.gradMap);
+      OpBuilder builder = pass.builder;
       setInsertionPointAfterLastUse(upstream, builder);
 
       // Get both input tensors
@@ -579,6 +592,7 @@ namespace triton {
     // again I did the same mistake as before. triton::ReduceOp (a specific subclass of Operation) for some reason does not have getReuslt method attached to it -- so what you should instead is use -> syntax on it to dispatch to its parent (generic Operation) which has getResult(1) implemented
     //    same for getOperand(): reduceOp.getOperand(0) -- ERRORS OUT.    reduceOp->getOperand(0) -- works!
     Value upstream = getUpstreamGrad(reduceOp->getResult(0), pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Check that this is a sum reduction (contains only single node, e.g. arith.addf)
@@ -670,6 +684,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.extf op\n";
 
     Value upstream = getUpstreamGrad(extfOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = extfOp.getOperand();
@@ -693,6 +708,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.subf op\n";
 
     Value upstream = getUpstreamGrad(subfOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // For subtraction z = x - y
@@ -722,6 +738,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.select op\n";
 
     Value upstream = getUpstreamGrad(selectOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Get operands
@@ -795,6 +812,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "[handleBroadcastBackward] input a Float, adding grad\n";
 
     Value upstream = getUpstreamGrad(broadcastOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     // setInsertionPointAfterLastUse(upstream, builder);
 
     // the gradient is the reduction (sum) of the upstream gradient
@@ -901,6 +919,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log2 op\n";
 
     Value upstream = getUpstreamGrad(log2Op, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = log2Op.getOperand();
@@ -923,6 +942,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp2 op\n";
 
     Value upstream = getUpstreamGrad(exp2Op, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = exp2Op.getOperand();
@@ -962,6 +982,7 @@ namespace triton {
 
 
     Value upstream = getUpstreamGrad(expandDimsOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
 
@@ -986,6 +1007,7 @@ namespace triton {
 
     // Get the upstream gradient
     Value upstream = getUpstreamGrad(transOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Get the input tensor and permutation order
@@ -1035,6 +1057,7 @@ namespace triton {
     }
 
     Value upstream = getUpstreamGrad(splatOp, pass.gradMap);
+    OpBuilder builder = pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // For splat operations, gradient of scalar = sum of all elements in upstream gradient
