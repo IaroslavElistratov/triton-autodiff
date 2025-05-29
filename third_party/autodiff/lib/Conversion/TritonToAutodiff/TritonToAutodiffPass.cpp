@@ -33,24 +33,9 @@ namespace triton {
 
 namespace {
 
-struct ConvertTritonToAutodiff
-    : public impl::ConvertTritonToAutodiffBase<ConvertTritonToAutodiff> {
-
-  using ConvertTritonToAutodiffBase::ConvertTritonToAutodiffBase;
-
-  // instead of piping this variable through (which would require changing signature of all the functions) -- instead I set it as a global, so that all handlers can access it
-  // To make nodeName accessible across all handler functions without changing their signatures, add it as a member variable to the ConvertTritonToAutodiff struct
-  // Member variable to store current node name
-  NameLoc currentNodeName;
-
-  // Helper method to create an operation with the current node name
-  template <typename OpTy, typename... Args>
-  OpTy createGradOp(OpBuilder &builder, Args &&...args) {
-    return builder.create<OpTy>(currentNodeName, std::forward<Args>(args)...);
-  }
 
   // main function
-  void runOnOperation() override {
+  void ConvertTritonToAutodiff::runOnOperation() override {
     // grab the module (IOW root) op
     auto mod = getOperation();
     // walk this recursively structred IR, and call rewriteSplatAddOp only on "triton::FuncOp"
@@ -60,7 +45,7 @@ struct ConvertTritonToAutodiff
     });
   }
 
-  void enableNameLocSSA() {
+  void ConvertTritonToAutodiff::enableNameLocSSA() {
     mlir::registerAsmPrinterCLOptions();   // registers --mlir-use-nameloc-as-prefix
 
     static const char *argv[] = {
@@ -79,7 +64,7 @@ struct ConvertTritonToAutodiff
   }
 
   // walk the IR backward, rewrite each operation with its corresponding backward function
-  void rewriteSplatAddOp(triton::FuncOp func) {
+  void ConvertTritonToAutodiff::rewriteSplatAddOp(triton::FuncOp func) {
 
     enableNameLocSSA();
 

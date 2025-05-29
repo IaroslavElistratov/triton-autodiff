@@ -8,6 +8,7 @@
 #include "llvm/ADT/SetVector.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
