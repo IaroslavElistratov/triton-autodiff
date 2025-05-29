@@ -58,7 +58,7 @@ namespace triton {
     // mask above is a <<NULL VALUE>>
     Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
 
-    auto load = createGradOp<triton::LoadOp>(
+    auto load = pass.createGradOp<triton::LoadOp>(
         builder,
         clonedPtrRebased,
         maskCloned,
@@ -96,7 +96,7 @@ namespace triton {
 
     // TypeRange typically specify types of outputs of an op. Here's it's empty bc this op does not produce any outputs
     //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
-    // auto newOp = createGradOp<triton::StoreOp>(builder, TypeRange(), operands);
+    // auto newOp = pass.createGradOp<triton::StoreOp>(builder, TypeRange(), operands);
     Value mask = loadOp.getMask();
     Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
 
@@ -121,7 +121,7 @@ namespace triton {
     //
     // NOTE: atomics are needed bc e.g. tiled matmul accesses same memory locations
     // of input A from different instances of the kernel -- see Done/6_/my.png
-    auto atomicOp = createGradOp<triton::AtomicRMWOp>(
+    auto atomicOp = pass.createGradOp<triton::AtomicRMWOp>(
         builder,
         upstream.getType(),  // Result type
         triton::RMWOp::FADD, // Atomic add operation
@@ -173,7 +173,7 @@ namespace triton {
 
     // Create an extension operation to match the input type
     // Since we're going backward, we need to extend from result type to operand type
-    auto extOp = createGradOp<arith::ExtFOp>(
+    auto extOp = pass.createGradOp<arith::ExtFOp>(
         builder,
         x.getType(),  // Target type is the original input type
         upstream      // Upstream gradient with the truncated type
@@ -215,7 +215,7 @@ namespace triton {
     Value clonedLhs = origToCloned.lookup(lhs);
 
     // (2) differentiate rhs
-    auto gradRhsOp = createGradOp<arith::MulFOp>(builder, clonedLhs, upstream);
+    auto gradRhsOp = pass.createGradOp<arith::MulFOp>(builder, clonedLhs, upstream);
     // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differentiating the original path (while cloned will not be differenciated)
     maybeAccumulateGrad(rhs, gradRhsOp, gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradRhsOp);
@@ -225,7 +225,7 @@ namespace triton {
     Value clonedRhs = origToCloned.lookup(rhs);
 
     // (4) differentiate lhs
-    auto gradLhsOp = createGradOp<arith::MulFOp>(builder, clonedRhs, upstream);
+    auto gradLhsOp = pass.createGradOp<arith::MulFOp>(builder, clonedRhs, upstream);
     maybeAccumulateGrad(lhs, gradLhsOp, gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradLhsOp);
   }
@@ -250,11 +250,11 @@ namespace triton {
     // (3) differentiate lhs
 
     // a local
-    // auto ones = createGradOp<arith::ConstantOp>(builder, upstream.getType(), builder.getF32FloatAttr(1.0));
+    // auto ones = pass.createGradOp<arith::ConstantOp>(builder, upstream.getType(), builder.getF32FloatAttr(1.0));
     // this creates a scalar and broadcasts it to a shape specificed by "upstream.getType()"
     auto ones = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
-    auto aLocal = createGradOp<arith::DivFOp>(builder, ones, bCloned);
-    auto aDownstream = createGradOp<arith::MulFOp>(builder, aLocal, upstream);
+    auto aLocal = pass.createGradOp<arith::DivFOp>(builder, ones, bCloned);
+    auto aDownstream = pass.createGradOp<arith::MulFOp>(builder, aLocal, upstream);
     maybeAccumulateGrad(a, aDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, aDownstream, ones, aLocal);
@@ -263,12 +263,12 @@ namespace triton {
 
     // b local
 
-    // auto two = createGradOp<arith::ConstantOp>(builder, divfOp.getType(), builder.getF32FloatAttr(2.0));
-    auto pow = createGradOp<arith::MulFOp>(builder, bCloned, bCloned);
-    auto div = createGradOp<arith::DivFOp>(builder, aCloned, pow);
+    // auto two = pass.createGradOp<arith::ConstantOp>(builder, divfOp.getType(), builder.getF32FloatAttr(2.0));
+    auto pow = pass.createGradOp<arith::MulFOp>(builder, bCloned, bCloned);
+    auto div = pass.createGradOp<arith::DivFOp>(builder, aCloned, pow);
     auto neg = createConstantTensor(builder, currentNodeName, div.getType(), -1.0);
-    auto bLocal = createGradOp<arith::MulFOp>(builder, neg, div);
-    auto bDownstream = createGradOp<arith::MulFOp>(builder, bLocal, upstream);
+    auto bLocal = pass.createGradOp<arith::MulFOp>(builder, neg, div);
+    auto bDownstream = pass.createGradOp<arith::MulFOp>(builder, bLocal, upstream);
     maybeAccumulateGrad(b, bDownstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
@@ -284,10 +284,10 @@ namespace triton {
     Value xCloned = origToCloned.lookup(x);
 
     // derivative of cos(x) is -sin(x)
-    auto sinOp = createGradOp<math::SinOp>(builder, xCloned);
+    auto sinOp = pass.createGradOp<math::SinOp>(builder, xCloned);
     auto negOne = createConstantTensor(builder, currentNodeName, upstream.getType(), -1.0);
-    auto negSin = createGradOp<arith::MulFOp>(builder, negOne, sinOp);
-    auto xDownstream = createGradOp<arith::MulFOp>(builder, negSin, upstream);
+    auto negSin = pass.createGradOp<arith::MulFOp>(builder, negOne, sinOp);
+    auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, negSin, upstream);
 
     //  gradMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
     //  to values in backward graph which I've already re-written
@@ -306,8 +306,8 @@ namespace triton {
     Value xCloned = origToCloned.lookup(x);
 
     // derivative of sin(x) is cos(x)
-    auto cosOp = createGradOp<math::CosOp>(builder, xCloned);
-    auto xDownstream = createGradOp<arith::MulFOp>(builder, cosOp, upstream);
+    auto cosOp = pass.createGradOp<math::CosOp>(builder, xCloned);
+    auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, cosOp, upstream);
 
     maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
@@ -328,10 +328,10 @@ namespace triton {
 
     // derivative of sqrt(x) is 1/(2*sqrt(x))
     auto two = createConstantTensor(builder, currentNodeName, upstream.getType(), 2.0);
-    auto twoSqrtX = createGradOp<arith::MulFOp>(builder, sqrtResultCloned, two);
+    auto twoSqrtX = pass.createGradOp<arith::MulFOp>(builder, sqrtResultCloned, two);
     auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
-    auto localGrad = createGradOp<arith::DivFOp>(builder, one, twoSqrtX);
-    auto xDownstream = createGradOp<arith::MulFOp>(builder, localGrad, upstream);
+    auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, twoSqrtX);
+    auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
     maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
@@ -349,8 +349,8 @@ namespace triton {
 
     // derivative of log(x) is 1/x
     auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
-    auto localGrad = createGradOp<arith::DivFOp>(builder, one, xCloned);
-    auto xDownstream = createGradOp<arith::MulFOp>(builder, localGrad, upstream);
+    auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, xCloned);
+    auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
     maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
@@ -369,7 +369,7 @@ namespace triton {
 
     // derivative of exp(x) is exp(x) itself
     // We already have exp(x) from the forward pass, so use it directly
-    auto xDownstream = createGradOp<arith::MulFOp>(builder, expResultCloned, upstream);
+    auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, expResultCloned, upstream);
 
     maybeAccumulateGrad(x, xDownstream, gradMap, builder);
 
@@ -427,7 +427,7 @@ namespace triton {
       FloatType targetElemType = aElemType;
 
       auto targetType = RankedTensorType::get(upstreamType.getShape(), targetElemType);
-      auto processedUpstreamOp = createGradOp<arith::TruncFOp>(builder, targetType, upstream);
+      auto processedUpstreamOp = pass.createGradOp<arith::TruncFOp>(builder, targetType, upstream);
       processedUpstream = processedUpstreamOp->getResult(0);
       markVisited(builder, visitedType::Inserted, processedUpstreamOp);
     }
@@ -440,14 +440,14 @@ namespace triton {
     // dacc = dC (gradient flows directly to accumulator)
 
     std::vector<int32_t> transOrder = {1, 0};
-    auto bTrans = createGradOp<triton::TransOp>(
+    auto bTrans = pass.createGradOp<triton::TransOp>(
         builder,
         bCloned.getType(),
         bCloned,
         builder.getDenseI32ArrayAttr(transOrder));
 
     // Compute gradient for A: dA = dC * B^T
-    auto gradA = createGradOp<triton::DotOp>(
+    auto gradA = pass.createGradOp<triton::DotOp>(
         builder,
         a.getType(),                  // Result type should match A's type
         processedUpstream,                     // dC
@@ -459,14 +459,14 @@ namespace triton {
     maybeAccumulateGrad(a, gradA, gradMap, builder);
 
 
-    auto aTrans = createGradOp<triton::TransOp>(
+    auto aTrans = pass.createGradOp<triton::TransOp>(
         builder,
         aCloned.getType(),
         aCloned,
         builder.getDenseI32ArrayAttr(transOrder));
 
     // Compute gradient for B: dB = A^T * dC
-    auto gradB = createGradOp<triton::DotOp>(
+    auto gradB = pass.createGradOp<triton::DotOp>(
         builder,
         b.getType(),                  // Result type should match B's type
         aTrans,                       // A^T
@@ -505,7 +505,7 @@ namespace triton {
       // If a == b, gradient is split between a and b (here we give it all to both and rely on maybeAccumulateGrad to handle duplicates)
 
       // Create masks for LHS: mask_lhs = (lhs >= rhs)
-      auto cmpLhsOp = createGradOp<arith::CmpFOp>(
+      auto cmpLhsOp = pass.createGradOp<arith::CmpFOp>(
           builder,
           arith::CmpFPredicate::OGE,  // ordered greater than or equal
           lhsCloned,
@@ -515,7 +515,7 @@ namespace triton {
       // We need to create a mask where elements equal to the maximum get the gradient
 
       // Create masks for RHS: mask_rhs = (rhs > lhs)
-      auto cmpRhsOp = createGradOp<arith::CmpFOp>(
+      auto cmpRhsOp = pass.createGradOp<arith::CmpFOp>(
           builder,
           arith::CmpFPredicate::OGT,  // ordered greater than
           rhsCloned,
@@ -528,14 +528,14 @@ namespace triton {
       auto oneConst = createConstantTensor(builder, currentNodeName, lhs.getType(), 1.0);
       auto zeroConst = createConstantTensor(builder, currentNodeName, lhs.getType(), 0.0);
 
-      auto floatMaskLhs = createGradOp<arith::SelectOp>(
+      auto floatMaskLhs = pass.createGradOp<arith::SelectOp>(
           builder,
           lhs.getType(),
           cmpLhsOp,
           oneConst,
           zeroConst);
 
-      auto floatMaskRhs = createGradOp<arith::SelectOp>(
+      auto floatMaskRhs = pass.createGradOp<arith::SelectOp>(
           builder,
           rhs.getType(),
           cmpRhsOp,
@@ -551,12 +551,12 @@ namespace triton {
 
       // Compute Downstream grad
       // Multiply the masks by the upstream gradient
-      auto maskedGradLhs = createGradOp<arith::MulFOp>(
+      auto maskedGradLhs = pass.createGradOp<arith::MulFOp>(
           builder,
           floatMaskLhs,
           upstreamBroadcast);
 
-      auto maskedGradRhs = createGradOp<arith::MulFOp>(
+      auto maskedGradRhs = pass.createGradOp<arith::MulFOp>(
           builder,
           floatMaskRhs,
           upstreamBroadcast);
@@ -623,7 +623,7 @@ namespace triton {
 
       // Create a mask where elements equal to the max get 1.0, others get 0.0
       // Compare input with the broadcasted max value
-      auto cmpOp = createGradOp<arith::CmpFOp>(
+      auto cmpOp = pass.createGradOp<arith::CmpFOp>(
           builder,
           arith::CmpFPredicate::OEQ,  // ordered equal
           inputCloned,
@@ -634,7 +634,7 @@ namespace triton {
       auto oneConst = createConstantTensor(builder, currentNodeName, input.getType(), 1.0);
       auto zeroConst = createConstantTensor(builder, currentNodeName, input.getType(), 0.0);
 
-      auto floatMask = createGradOp<arith::SelectOp>(
+      auto floatMask = pass.createGradOp<arith::SelectOp>(
           builder,
           input.getType(),
           cmpOp,
@@ -649,7 +649,7 @@ namespace triton {
           builder);
 
       // Multiply the mask by the upstream gradient
-      auto maskedGrad = createGradOp<arith::MulFOp>(
+      auto maskedGrad = pass.createGradOp<arith::MulFOp>(
           builder,
           floatMask,
           upstreamBroadcast);
@@ -676,7 +676,7 @@ namespace triton {
 
     // For extf, the gradient is simply the truncation of the upstream gradient
     // to the precision of the input
-    auto truncOp = createGradOp<arith::TruncFOp>(
+    auto truncOp = pass.createGradOp<arith::TruncFOp>(
         builder,
         x.getType(),  // Result type should match the original input type
         upstream      // Upstream gradient with the extended type
@@ -704,7 +704,7 @@ namespace triton {
 
     // dz/dy = -1, so negate the upstream gradient
     auto negOne = createConstantTensor(builder, currentNodeName, upstream.getType(), -1.0);
-    auto negUpstream = createGradOp<arith::MulFOp>(builder, upstream, negOne);
+    auto negUpstream = pass.createGradOp<arith::MulFOp>(builder, upstream, negOne);
     maybeAccumulateGrad(rhs, negUpstream, gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, negUpstream, negOne);
@@ -738,7 +738,7 @@ namespace triton {
     // - For false_val: gradient flows only where condition is false
 
     // Create masked gradients for true value
-    auto trueGrad = createGradOp<arith::SelectOp>(
+    auto trueGrad = pass.createGradOp<arith::SelectOp>(
         builder,
         upstream.getType(),
         conditionCloned,    // original condition
@@ -751,7 +751,7 @@ namespace triton {
 
     // Create masked gradients for false value
     // First, create the negated condition
-    auto notCond = createGradOp<arith::SelectOp>(
+    auto notCond = pass.createGradOp<arith::SelectOp>(
         builder,
         conditionCloned.getType(),
         conditionCloned,
@@ -759,7 +759,7 @@ namespace triton {
         createConstantBoolTensor(builder, currentNodeName, conditionCloned.getType(), true)
     );
 
-    auto falseGrad = createGradOp<arith::SelectOp>(
+    auto falseGrad = pass.createGradOp<arith::SelectOp>(
         builder,
         upstream.getType(),
         notCond,           // negated condition
@@ -817,7 +817,7 @@ namespace triton {
         setInsertionPointAfterLastUse(upstream, builder);
 
         // Sum along this dimension
-        auto reduceOp = createGradOp<triton::ReduceOp>(
+        auto reduceOp = pass.createGradOp<triton::ReduceOp>(
             builder,
             upstream,
             i); // axis
@@ -835,7 +835,7 @@ namespace triton {
         // insertion point for ops within the reduceOp itself
         // this is kind of inner (builder for the ops inside the reduceOp)
         auto blockBuilder = OpBuilder::atBlockBegin(combinerBlock);
-        // note: bc these below don't use createGradOp helper, required to location (currentNodeName) explicitly
+        // note: bc these below don't use pass.createGradOp helper, required to location (currentNodeName) explicitly
         auto sum = blockBuilder.create<arith::AddFOp>(
             currentNodeName,
             combinerBlock->getArgument(0),
@@ -855,7 +855,7 @@ namespace triton {
         // Note: expand_dims needs to outside of the reduce
         // must return the scalar sum directly in the reduce.return op,
         // don't try to use expand_dims inside the reduce region
-        auto expand = createGradOp<triton::ExpandDimsOp>(
+        auto expand = pass.createGradOp<triton::ExpandDimsOp>(
             builder,
             reduceOp->getResult(0),
             i); // axis
@@ -909,10 +909,10 @@ namespace triton {
     // derivative of log2(x) is 1/(x*ln(2))
     // ln(2) ≈ 0.693147
     auto ln2 = createConstantTensor(builder, currentNodeName, upstream.getType(), 0.693147);
-    auto xTimesLn2 = createGradOp<arith::MulFOp>(builder, xCloned, ln2);
+    auto xTimesLn2 = pass.createGradOp<arith::MulFOp>(builder, xCloned, ln2);
     auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
-    auto localGrad = createGradOp<arith::DivFOp>(builder, one, xTimesLn2);
-    auto downstreamGrad = createGradOp<arith::MulFOp>(builder, localGrad, upstream);
+    auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, xTimesLn2);
+    auto downstreamGrad = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
     maybeAccumulateGrad(x, downstreamGrad, gradMap, builder);
 
@@ -931,8 +931,8 @@ namespace triton {
     // derivative of exp2(x) is ln(2) * exp2(x)
     // ln(2) ≈ 0.693147
     auto ln2 = createConstantTensor(builder, currentNodeName, upstream.getType(), 0.693147);
-    auto localGrad = createGradOp<arith::MulFOp>(builder, ln2, resultCloned);
-    auto downstreamGrad = createGradOp<arith::MulFOp>(builder, localGrad, upstream);
+    auto localGrad = pass.createGradOp<arith::MulFOp>(builder, ln2, resultCloned);
+    auto downstreamGrad = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
     maybeAccumulateGrad(x, downstreamGrad, gradMap, builder);
 
@@ -967,7 +967,7 @@ namespace triton {
 
     // The backward operation for expand_dims is to remove the singleton dimension
     // This is essentially a reshape operation
-    auto reshapeOp = createGradOp<triton::ReshapeOp>(
+    auto reshapeOp = pass.createGradOp<triton::ReshapeOp>(
         builder,
         input.getType(),  // Result type should match the original input type
         upstream,         // Upstream gradient with the expanded dimension
@@ -1007,7 +1007,7 @@ namespace triton {
     // For more complex cases, the permutation is still the same because we're undoing
     // the original permutation
 
-    auto transGrad = createGradOp<triton::TransOp>(
+    auto transGrad = pass.createGradOp<triton::TransOp>(
         builder,
         input.getType(),  // Result type should match the original input type
         upstream,         // Upstream gradient
@@ -1053,7 +1053,7 @@ namespace triton {
       builder.setInsertionPointAfterValue(currentGrad);
 
       // We always reduce dimension 0 since the tensor shape changes after each reduction
-      auto reduceOp = createGradOp<triton::ReduceOp>(
+      auto reduceOp = pass.createGradOp<triton::ReduceOp>(
           builder,
           currentGrad,
           0); // Always reduce first dimension
