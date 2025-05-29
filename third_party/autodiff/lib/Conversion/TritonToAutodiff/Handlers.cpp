@@ -34,13 +34,13 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
-    // Value ptr = origToCloned.lookup(storeOp->getOperand(0));
+    // Value ptr = pass.origToCloned.lookup(storeOp->getOperand(0));
 
     // [see code_comments]
     //   - using substituteBasePtr in handleLoadBackward is needed so that I STORE gradients I computed NOT into the fwd args themselves, but into additional arguments representing grads of these fwd args
     //   - using substituteBasePtr in handleStoreBackward is needed so that I LOAD **UPSTREAM** grads NOT from the "out" fwd arg directly, but from the additional argument representing grad wrt to "out"
     //   - ==> these can be looked at as two separate goals
-    Value clonedPtr = origToCloned.lookup(storeOp.getPtr());
+    Value clonedPtr = pass.origToCloned.lookup(storeOp.getPtr());
     Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, ptrToAddedPtrMap);
     Value clonedPtrRebased = clonedPtrOpRebased->getResult(0);
 
@@ -56,7 +56,7 @@ namespace triton {
     Value mask = storeOp.getMask();
     // some StoreOps don't have the mask value, in which case
     // mask above is a <<NULL VALUE>>
-    Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
+    Value maskCloned = mask ? pass.origToCloned.lookup(mask) : Value();
 
     auto load = pass.createGradOp<triton::LoadOp>(
         builder,
@@ -98,21 +98,21 @@ namespace triton {
     //  Unlike e.g. creating LoadOp where I'm passing ptr.getType() because a load operation returns a value of the same type as what it's loading from the pointer
     // auto newOp = pass.createGradOp<triton::StoreOp>(builder, TypeRange(), operands);
     Value mask = loadOp.getMask();
-    Value maskCloned = mask ? origToCloned.lookup(mask) : Value();
+    Value maskCloned = mask ? pass.origToCloned.lookup(mask) : Value();
 
     // op with tree (pointer arithmetic) leading to it rooted at the new base (grad ptr)
     //
     // NOTE: use this ptr in the created atomicOp (or StoreOp) would essentially write gradient inplace of the original funcOp argument
     //  but using the opWithNewBase would write the gradient wrt to the argument in the grad ptr for the argument (instead of in the arg ptr itself)
-    // Value ptr = origToCloned.lookup(loadOp->getOperand(0));
+    // Value ptr = pass.origToCloned.lookup(loadOp->getOperand(0));
     //
-    // NOTE: use origToCloned.lookup(loadOp->getOperand(0))->getDefiningOp instead of loadOp
+    // NOTE: use pass.origToCloned.lookup(loadOp->getOperand(0))->getDefiningOp instead of loadOp
     //  directly -- I think the latter would give the op in the backward graph being re-written,
     //  but the former should give the fwd graph. And since I want my "cloning/or-reusing logic"
     //  (in substituteBasePtr) to re-use intermideats from fwd -- I'm passing the op from the fwd
-    //  graph (accessed via origToCloned)
+    //  graph (accessed via pass.origToCloned)
 
-    Value clonedPtr = origToCloned.lookup(loadOp.getPtr());
+    Value clonedPtr = pass.origToCloned.lookup(loadOp.getPtr());
     Operation* clonedPtrOpRebased = substituteBasePtr(clonedPtr.getDefiningOp(), builder, ptrToAddedPtrMap);
     Value clonedPtrRebased = clonedPtrOpRebased->getResult(0);
 
@@ -212,7 +212,7 @@ namespace triton {
 
     // (1) clone lhs subtree
     // essentially, it's just like std::map but just a mlir specific struct
-    Value clonedLhs = origToCloned.lookup(lhs);
+    Value clonedLhs = pass.origToCloned.lookup(lhs);
 
     // (2) differentiate rhs
     auto gradRhsOp = pass.createGradOp<arith::MulFOp>(builder, clonedLhs, upstream);
@@ -222,7 +222,7 @@ namespace triton {
 
     // (3) clone rhs subtree
     // prepare for cloning another separate subgraph
-    Value clonedRhs = origToCloned.lookup(rhs);
+    Value clonedRhs = pass.origToCloned.lookup(rhs);
 
     // (4) differentiate lhs
     auto gradLhsOp = pass.createGradOp<arith::MulFOp>(builder, clonedRhs, upstream);
@@ -242,10 +242,10 @@ namespace triton {
     Value b = divfOp.getOperand(1);
 
     // (1) clone lhs subtree
-    Value aCloned = origToCloned.lookup(a);
+    Value aCloned = pass.origToCloned.lookup(a);
 
     // (2) clone rhs subtree
-    Value bCloned = origToCloned.lookup(b);
+    Value bCloned = pass.origToCloned.lookup(b);
 
     // (3) differentiate lhs
 
@@ -281,7 +281,7 @@ namespace triton {
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = cosOp.getOperand();
-    Value xCloned = origToCloned.lookup(x);
+    Value xCloned = pass.origToCloned.lookup(x);
 
     // derivative of cos(x) is -sin(x)
     auto sinOp = pass.createGradOp<math::SinOp>(builder, xCloned);
@@ -303,7 +303,7 @@ namespace triton {
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sinOp.getOperand();
-    Value xCloned = origToCloned.lookup(x);
+    Value xCloned = pass.origToCloned.lookup(x);
 
     // derivative of sin(x) is cos(x)
     auto cosOp = pass.createGradOp<math::CosOp>(builder, xCloned);
@@ -323,8 +323,8 @@ namespace triton {
     Value x = sqrtOp.getOperand();
     Value sqrtResult = sqrtOp;
 
-    // Value xCloned = origToCloned.lookup(x);
-    Value sqrtResultCloned = origToCloned.lookup(sqrtResult);
+    // Value xCloned = pass.origToCloned.lookup(x);
+    Value sqrtResultCloned = pass.origToCloned.lookup(sqrtResult);
 
     // derivative of sqrt(x) is 1/(2*sqrt(x))
     auto two = createConstantTensor(builder, currentNodeName, upstream.getType(), 2.0);
@@ -345,7 +345,7 @@ namespace triton {
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = logOp.getOperand();
-    Value xCloned = origToCloned.lookup(x);
+    Value xCloned = pass.origToCloned.lookup(x);
 
     // derivative of log(x) is 1/x
     auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
@@ -365,7 +365,7 @@ namespace triton {
 
     Value x = expOp.getOperand();
     Value expResult = expOp;
-    Value expResultCloned = origToCloned.lookup(expResult);
+    Value expResultCloned = pass.origToCloned.lookup(expResult);
 
     // derivative of exp(x) is exp(x) itself
     // We already have exp(x) from the forward pass, so use it directly
@@ -390,8 +390,8 @@ namespace triton {
     Value c = mmOp.getC();  // Accumulator
 
     // Get cloned operands from forward graph
-    Value aCloned = origToCloned.lookup(a);
-    Value bCloned = origToCloned.lookup(b);
+    Value aCloned = pass.origToCloned.lookup(a);
+    Value bCloned = pass.origToCloned.lookup(b);
 
 
     // ~~~~~~~~~~~~~~~~~ maybe truncate upstream ~~~~~~~~~~~~~~~~~
@@ -495,9 +495,9 @@ namespace triton {
       Value rhs = maxOp->getOperand(1);
 
       // Get the inputs from the forward graph
-      Value lhsCloned = origToCloned.lookup(lhs);
-      Value rhsCloned = origToCloned.lookup(rhs);
-      Value max = origToCloned.lookup(maxOp->getResult(0));
+      Value lhsCloned = pass.origToCloned.lookup(lhs);
+      Value rhsCloned = pass.origToCloned.lookup(rhs);
+      Value max = pass.origToCloned.lookup(maxOp->getResult(0));
 
       // For max(a, b), gradient flows only through the maximum element(s)
       // If a > b, all gradient goes to a
@@ -591,8 +591,8 @@ namespace triton {
     Value input = reduceOp->getOperand(0);
 
     // Get the input from the forward graph
-    Value inputCloned = origToCloned.lookup(input);
-    Value reducedValue = origToCloned.lookup(reduceOp->getResult(0));
+    Value inputCloned = pass.origToCloned.lookup(input);
+    Value reducedValue = pass.origToCloned.lookup(reduceOp->getResult(0));
 
     if (isa<arith::AddFOp>(combiner)) {
 
@@ -730,7 +730,7 @@ namespace triton {
     Value falseValue = selectOp.getFalseValue();
 
     // Get the cloned condition from the forward pass
-    Value conditionCloned = origToCloned.lookup(condition);
+    Value conditionCloned = pass.origToCloned.lookup(condition);
 
     // For select(cond, true_val, false_val):
     // - No gradient for condition (it's boolean/predicate)
@@ -904,7 +904,7 @@ namespace triton {
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = log2Op.getOperand();
-    Value xCloned = origToCloned.lookup(x);
+    Value xCloned = pass.origToCloned.lookup(x);
 
     // derivative of log2(x) is 1/(x*ln(2))
     // ln(2) ≈ 0.693147
@@ -926,7 +926,7 @@ namespace triton {
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = exp2Op.getOperand();
-    Value resultCloned = origToCloned.lookup(exp2Op);
+    Value resultCloned = pass.origToCloned.lookup(exp2Op);
 
     // derivative of exp2(x) is ln(2) * exp2(x)
     // ln(2) ≈ 0.693147
