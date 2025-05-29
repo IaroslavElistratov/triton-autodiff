@@ -6,6 +6,7 @@ set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
 
 add_triton_library(TritonToAutodiff
     TritonToAutodiffPass.cpp
+    Handlers.cpp
     Utils.cpp
     UtilsIO.cpp
 

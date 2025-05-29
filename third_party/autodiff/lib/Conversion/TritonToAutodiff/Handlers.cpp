@@ -9,6 +9,7 @@
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Handlers.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
 #include "llvm/ADT/APSInt.h"
@@ -25,10 +26,8 @@ namespace mlir {
 namespace triton {
 
 
-  Operation* handleStoreBackward(triton::StoreOp storeOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
-                          Operation *lastBwdOp,
-                          llvm::DenseMap<Value, Value> ptrToAddedPtrMap){
+  Operation* handleStoreBackward(triton::StoreOp storeOp,
+                              Operation *lastBwdOp, ConvertTritonToAutodiff& pass){
 
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
     builder.setInsertionPointAfter(lastBwdOp);
@@ -81,10 +80,7 @@ namespace triton {
   // todo-now:
   //  Don't just blindly add atomics in all cases, instead have an analysis pass of what kernel instances actually conflict and add finer grained atomics (locks) only for them
   // this version of the func adds atomics
-  void handleLoadBackward(triton::LoadOp loadOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned,
-                          llvm::DenseMap<Value, Value> ptrToAddedPtrMap,
-                          triton::FuncOp func){
+  void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.load op\n";
 
     Value upstream = getUpstreamGrad(loadOp, gradMap);
@@ -152,8 +148,7 @@ namespace triton {
     atomicOp->setAttr("gradOf", builder.getStringAttr(opStr));
   }
 
-  void handleAddBackward(arith::AddFOp addfOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap){
+  void handleAddBackward(arith::AddFOp addfOp, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.addf op\n";
 
     Value upstream = getUpstreamGrad(addfOp, gradMap);
@@ -168,8 +163,7 @@ namespace triton {
     maybeAccumulateGrad(rhs, upstream, gradMap, builder);
   }
 
-  void handleTruncfBackward(arith::TruncFOp truncfOp, OpBuilder &builder,
-                           llvm::DenseMap<Value, Value> &gradMap) {
+  void handleTruncfBackward(arith::TruncFOp truncfOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.truncf op\n";
 
     Value upstream = getUpstreamGrad(truncfOp, gradMap);
@@ -205,8 +199,7 @@ namespace triton {
 
   }
 
-  void handleMulBackward(arith::MulFOp mulfOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
+  void handleMulBackward(arith::MulFOp mulfOp, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.mulf op\n";
 
     Value upstream = getUpstreamGrad(mulfOp, gradMap);
@@ -238,8 +231,7 @@ namespace triton {
   }
 
 
-  void handleDivBackward(arith::DivFOp divfOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned){
+  void handleDivBackward(arith::DivFOp divfOp, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.divf op\n";
 
     Value upstream = getUpstreamGrad(divfOp, gradMap);
@@ -282,8 +274,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
 
-  void handleCosBackward(math::CosOp cosOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleCosBackward(math::CosOp cosOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.cos op\n";
 
     Value upstream = getUpstreamGrad(cosOp, gradMap);
@@ -305,8 +296,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, xDownstream, negSin, negOne, sinOp);
   }
 
-  void handleSinBackward(math::SinOp sinOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleSinBackward(math::SinOp sinOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sin op\n";
 
     Value upstream = getUpstreamGrad(sinOp, gradMap);
@@ -324,8 +314,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, xDownstream, cosOp);
   }
 
-  void handleSqrtBackward(math::SqrtOp sqrtOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleSqrtBackward(math::SqrtOp sqrtOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sqrt op\n";
 
     Value upstream = getUpstreamGrad(sqrtOp, gradMap);
@@ -349,8 +338,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one, twoSqrtX, two);
   }
 
-  void handleLogBackward(math::LogOp logOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleLogBackward(math::LogOp logOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log op\n";
 
     Value upstream = getUpstreamGrad(logOp, gradMap);
@@ -369,8 +357,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one);
   }
 
-  void handleExpBackward(math::ExpOp expOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleExpBackward(math::ExpOp expOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp op\n";
 
     Value upstream = getUpstreamGrad(expOp, gradMap);
@@ -391,8 +378,7 @@ namespace triton {
 
 
 
-  void handleMatmulBackward(triton::DotOp mmOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleMatmulBackward(triton::DotOp mmOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.dot op\n";
 
     Value upstream = getUpstreamGrad(mmOp, gradMap);
@@ -499,8 +485,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);
   }
 
-  void handleMaxBackward(arith::MaxNumFOp maxOp, OpBuilder &builder,
-                            llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleMaxBackward(arith::MaxNumFOp maxOp, ConvertTritonToAutodiff& pass) {
 
       Value upstream = getUpstreamGrad(maxOp->getResult(0), gradMap);
       setInsertionPointAfterLastUse(upstream, builder);
@@ -586,8 +571,7 @@ namespace triton {
   }
 
 
-  void handleReduceBackward(triton::ReduceOp reduceOp, OpBuilder &builder,
-                            llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleReduceBackward(triton::ReduceOp reduceOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.reduce op\n";
 
     // Get the upstream gradient
@@ -682,8 +666,7 @@ namespace triton {
   }
 
 
-  void handleExtFBackward(arith::ExtFOp extfOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap) {
+  void handleExtFBackward(arith::ExtFOp extfOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.extf op\n";
 
     Value upstream = getUpstreamGrad(extfOp, gradMap);
@@ -706,8 +689,7 @@ namespace triton {
   }
 
 
-  void handleSubfBackward(arith::SubFOp subfOp, OpBuilder &builder,
-                        llvm::DenseMap<Value, Value> &gradMap) {
+  void handleSubfBackward(arith::SubFOp subfOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.subf op\n";
 
     Value upstream = getUpstreamGrad(subfOp, gradMap);
@@ -736,8 +718,7 @@ namespace triton {
   // The implementation creates two masked gradients:
   //  - For the true value: select(condition, upstream_gradient, zeros)
   //  - For the false value: select(NOT condition, upstream_gradient, zeros)
-  void handleSelectBackward(arith::SelectOp selectOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleSelectBackward(arith::SelectOp selectOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.select op\n";
 
     Value upstream = getUpstreamGrad(selectOp, gradMap);
@@ -793,8 +774,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, trueGrad, notCond, falseGrad);
   }
 
-  void handleBroadcastBackward(triton::BroadcastOp broadcastOp, OpBuilder &builder,
-                            llvm::DenseMap<Value, Value> &gradMap) {
+  void handleBroadcastBackward(triton::BroadcastOp broadcastOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.broadcast op\n";
 
     Value input = broadcastOp.getOperand();
@@ -917,8 +897,7 @@ namespace triton {
     maybeAccumulateGrad(input, upstream, gradMap, builder);
   }
 
-  void handleLog2Backward(math::Log2Op log2Op, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleLog2Backward(math::Log2Op log2Op, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log2 op\n";
 
     Value upstream = getUpstreamGrad(log2Op, gradMap);
@@ -940,8 +919,7 @@ namespace triton {
     markAllVisited(builder, visitedType::Inserted, ln2, xTimesLn2, one, localGrad, downstreamGrad);
   }
 
-  void handleExp2Backward(math::Exp2Op exp2Op, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap, IRMapping &origToCloned) {
+  void handleExp2Backward(math::Exp2Op exp2Op, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp2 op\n";
 
     Value upstream = getUpstreamGrad(exp2Op, gradMap);
@@ -964,8 +942,7 @@ namespace triton {
 
   // tt.expand_dims just adds a singleton dimension (1) to the shape without duplicating data, unlike broadcast which replicates values.
   // For the backward pass of expand_dims, we don't need a reduction operation - we just need to reshape by removing the singleton dimension
-  void handleExpandDimsBackward(triton::ExpandDimsOp expandDimsOp, OpBuilder &builder,
-                                llvm::DenseMap<Value, Value> &gradMap) {
+  void handleExpandDimsBackward(triton::ExpandDimsOp expandDimsOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.expand_dims op\n";
 
     // Get the input tensor and axis that was expanded
@@ -1004,8 +981,7 @@ namespace triton {
     markVisited(builder, visitedType::Inserted, reshapeOp);
   }
 
-  void handleTransBackward(triton::TransOp transOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap) {
+  void handleTransBackward(triton::TransOp transOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.trans op\n";
 
     // Get the upstream gradient
@@ -1044,8 +1020,7 @@ namespace triton {
     markVisited(builder, visitedType::Inserted, transGrad);
   }
 
-  void handleSplatBackward(triton::SplatOp splatOp, OpBuilder &builder,
-                          llvm::DenseMap<Value, Value> &gradMap) {
+  void handleSplatBackward(triton::SplatOp splatOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.splat op\n";
 
 

@@ -16,6 +16,7 @@
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Handlers.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
 #include "llvm/ADT/APSInt.h"
@@ -198,7 +199,7 @@ struct ConvertTritonToAutodiff
 
       Operation *lastBwdOp = lastFwdOp;
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        lastBwdOp = handleStoreBackward(storeOp, builder, gradMap, origToCloned, lastBwdOp, ptrToAddedPtrMap);
+        lastBwdOp = handleStoreBackward(storeOp, lastBwdOp, this);
       }
 
       if (DEBUG_PRINTS) {
@@ -255,54 +256,54 @@ struct ConvertTritonToAutodiff
 
       // triton ops
       if (auto mmOp = dyn_cast<triton::DotOp>(op)){
-        handleMatmulBackward(mmOp, builder, gradMap, origToCloned);
+        handleMatmulBackward(mmOp, this);
       } else if (auto reduceOp = dyn_cast<triton::ReduceOp>(op)){
-        handleReduceBackward(reduceOp, builder, gradMap, origToCloned);
+        handleReduceBackward(reduceOp, this);
       } else if (auto broadcastOp = dyn_cast<triton::BroadcastOp>(op)){
-        handleBroadcastBackward(broadcastOp, builder, gradMap);
+        handleBroadcastBackward(broadcastOp, this);
       } else if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)){
-        handleExpandDimsBackward(expandDimsOp, builder, gradMap);
+        handleExpandDimsBackward(expandDimsOp, this);
       } else if (auto transOp = dyn_cast<triton::TransOp>(op)){
-        handleTransBackward(transOp, builder, gradMap);
+        handleTransBackward(transOp, this);
       } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
-        handleSplatBackward(splatOp, builder, gradMap);
+        handleSplatBackward(splatOp, this);
 
 
       // arith ops
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
-        handleAddBackward(addfOp, builder, gradMap);
+        handleAddBackward(addfOp, this);
       } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
-        handleMulBackward(mulfOp, builder, gradMap, origToCloned);
+        handleMulBackward(mulfOp, this);
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
-        handleDivBackward(divfOp, builder, gradMap, origToCloned);
+        handleDivBackward(divfOp, this);
       } else if (auto truncfOp = dyn_cast<arith::TruncFOp>(op)){
-        handleTruncfBackward(truncfOp, builder, gradMap);
+        handleTruncfBackward(truncfOp, this);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         if (DEBUG_PRINTS) llvm::errs() << "visiting arith.constant op\n";
       } else if (auto extfOp = dyn_cast<arith::ExtFOp>(op)){
-        handleExtFBackward(extfOp, builder, gradMap);
+        handleExtFBackward(extfOp, this);
       } else if (auto subfOp = dyn_cast<arith::SubFOp>(op)){
-        handleSubfBackward(subfOp, builder, gradMap);
+        handleSubfBackward(subfOp, this);
       } else if (auto selectOp = dyn_cast<arith::SelectOp>(op)){
-        handleSelectBackward(selectOp, builder, gradMap, origToCloned);
+        handleSelectBackward(selectOp, this);
       } else if (auto maxOp = dyn_cast<arith::MaxNumFOp>(op)){
-        handleMaxBackward(maxOp, builder, gradMap, origToCloned);
+        handleMaxBackward(maxOp, this);
 
       // math ops
       } else if (auto cosOp = dyn_cast<math::CosOp>(op)){
-        handleCosBackward(cosOp, builder, gradMap, origToCloned);
+        handleCosBackward(cosOp, this);
       } else if (auto sinOp = dyn_cast<math::SinOp>(op)){
-        handleSinBackward(sinOp, builder, gradMap, origToCloned);
+        handleSinBackward(sinOp, this);
       } else if (auto sqrtOp = dyn_cast<math::SqrtOp>(op)){
-        handleSqrtBackward(sqrtOp, builder, gradMap, origToCloned);
+        handleSqrtBackward(sqrtOp, this);
       } else if (auto logOp = dyn_cast<math::LogOp>(op)){
-        handleLogBackward(logOp, builder, gradMap, origToCloned);  // For natural logarithm (base e): The derivative of ln(x) is 1/x
+        handleLogBackward(logOp, this);  // For natural logarithm (base e): The derivative of ln(x) is 1/x
       } else if (auto log2Op = dyn_cast<math::Log2Op>(op)){
-        handleLog2Backward(log2Op, builder, gradMap, origToCloned); // For logarithm base 2: The derivative of log₂(x) is 1/(x·ln(2))
+        handleLog2Backward(log2Op, this); // For logarithm base 2: The derivative of log₂(x) is 1/(x·ln(2))
       } else if (auto expOp = dyn_cast<math::ExpOp>(op)){
-        handleExpBackward(expOp, builder, gradMap, origToCloned);
+        handleExpBackward(expOp, this);
       } else if (auto exp2Op = dyn_cast<math::Exp2Op>(op)){
-        handleExp2Backward(exp2Op, builder, gradMap, origToCloned);
+        handleExp2Backward(exp2Op, this);
       }
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
@@ -338,7 +339,7 @@ struct ConvertTritonToAutodiff
       currentNodeName = nodeName;
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, builder, gradMap, origToCloned, ptrToAddedPtrMap, func);
+        handleLoadBackward(loadOp, func, this);
       }
     } // for loop over loads
 
