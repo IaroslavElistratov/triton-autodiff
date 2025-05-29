@@ -69,7 +69,7 @@ namespace triton {
 
     // grad wrt 1st arg (values) is the output (aka Value) of the newly added op
     // if (DEBUG_PRINTS) llvm::errs() << "should be Value defined by add op: " << storeOp->getOperand(1) << "\n";
-    maybeAccumulateGrad(storeOp->getOperand(1), load, gradMap, builder);
+    maybeAccumulateGrad(storeOp->getOperand(1), load, pass.gradMap, builder);
 
     markVisited(builder, visitedType::Inserted, load);
 
@@ -83,7 +83,7 @@ namespace triton {
   void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.load op\n";
 
-    Value upstream = getUpstreamGrad(loadOp, gradMap);
+    Value upstream = getUpstreamGrad(loadOp, pass.gradMap);
 
     // Create a builder without setting insertion point at first, then set insertion point
     // Seems no constructor to specify "InsertionPointAfter" at the time of construction
@@ -134,7 +134,7 @@ namespace triton {
 
     markVisited(builder, visitedType::Inserted, atomicOp);
 
-    // note this op does not add anything to the gradMap
+    // note this op does not add anything to the pass.gradMap
 
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
@@ -151,22 +151,22 @@ namespace triton {
   void handleAddBackward(arith::AddFOp addfOp, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.addf op\n";
 
-    Value upstream = getUpstreamGrad(addfOp, gradMap);
+    Value upstream = getUpstreamGrad(addfOp, pass.gradMap);
 
     // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
     // float local_grad = 1.;
 
     Value lhs = addfOp.getOperand(0);
-    maybeAccumulateGrad(lhs, upstream, gradMap, builder);
+    maybeAccumulateGrad(lhs, upstream, pass.gradMap, builder);
 
     Value rhs = addfOp.getOperand(1);
-    maybeAccumulateGrad(rhs, upstream, gradMap, builder);
+    maybeAccumulateGrad(rhs, upstream, pass.gradMap, builder);
   }
 
   void handleTruncfBackward(arith::TruncFOp truncfOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.truncf op\n";
 
-    Value upstream = getUpstreamGrad(truncfOp, gradMap);
+    Value upstream = getUpstreamGrad(truncfOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = truncfOp.getOperand();
@@ -179,7 +179,7 @@ namespace triton {
         upstream      // Upstream gradient with the truncated type
     );
 
-    maybeAccumulateGrad(x, extOp, gradMap, builder);
+    maybeAccumulateGrad(x, extOp, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, extOp);
 
@@ -195,14 +195,14 @@ namespace triton {
       %63 = "tt.dot"(%59, %60, %62)(tensor<16x16xf32>, tensor<16x16xf16>, tensor<16x16xf16>) -> tensor<16x16xf16>
 
     */
-    // maybeAccumulateGrad(x, upstream, gradMap, builder);
+    // maybeAccumulateGrad(x, upstream, pass.gradMap, builder);
 
   }
 
   void handleMulBackward(arith::MulFOp mulfOp, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.mulf op\n";
 
-    Value upstream = getUpstreamGrad(mulfOp, gradMap);
+    Value upstream = getUpstreamGrad(mulfOp, pass.gradMap);
     // insert operations after the gradient value, they depend on, is defined
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -217,7 +217,7 @@ namespace triton {
     // (2) differentiate rhs
     auto gradRhsOp = pass.createGradOp<arith::MulFOp>(builder, clonedLhs, upstream);
     // note: I belive here I want to set grad of the original rhs (not ClonedRhs), because I'd continue differentiating the original path (while cloned will not be differenciated)
-    maybeAccumulateGrad(rhs, gradRhsOp, gradMap, builder);
+    maybeAccumulateGrad(rhs, gradRhsOp, pass.gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradRhsOp);
 
     // (3) clone rhs subtree
@@ -226,7 +226,7 @@ namespace triton {
 
     // (4) differentiate lhs
     auto gradLhsOp = pass.createGradOp<arith::MulFOp>(builder, clonedRhs, upstream);
-    maybeAccumulateGrad(lhs, gradLhsOp, gradMap, builder);
+    maybeAccumulateGrad(lhs, gradLhsOp, pass.gradMap, builder);
     markVisited(builder, visitedType::Inserted, gradLhsOp);
   }
 
@@ -234,7 +234,7 @@ namespace triton {
   void handleDivBackward(arith::DivFOp divfOp, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.divf op\n";
 
-    Value upstream = getUpstreamGrad(divfOp, gradMap);
+    Value upstream = getUpstreamGrad(divfOp, pass.gradMap);
     // insert operations after the gradient value, they depend on, is defined
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -255,7 +255,7 @@ namespace triton {
     auto ones = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
     auto aLocal = pass.createGradOp<arith::DivFOp>(builder, ones, bCloned);
     auto aDownstream = pass.createGradOp<arith::MulFOp>(builder, aLocal, upstream);
-    maybeAccumulateGrad(a, aDownstream, gradMap, builder);
+    maybeAccumulateGrad(a, aDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, aDownstream, ones, aLocal);
 
@@ -269,7 +269,7 @@ namespace triton {
     auto neg = createConstantTensor(builder, currentNodeName, div.getType(), -1.0);
     auto bLocal = pass.createGradOp<arith::MulFOp>(builder, neg, div);
     auto bDownstream = pass.createGradOp<arith::MulFOp>(builder, bLocal, upstream);
-    maybeAccumulateGrad(b, bDownstream, gradMap, builder);
+    maybeAccumulateGrad(b, bDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, bDownstream, bLocal, neg, div, pow);
   }
@@ -277,7 +277,7 @@ namespace triton {
   void handleCosBackward(math::CosOp cosOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.cos op\n";
 
-    Value upstream = getUpstreamGrad(cosOp, gradMap);
+    Value upstream = getUpstreamGrad(cosOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = cosOp.getOperand();
@@ -289,9 +289,9 @@ namespace triton {
     auto negSin = pass.createGradOp<arith::MulFOp>(builder, negOne, sinOp);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, negSin, upstream);
 
-    //  gradMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
+    //  pass.gradMap seems to map values in OLD graph (which I'm iterating over, but not the cloned)
     //  to values in backward graph which I've already re-written
-    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
+    maybeAccumulateGrad(x, xDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, negSin, negOne, sinOp);
   }
@@ -299,7 +299,7 @@ namespace triton {
   void handleSinBackward(math::SinOp sinOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sin op\n";
 
-    Value upstream = getUpstreamGrad(sinOp, gradMap);
+    Value upstream = getUpstreamGrad(sinOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sinOp.getOperand();
@@ -309,7 +309,7 @@ namespace triton {
     auto cosOp = pass.createGradOp<math::CosOp>(builder, xCloned);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, cosOp, upstream);
 
-    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
+    maybeAccumulateGrad(x, xDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, cosOp);
   }
@@ -317,7 +317,7 @@ namespace triton {
   void handleSqrtBackward(math::SqrtOp sqrtOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sqrt op\n";
 
-    Value upstream = getUpstreamGrad(sqrtOp, gradMap);
+    Value upstream = getUpstreamGrad(sqrtOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sqrtOp.getOperand();
@@ -333,7 +333,7 @@ namespace triton {
     auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, twoSqrtX);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
-    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
+    maybeAccumulateGrad(x, xDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one, twoSqrtX, two);
   }
@@ -341,7 +341,7 @@ namespace triton {
   void handleLogBackward(math::LogOp logOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log op\n";
 
-    Value upstream = getUpstreamGrad(logOp, gradMap);
+    Value upstream = getUpstreamGrad(logOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = logOp.getOperand();
@@ -352,7 +352,7 @@ namespace triton {
     auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, xCloned);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
-    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
+    maybeAccumulateGrad(x, xDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream, localGrad, one);
   }
@@ -360,7 +360,7 @@ namespace triton {
   void handleExpBackward(math::ExpOp expOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp op\n";
 
-    Value upstream = getUpstreamGrad(expOp, gradMap);
+    Value upstream = getUpstreamGrad(expOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = expOp.getOperand();
@@ -371,7 +371,7 @@ namespace triton {
     // We already have exp(x) from the forward pass, so use it directly
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, expResultCloned, upstream);
 
-    maybeAccumulateGrad(x, xDownstream, gradMap, builder);
+    maybeAccumulateGrad(x, xDownstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, xDownstream);
   }
@@ -381,7 +381,7 @@ namespace triton {
   void handleMatmulBackward(triton::DotOp mmOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.dot op\n";
 
-    Value upstream = getUpstreamGrad(mmOp, gradMap);
+    Value upstream = getUpstreamGrad(mmOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Extract matrix multiplication operands
@@ -456,7 +456,7 @@ namespace triton {
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
-    maybeAccumulateGrad(a, gradA, gradMap, builder);
+    maybeAccumulateGrad(a, gradA, pass.gradMap, builder);
 
 
     auto aTrans = pass.createGradOp<triton::TransOp>(
@@ -476,18 +476,18 @@ namespace triton {
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
-    maybeAccumulateGrad(b, gradB, gradMap, builder);
+    maybeAccumulateGrad(b, gradB, pass.gradMap, builder);
 
     // Compute gradient for C (accumulator): dC = dOut
     // The gradient of the accumulator is just the upstream gradient
-    maybeAccumulateGrad(c, upstream, gradMap, builder);
+    maybeAccumulateGrad(c, upstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, gradA, gradB, bTrans, aTrans);
   }
 
   void handleMaxBackward(arith::MaxNumFOp maxOp, ConvertTritonToAutodiff& pass) {
 
-      Value upstream = getUpstreamGrad(maxOp->getResult(0), gradMap);
+      Value upstream = getUpstreamGrad(maxOp->getResult(0), pass.gradMap);
       setInsertionPointAfterLastUse(upstream, builder);
 
       // Get both input tensors
@@ -562,8 +562,8 @@ namespace triton {
           upstreamBroadcast);
 
       // Propagate the masked gradients to the inputs
-      maybeAccumulateGrad(lhs, maskedGradLhs, gradMap, builder);
-      maybeAccumulateGrad(rhs, maskedGradRhs, gradMap, builder);
+      maybeAccumulateGrad(lhs, maskedGradLhs, pass.gradMap, builder);
+      maybeAccumulateGrad(rhs, maskedGradRhs, pass.gradMap, builder);
 
       markAllVisited(builder, visitedType::Inserted, cmpLhsOp, cmpRhsOp,
                      floatMaskLhs, floatMaskRhs, oneConst, zeroConst,
@@ -578,7 +578,7 @@ namespace triton {
     //  getResult retruns result_range
     // again I did the same mistake as before. triton::ReduceOp (a specific subclass of Operation) for some reason does not have getReuslt method attached to it -- so what you should instead is use -> syntax on it to dispatch to its parent (generic Operation) which has getResult(1) implemented
     //    same for getOperand(): reduceOp.getOperand(0) -- ERRORS OUT.    reduceOp->getOperand(0) -- works!
-    Value upstream = getUpstreamGrad(reduceOp->getResult(0), gradMap);
+    Value upstream = getUpstreamGrad(reduceOp->getResult(0), pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Check that this is a sum reduction (contains only single node, e.g. arith.addf)
@@ -608,7 +608,7 @@ namespace triton {
           builder);
 
       // Propagate the gradient to the input
-      maybeAccumulateGrad(input, downstreamGrad, gradMap, builder);
+      maybeAccumulateGrad(input, downstreamGrad, pass.gradMap, builder);
 
     } else if (isa<arith::MaxNumFOp>(combiner)) {
       // For reduce_max, gradient only flows through the maximum element(s)
@@ -655,7 +655,7 @@ namespace triton {
           upstreamBroadcast);
 
       // Propagate the masked gradient to the input
-      maybeAccumulateGrad(input, maskedGrad, gradMap, builder);
+      maybeAccumulateGrad(input, maskedGrad, pass.gradMap, builder);
 
       markAllVisited(builder, visitedType::Inserted, cmpOp, floatMask,
                     oneConst, zeroConst, maskedGrad);
@@ -669,7 +669,7 @@ namespace triton {
   void handleExtFBackward(arith::ExtFOp extfOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.extf op\n";
 
-    Value upstream = getUpstreamGrad(extfOp, gradMap);
+    Value upstream = getUpstreamGrad(extfOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = extfOp.getOperand();
@@ -683,7 +683,7 @@ namespace triton {
     );
 
     // Propagate the gradient to the input
-    maybeAccumulateGrad(x, truncOp, gradMap, builder);
+    maybeAccumulateGrad(x, truncOp, pass.gradMap, builder);
 
     markVisited(builder, visitedType::Inserted, truncOp);
   }
@@ -692,7 +692,7 @@ namespace triton {
   void handleSubfBackward(arith::SubFOp subfOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.subf op\n";
 
-    Value upstream = getUpstreamGrad(subfOp, gradMap);
+    Value upstream = getUpstreamGrad(subfOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     // For subtraction z = x - y
@@ -700,12 +700,12 @@ namespace triton {
     Value rhs = subfOp.getOperand(1);
 
     // dz/dx = 1, so just pass through the upstream gradient
-    maybeAccumulateGrad(lhs, upstream, gradMap, builder);
+    maybeAccumulateGrad(lhs, upstream, pass.gradMap, builder);
 
     // dz/dy = -1, so negate the upstream gradient
     auto negOne = createConstantTensor(builder, currentNodeName, upstream.getType(), -1.0);
     auto negUpstream = pass.createGradOp<arith::MulFOp>(builder, upstream, negOne);
-    maybeAccumulateGrad(rhs, negUpstream, gradMap, builder);
+    maybeAccumulateGrad(rhs, negUpstream, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, negUpstream, negOne);
   }
@@ -721,7 +721,7 @@ namespace triton {
   void handleSelectBackward(arith::SelectOp selectOp, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.select op\n";
 
-    Value upstream = getUpstreamGrad(selectOp, gradMap);
+    Value upstream = getUpstreamGrad(selectOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Get operands
@@ -747,7 +747,7 @@ namespace triton {
     );
 
     // Propagate gradient to the true value operand
-    maybeAccumulateGrad(trueValue, trueGrad, gradMap, builder);
+    maybeAccumulateGrad(trueValue, trueGrad, pass.gradMap, builder);
 
     // Create masked gradients for false value
     // First, create the negated condition
@@ -768,7 +768,7 @@ namespace triton {
     );
 
     // Propagate gradient to the false value operand
-    maybeAccumulateGrad(falseValue, falseGrad, gradMap, builder);
+    maybeAccumulateGrad(falseValue, falseGrad, pass.gradMap, builder);
 
     // Mark all created operations as visited
     markAllVisited(builder, visitedType::Inserted, trueGrad, notCond, falseGrad);
@@ -794,7 +794,7 @@ namespace triton {
     }
     if (DEBUG_PRINTS) llvm::errs() << "[handleBroadcastBackward] input a Float, adding grad\n";
 
-    Value upstream = getUpstreamGrad(broadcastOp, gradMap);
+    Value upstream = getUpstreamGrad(broadcastOp, pass.gradMap);
     // setInsertionPointAfterLastUse(upstream, builder);
 
     // the gradient is the reduction (sum) of the upstream gradient
@@ -894,13 +894,13 @@ namespace triton {
     // Only then propagate the final reduced gradient to the input
 
     // setInsertionPointAfterLastUse(initialUpstream, builder);
-    maybeAccumulateGrad(input, upstream, gradMap, builder);
+    maybeAccumulateGrad(input, upstream, pass.gradMap, builder);
   }
 
   void handleLog2Backward(math::Log2Op log2Op, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log2 op\n";
 
-    Value upstream = getUpstreamGrad(log2Op, gradMap);
+    Value upstream = getUpstreamGrad(log2Op, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = log2Op.getOperand();
@@ -914,7 +914,7 @@ namespace triton {
     auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, xTimesLn2);
     auto downstreamGrad = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
-    maybeAccumulateGrad(x, downstreamGrad, gradMap, builder);
+    maybeAccumulateGrad(x, downstreamGrad, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, ln2, xTimesLn2, one, localGrad, downstreamGrad);
   }
@@ -922,7 +922,7 @@ namespace triton {
   void handleExp2Backward(math::Exp2Op exp2Op, ConvertTritonToAutodiff& pass) {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp2 op\n";
 
-    Value upstream = getUpstreamGrad(exp2Op, gradMap);
+    Value upstream = getUpstreamGrad(exp2Op, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = exp2Op.getOperand();
@@ -934,7 +934,7 @@ namespace triton {
     auto localGrad = pass.createGradOp<arith::MulFOp>(builder, ln2, resultCloned);
     auto downstreamGrad = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
-    maybeAccumulateGrad(x, downstreamGrad, gradMap, builder);
+    maybeAccumulateGrad(x, downstreamGrad, pass.gradMap, builder);
 
     markAllVisited(builder, visitedType::Inserted, ln2, localGrad, downstreamGrad);
   }
@@ -961,7 +961,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "[handleExpandDimsBackward] input a Float, adding grad\n";
 
 
-    Value upstream = getUpstreamGrad(expandDimsOp, gradMap);
+    Value upstream = getUpstreamGrad(expandDimsOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
 
@@ -976,7 +976,7 @@ namespace triton {
     );
 
     // Propagate the gradient to the input
-    maybeAccumulateGrad(input, reshapeOp, gradMap, builder);
+    maybeAccumulateGrad(input, reshapeOp, pass.gradMap, builder);
 
     markVisited(builder, visitedType::Inserted, reshapeOp);
   }
@@ -985,7 +985,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.trans op\n";
 
     // Get the upstream gradient
-    Value upstream = getUpstreamGrad(transOp, gradMap);
+    Value upstream = getUpstreamGrad(transOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Get the input tensor and permutation order
@@ -1015,7 +1015,7 @@ namespace triton {
     );
 
     // Propagate the gradient to the input
-    maybeAccumulateGrad(input, transGrad, gradMap, builder);
+    maybeAccumulateGrad(input, transGrad, pass.gradMap, builder);
 
     markVisited(builder, visitedType::Inserted, transGrad);
   }
@@ -1034,7 +1034,7 @@ namespace triton {
       return;
     }
 
-    Value upstream = getUpstreamGrad(splatOp, gradMap);
+    Value upstream = getUpstreamGrad(splatOp, pass.gradMap);
     setInsertionPointAfterLastUse(upstream, builder);
 
     // For splat operations, gradient of scalar = sum of all elements in upstream gradient
@@ -1083,7 +1083,7 @@ namespace triton {
       markVisited(builder, visitedType::Inserted, reduceOp);
     }
 
-    maybeAccumulateGrad(scalar, currentGrad, gradMap, builder);
+    maybeAccumulateGrad(scalar, currentGrad, pass.gradMap, builder);
   }
 
 
