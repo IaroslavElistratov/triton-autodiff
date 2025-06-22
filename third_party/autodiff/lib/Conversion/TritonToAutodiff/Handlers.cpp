@@ -6,14 +6,18 @@
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/APSInt.h"
+#include <numeric>
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
+
+
+#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Handlers.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
-#include "llvm/ADT/APSInt.h"
-#include <numeric>
+
 
 // for loop unroll
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -29,7 +33,7 @@ namespace triton {
   Operation* handleStoreBackward(triton::StoreOp storeOp,
                               Operation *lastBwdOp, ConvertTritonToAutodiff& pass){
 
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
     builder.setInsertionPointAfter(lastBwdOp);
     if (DEBUG_PRINTS) llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
@@ -85,7 +89,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.load op\n";
 
     Value upstream = getUpstreamGrad(loadOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
 
     // Create a builder without setting insertion point at first, then set insertion point
     // Seems no constructor to specify "InsertionPointAfter" at the time of construction
@@ -154,7 +158,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.addf op\n";
 
     Value upstream = getUpstreamGrad(addfOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
 
     // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
     // float local_grad = 1.;
@@ -170,7 +174,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.truncf op\n";
 
     Value upstream = getUpstreamGrad(truncfOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = truncfOp.getOperand();
@@ -207,7 +211,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.mulf op\n";
 
     Value upstream = getUpstreamGrad(mulfOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     // insert operations after the gradient value, they depend on, is defined
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -240,7 +244,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.divf op\n";
 
     Value upstream = getUpstreamGrad(divfOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     // insert operations after the gradient value, they depend on, is defined
     setInsertionPointAfterLastUse(upstream, builder);
 
@@ -258,7 +262,7 @@ namespace triton {
     // a local
     // auto ones = pass.createGradOp<arith::ConstantOp>(builder, upstream.getType(), builder.getF32FloatAttr(1.0));
     // this creates a scalar and broadcasts it to a shape specificed by "upstream.getType()"
-    auto ones = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
+    auto ones = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 1.0);
     auto aLocal = pass.createGradOp<arith::DivFOp>(builder, ones, bCloned);
     auto aDownstream = pass.createGradOp<arith::MulFOp>(builder, aLocal, upstream);
     maybeAccumulateGrad(a, aDownstream, pass.gradMap, builder);
@@ -272,7 +276,7 @@ namespace triton {
     // auto two = pass.createGradOp<arith::ConstantOp>(builder, divfOp.getType(), builder.getF32FloatAttr(2.0));
     auto pow = pass.createGradOp<arith::MulFOp>(builder, bCloned, bCloned);
     auto div = pass.createGradOp<arith::DivFOp>(builder, aCloned, pow);
-    auto neg = createConstantTensor(builder, currentNodeName, div.getType(), -1.0);
+    auto neg = createConstantTensor(builder, pass.currentNodeName, div.getType(), -1.0);
     auto bLocal = pass.createGradOp<arith::MulFOp>(builder, neg, div);
     auto bDownstream = pass.createGradOp<arith::MulFOp>(builder, bLocal, upstream);
     maybeAccumulateGrad(b, bDownstream, pass.gradMap, builder);
@@ -284,7 +288,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.cos op\n";
 
     Value upstream = getUpstreamGrad(cosOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = cosOp.getOperand();
@@ -292,7 +296,7 @@ namespace triton {
 
     // derivative of cos(x) is -sin(x)
     auto sinOp = pass.createGradOp<math::SinOp>(builder, xCloned);
-    auto negOne = createConstantTensor(builder, currentNodeName, upstream.getType(), -1.0);
+    auto negOne = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), -1.0);
     auto negSin = pass.createGradOp<arith::MulFOp>(builder, negOne, sinOp);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, negSin, upstream);
 
@@ -307,7 +311,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sin op\n";
 
     Value upstream = getUpstreamGrad(sinOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sinOp.getOperand();
@@ -326,7 +330,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.sqrt op\n";
 
     Value upstream = getUpstreamGrad(sqrtOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = sqrtOp.getOperand();
@@ -336,9 +340,9 @@ namespace triton {
     Value sqrtResultCloned = pass.origToCloned.lookup(sqrtResult);
 
     // derivative of sqrt(x) is 1/(2*sqrt(x))
-    auto two = createConstantTensor(builder, currentNodeName, upstream.getType(), 2.0);
+    auto two = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 2.0);
     auto twoSqrtX = pass.createGradOp<arith::MulFOp>(builder, sqrtResultCloned, two);
-    auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
+    auto one = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 1.0);
     auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, twoSqrtX);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
@@ -351,14 +355,14 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log op\n";
 
     Value upstream = getUpstreamGrad(logOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = logOp.getOperand();
     Value xCloned = pass.origToCloned.lookup(x);
 
     // derivative of log(x) is 1/x
-    auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
+    auto one = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 1.0);
     auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, xCloned);
     auto xDownstream = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
@@ -371,7 +375,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp op\n";
 
     Value upstream = getUpstreamGrad(expOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = expOp.getOperand();
@@ -393,7 +397,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.dot op\n";
 
     Value upstream = getUpstreamGrad(mmOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Extract matrix multiplication operands
@@ -464,7 +468,7 @@ namespace triton {
         a.getType(),                  // Result type should match A's type
         processedUpstream,                     // dC
         bTrans,                       // B^T
-        createConstantTensor(builder, currentNodeName, a.getType(), 0.0), // zero accumulator
+        createConstantTensor(builder, pass.currentNodeName, a.getType(), 0.0), // zero accumulator
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
@@ -484,7 +488,7 @@ namespace triton {
         aTrans,                       // A^T
         processedUpstream,                     // dC
         // todo-high: or accumulate into here (instead of maybeAccumulateGrad)
-        createConstantTensor(builder, currentNodeName, b.getType(), 0.0), // zero accumulator
+        createConstantTensor(builder, pass.currentNodeName, b.getType(), 0.0), // zero accumulator
         mmOp.getInputPrecision(),
         mmOp.getMaxNumImpreciseAcc());
 
@@ -500,7 +504,7 @@ namespace triton {
   void handleMaxBackward(arith::MaxNumFOp maxOp, ConvertTritonToAutodiff& pass) {
 
       Value upstream = getUpstreamGrad(maxOp->getResult(0), pass.gradMap);
-      OpBuilder builder = pass.builder;
+      OpBuilder& builder = *pass.builder;
       setInsertionPointAfterLastUse(upstream, builder);
 
       // Get both input tensors
@@ -538,8 +542,8 @@ namespace triton {
       // Compare input with the broadcasted max value
 
       // Convert boolean masks to float masks (1.0 where true, 0.0 where false)
-      auto oneConst = createConstantTensor(builder, currentNodeName, lhs.getType(), 1.0);
-      auto zeroConst = createConstantTensor(builder, currentNodeName, lhs.getType(), 0.0);
+      auto oneConst = createConstantTensor(builder, pass.currentNodeName, lhs.getType(), 1.0);
+      auto zeroConst = createConstantTensor(builder, pass.currentNodeName, lhs.getType(), 0.0);
 
       auto floatMaskLhs = pass.createGradOp<arith::SelectOp>(
           builder,
@@ -559,7 +563,7 @@ namespace triton {
       Value upstreamBroadcast = createBroadcastOrSplat(
           upstream,
           lhs.getType(),
-          currentNodeName,
+          pass.currentNodeName,
           builder);
 
       // Compute Downstream grad
@@ -592,7 +596,7 @@ namespace triton {
     // again I did the same mistake as before. triton::ReduceOp (a specific subclass of Operation) for some reason does not have getReuslt method attached to it -- so what you should instead is use -> syntax on it to dispatch to its parent (generic Operation) which has getResult(1) implemented
     //    same for getOperand(): reduceOp.getOperand(0) -- ERRORS OUT.    reduceOp->getOperand(0) -- works!
     Value upstream = getUpstreamGrad(reduceOp->getResult(0), pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Check that this is a sum reduction (contains only single node, e.g. arith.addf)
@@ -618,7 +622,7 @@ namespace triton {
       Value downstreamGrad = createBroadcastOrSplat(
           upstream,
           input.getType(),
-          currentNodeName,
+          pass.currentNodeName,
           builder);
 
       // Propagate the gradient to the input
@@ -632,7 +636,7 @@ namespace triton {
       Value maxBroadcast = createBroadcastOrSplat(
           reducedValue,
           input.getType(),
-          currentNodeName,
+          pass.currentNodeName,
           builder);
 
       // Create a mask where elements equal to the max get 1.0, others get 0.0
@@ -645,8 +649,8 @@ namespace triton {
 
       // Convert boolean mask to float mask (1.0 where true, 0.0 where false)
       auto floatType = cast<ShapedType>(upstream.getType()).getElementType();
-      auto oneConst = createConstantTensor(builder, currentNodeName, input.getType(), 1.0);
-      auto zeroConst = createConstantTensor(builder, currentNodeName, input.getType(), 0.0);
+      auto oneConst = createConstantTensor(builder, pass.currentNodeName, input.getType(), 1.0);
+      auto zeroConst = createConstantTensor(builder, pass.currentNodeName, input.getType(), 0.0);
 
       auto floatMask = pass.createGradOp<arith::SelectOp>(
           builder,
@@ -659,7 +663,7 @@ namespace triton {
       Value upstreamBroadcast = createBroadcastOrSplat(
           upstream,
           input.getType(),
-          currentNodeName,
+          pass.currentNodeName,
           builder);
 
       // Multiply the mask by the upstream gradient
@@ -684,7 +688,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.extf op\n";
 
     Value upstream = getUpstreamGrad(extfOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = extfOp.getOperand();
@@ -708,7 +712,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.subf op\n";
 
     Value upstream = getUpstreamGrad(subfOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // For subtraction z = x - y
@@ -719,7 +723,7 @@ namespace triton {
     maybeAccumulateGrad(lhs, upstream, pass.gradMap, builder);
 
     // dz/dy = -1, so negate the upstream gradient
-    auto negOne = createConstantTensor(builder, currentNodeName, upstream.getType(), -1.0);
+    auto negOne = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), -1.0);
     auto negUpstream = pass.createGradOp<arith::MulFOp>(builder, upstream, negOne);
     maybeAccumulateGrad(rhs, negUpstream, pass.gradMap, builder);
 
@@ -738,7 +742,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting arith.select op\n";
 
     Value upstream = getUpstreamGrad(selectOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Get operands
@@ -760,7 +764,7 @@ namespace triton {
         upstream.getType(),
         conditionCloned,    // original condition
         upstream,           // upstream gradient where condition is true
-        createConstantTensor(builder, currentNodeName, upstream.getType(), 0.0) // zeros where condition is false
+        createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 0.0) // zeros where condition is false
     );
 
     // Propagate gradient to the true value operand
@@ -772,8 +776,8 @@ namespace triton {
         builder,
         conditionCloned.getType(),
         conditionCloned,
-        createConstantBoolTensor(builder, currentNodeName, conditionCloned.getType(), false),
-        createConstantBoolTensor(builder, currentNodeName, conditionCloned.getType(), true)
+        createConstantBoolTensor(builder, pass.currentNodeName, conditionCloned.getType(), false),
+        createConstantBoolTensor(builder, pass.currentNodeName, conditionCloned.getType(), true)
     );
 
     auto falseGrad = pass.createGradOp<arith::SelectOp>(
@@ -781,7 +785,7 @@ namespace triton {
         upstream.getType(),
         notCond,           // negated condition
         upstream,          // upstream gradient where condition is false
-        createConstantTensor(builder, currentNodeName, upstream.getType(), 0.0) // zeros where condition is true
+        createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 0.0) // zeros where condition is true
     );
 
     // Propagate gradient to the false value operand
@@ -812,7 +816,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "[handleBroadcastBackward] input a Float, adding grad\n";
 
     Value upstream = getUpstreamGrad(broadcastOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     // setInsertionPointAfterLastUse(upstream, builder);
 
     // the gradient is the reduction (sum) of the upstream gradient
@@ -855,11 +859,11 @@ namespace triton {
         auto blockBuilder = OpBuilder::atBlockBegin(combinerBlock);
         // note: bc these below don't use pass.createGradOp helper, required to location (currentNodeName) explicitly
         auto sum = blockBuilder.create<arith::AddFOp>(
-            currentNodeName,
+            pass.currentNodeName,
             combinerBlock->getArgument(0),
             combinerBlock->getArgument(1));
 
-        blockBuilder.create<triton::ReduceReturnOp>(currentNodeName, sum.getResult());
+        blockBuilder.create<triton::ReduceReturnOp>(pass.currentNodeName, sum.getResult());
 
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -919,7 +923,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.log2 op\n";
 
     Value upstream = getUpstreamGrad(log2Op, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = log2Op.getOperand();
@@ -927,9 +931,9 @@ namespace triton {
 
     // derivative of log2(x) is 1/(x*ln(2))
     // ln(2) ≈ 0.693147
-    auto ln2 = createConstantTensor(builder, currentNodeName, upstream.getType(), 0.693147);
+    auto ln2 = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 0.693147);
     auto xTimesLn2 = pass.createGradOp<arith::MulFOp>(builder, xCloned, ln2);
-    auto one = createConstantTensor(builder, currentNodeName, upstream.getType(), 1.0);
+    auto one = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 1.0);
     auto localGrad = pass.createGradOp<arith::DivFOp>(builder, one, xTimesLn2);
     auto downstreamGrad = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
@@ -942,7 +946,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "visiting math.exp2 op\n";
 
     Value upstream = getUpstreamGrad(exp2Op, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     Value x = exp2Op.getOperand();
@@ -950,7 +954,7 @@ namespace triton {
 
     // derivative of exp2(x) is ln(2) * exp2(x)
     // ln(2) ≈ 0.693147
-    auto ln2 = createConstantTensor(builder, currentNodeName, upstream.getType(), 0.693147);
+    auto ln2 = createConstantTensor(builder, pass.currentNodeName, upstream.getType(), 0.693147);
     auto localGrad = pass.createGradOp<arith::MulFOp>(builder, ln2, resultCloned);
     auto downstreamGrad = pass.createGradOp<arith::MulFOp>(builder, localGrad, upstream);
 
@@ -982,7 +986,7 @@ namespace triton {
 
 
     Value upstream = getUpstreamGrad(expandDimsOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
 
@@ -1007,7 +1011,7 @@ namespace triton {
 
     // Get the upstream gradient
     Value upstream = getUpstreamGrad(transOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // Get the input tensor and permutation order
@@ -1057,7 +1061,7 @@ namespace triton {
     }
 
     Value upstream = getUpstreamGrad(splatOp, pass.gradMap);
-    OpBuilder builder = pass.builder;
+    OpBuilder& builder = *pass.builder;
     setInsertionPointAfterLastUse(upstream, builder);
 
     // For splat operations, gradient of scalar = sum of all elements in upstream gradient
@@ -1093,11 +1097,11 @@ namespace triton {
       // this is kind of inner (builder for the ops inside the reduceOp)
       auto blockBuilder = OpBuilder::atBlockBegin(combinerBlock);
       auto sum = blockBuilder.create<arith::AddFOp>(
-          currentNodeName,
+          pass.currentNodeName,
           combinerBlock->getArgument(0),
           combinerBlock->getArgument(1));
 
-      blockBuilder.create<triton::ReduceReturnOp>(currentNodeName, sum.getResult());
+      blockBuilder.create<triton::ReduceReturnOp>(pass.currentNodeName, sum.getResult());
 
       // Update gradient for next reduction
       currentGrad = reduceOp->getResult(0);

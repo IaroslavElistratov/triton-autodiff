@@ -1,9 +1,8 @@
-//#include "triton/Conversion/TritonToAutodiff/TritonToAutodiffPass.h"
-
-
 #include "mlir/IR/AsmState.h"          // registerAsmPrinterCLOptions
 #include "llvm/Support/CommandLine.h"
 
+#include "mlir/IR/Builders.h"
+#include <memory>
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -16,6 +15,7 @@
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Handlers.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
@@ -24,18 +24,21 @@
 
 #include "llvm/Support/Debug.h"
 
-
 namespace mlir {
 namespace triton {
 
+
+// When GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF is defined, the generated Passes.h.inc file includes the function definition (implementation) of createConvertTritonToAutodiff
+// Include the DEFINITIONS in exactly ONE .cpp file
 #define GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF
 #include "autodiff/include/Conversion/TritonToAutodiff/Passes.h.inc"
 
-namespace {
+// #define GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF
 
+// namespace {
 
   // main function
-  void ConvertTritonToAutodiff::runOnOperation() override {
+  void ConvertTritonToAutodiff::runOnOperation() {
     // grab the module (IOW root) op
     auto mod = getOperation();
     // walk this recursively structred IR, and call rewriteSplatAddOp only on "triton::FuncOp"
@@ -78,11 +81,13 @@ namespace {
       llvm::errs() << "\n";
     }
 
-    llvm::DenseMap<Value, Value> ptrToAddedPtrMap = addPointerArgsToFunction(func);
+    // Assign to member variables so handlers can access them
+    ptrToAddedPtrMap = addPointerArgsToFunction(func);
     if (DEBUG_PRINTS) {
       llvm::errs() << "adding new pointers:\n" << func.getFunctionType().getInputs() << "\n\n";
     }
-
+    gradMap.clear(); // Initialize as empty
+    origToCloned.clear(); // Initialize as empty
 
     // printOperation(func, true);
 
@@ -91,10 +96,8 @@ namespace {
 
     // error happening because Value (which is the type I'm trying to put into std::map) does not have move interface
     // (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
-    llvm::DenseMap<Value, Value> gradMap;
 
     // copy entire forward graph once
-    IRMapping origToCloned;
     // func.getBody() returns Region, but "setInsertionPointToStart" expects pass Block,
     // .front() gets the first block in that region, which is the entry block
     Block *entryBlock = &func.getBody().front();
@@ -105,8 +108,14 @@ namespace {
     // them in your loop below, and thus you will not re-write
     // them -- so effectively this cloned is your *Forward* graph
 
-    OpBuilder builder(func.getContext());
-    builder.setInsertionPointToStart(entryBlock);
+    // // todo-now: it's declared as a pointer in the class definiton
+    // // Initialize the builder in the pass member
+    // OpBuilder builder(func.getContext());
+    // builder.setInsertionPointToStart(entryBlock);
+
+    // Initialize the builder in the pass member
+    builder = new OpBuilder(func.getContext());
+    builder->setInsertionPointToStart(entryBlock);
 
     // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
     SetVector<Operation *> forwardSlice;
@@ -131,7 +140,7 @@ namespace {
 
       // note: important to pass the same map (origToCloned) -- so that the cloning logic
       //  does not re-clone nodes that are common between the subgraphs of nodes leading to different StoreOps
-      currFwdOp = cloneSubtree(currStoreOp, origToCloned, builder);
+      currFwdOp = cloneSubtree(currStoreOp, origToCloned, *builder);
       // first condition is for the 1st iter -- to overwrite nullptr at least with some currFwdOp
       if (!lastFwdOp || !currFwdOp->isBeforeInBlock(lastFwdOp)){
         lastFwdOp = currFwdOp;
@@ -142,7 +151,7 @@ namespace {
 
 
     // let the ops inserted during rewriting backward be inserted after the forward ops
-    builder.setInsertionPointAfter(lastFwdOp);
+    builder->setInsertionPointAfter(lastFwdOp);
 
     if (DEBUG_PRINTS) {
       llvm::errs() << "after cloning:\n";
@@ -184,7 +193,7 @@ namespace {
 
       Operation *lastBwdOp = lastFwdOp;
       if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        lastBwdOp = handleStoreBackward(storeOp, lastBwdOp, this);
+        lastBwdOp = handleStoreBackward(storeOp, lastBwdOp, *this);
       }
 
       if (DEBUG_PRINTS) {
@@ -241,54 +250,54 @@ namespace {
 
       // triton ops
       if (auto mmOp = dyn_cast<triton::DotOp>(op)){
-        handleMatmulBackward(mmOp, this);
+        handleMatmulBackward(mmOp, *this);
       } else if (auto reduceOp = dyn_cast<triton::ReduceOp>(op)){
-        handleReduceBackward(reduceOp, this);
+        handleReduceBackward(reduceOp, *this);
       } else if (auto broadcastOp = dyn_cast<triton::BroadcastOp>(op)){
-        handleBroadcastBackward(broadcastOp, this);
+        handleBroadcastBackward(broadcastOp, *this);
       } else if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)){
-        handleExpandDimsBackward(expandDimsOp, this);
+        handleExpandDimsBackward(expandDimsOp, *this);
       } else if (auto transOp = dyn_cast<triton::TransOp>(op)){
-        handleTransBackward(transOp, this);
+        handleTransBackward(transOp, *this);
       } else if (auto splatOp = dyn_cast<triton::SplatOp>(op)){
-        handleSplatBackward(splatOp, this);
+        handleSplatBackward(splatOp, *this);
 
 
       // arith ops
       } else if (auto addfOp = dyn_cast<arith::AddFOp>(op)){
-        handleAddBackward(addfOp, this);
+        handleAddBackward(addfOp, *this);
       } else if (auto mulfOp = dyn_cast<arith::MulFOp>(op)){
-        handleMulBackward(mulfOp, this);
+        handleMulBackward(mulfOp, *this);
       } else if (auto divfOp = dyn_cast<arith::DivFOp>(op)){
-        handleDivBackward(divfOp, this);
+        handleDivBackward(divfOp, *this);
       } else if (auto truncfOp = dyn_cast<arith::TruncFOp>(op)){
-        handleTruncfBackward(truncfOp, this);
+        handleTruncfBackward(truncfOp, *this);
       } else if (auto constantOp = dyn_cast<arith::ConstantOp>(op)){
         if (DEBUG_PRINTS) llvm::errs() << "visiting arith.constant op\n";
       } else if (auto extfOp = dyn_cast<arith::ExtFOp>(op)){
-        handleExtFBackward(extfOp, this);
+        handleExtFBackward(extfOp, *this);
       } else if (auto subfOp = dyn_cast<arith::SubFOp>(op)){
-        handleSubfBackward(subfOp, this);
+        handleSubfBackward(subfOp, *this);
       } else if (auto selectOp = dyn_cast<arith::SelectOp>(op)){
-        handleSelectBackward(selectOp, this);
+        handleSelectBackward(selectOp, *this);
       } else if (auto maxOp = dyn_cast<arith::MaxNumFOp>(op)){
-        handleMaxBackward(maxOp, this);
+        handleMaxBackward(maxOp, *this);
 
       // math ops
       } else if (auto cosOp = dyn_cast<math::CosOp>(op)){
-        handleCosBackward(cosOp, this);
+        handleCosBackward(cosOp, *this);
       } else if (auto sinOp = dyn_cast<math::SinOp>(op)){
-        handleSinBackward(sinOp, this);
+        handleSinBackward(sinOp, *this);
       } else if (auto sqrtOp = dyn_cast<math::SqrtOp>(op)){
-        handleSqrtBackward(sqrtOp, this);
+        handleSqrtBackward(sqrtOp, *this);
       } else if (auto logOp = dyn_cast<math::LogOp>(op)){
-        handleLogBackward(logOp, this);  // For natural logarithm (base e): The derivative of ln(x) is 1/x
+        handleLogBackward(logOp, *this);  // For natural logarithm (base e): The derivative of ln(x) is 1/x
       } else if (auto log2Op = dyn_cast<math::Log2Op>(op)){
-        handleLog2Backward(log2Op, this); // For logarithm base 2: The derivative of log₂(x) is 1/(x·ln(2))
+        handleLog2Backward(log2Op, *this); // For logarithm base 2: The derivative of log₂(x) is 1/(x·ln(2))
       } else if (auto expOp = dyn_cast<math::ExpOp>(op)){
-        handleExpBackward(expOp, this);
+        handleExpBackward(expOp, *this);
       } else if (auto exp2Op = dyn_cast<math::Exp2Op>(op)){
-        handleExp2Backward(exp2Op, this);
+        handleExp2Backward(exp2Op, *this);
       }
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
@@ -324,7 +333,7 @@ namespace {
       currentNodeName = nodeName;
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, func, this);
+        handleLoadBackward(loadOp, func, *this);
       }
     } // for loop over loads
 
@@ -387,9 +396,22 @@ namespace {
 
 
 
-}; // ConvertTritonToAutodiff stuct
+// }; // ConvertTritonToAutodiff stuct
 
-} // private namespace
+// } // private namespace
+
+// Close the top-level namespaces opened at the top of this file
+} // namespace triton
+} // namespace mlir
+
+// Explicit factory definition to satisfy linker (needs its own re-opening)
+namespace mlir {
+namespace triton {
+namespace impl {
+std::unique_ptr<::mlir::Pass> createConvertTritonToAutodiff() {
+  return std::make_unique<ConvertTritonToAutodiff>();
+}
+} // namespace impl
 } // namespace triton
 } // namespace mlir
 
