@@ -19,6 +19,15 @@
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
 
 
+// NOTE ON `pass.builder`
+// ----------------------
+// Each handler gets a reference via `OpBuilder &builder = *pass.builder;`.
+//   * The optional builder is created once per Triton function in `rewriteSplatAddOp()`.
+//   * Using an optional keeps the pass copy-constructible (MLIR clones passes
+//     internally) while avoiding manual `new/delete` and potential leaks.
+//   * The indirection (`*pass.builder`) makes it explicit that the lifetime is
+//     owned by the pass, not by individual handlers.
+
 // for loop unroll
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Utils/Utils.h"

@@ -17,12 +17,21 @@
 namespace mlir {
 namespace triton {
 
+
 // TableGen generated declarations & registration helpers
 // include the .inc file *once* with the following blocks enabled:
-//   - GEN_PASS_DECL_*          : forward declarations
-//   - GEN_PASS_CLASSES         : CRTP base template
-//   - GEN_PASS_REGISTRATION    : inline register*() helpers
-// **No** GEN_PASS_DEF_* here -> definitions live in exactly one .cpp translation unit
+//   - GEN_PASS_DECL_*          : forward declarations for factories
+//   - GEN_PASS_CLASSES         : defines the CRTP base template that the pass
+//                                must inherit from. It handles cloning,
+//                                argument/description strings, etc.
+//   - GEN_PASS_REGISTRATION    : emits *inline* helper functions such as
+//                                `registerTritonToAutodiffPasses()` so that
+//                                tools can register the pass without pulling
+//                                in its implementation object file.
+// NOTE:  Deliberately *not* enabling GEN_PASS_DEF_… here.  That block would
+//        emit the actual factory body but want **exactly one** TU (the CPP
+//        that implements the pass logic) to provide that definition.  Doing
+//        it in a header would violate the One-Definition Rule and break the linker.
 
 #define GEN_PASS_DECL_CONVERTTRITONTOAUTODIFF
 #define GEN_PASS_CLASSES
@@ -49,7 +58,12 @@ struct ConvertTritonToAutodiff
   llvm::DenseMap<Value, Value> gradMap;
   llvm::DenseMap<Value, Value> ptrToAddedPtrMap;
   IRMapping origToCloned;
-  std::optional<OpBuilder> builder; // Builder lives inside the pass (copy-able)
+  std::optional<OpBuilder> builder; // Builder is optional so the pass remains
+                                     // trivially copy-constructible.  tbl-gen
+                                     // clones passes via copy-ctor inside
+                                     // `clonePass()`.  Raw pointers or
+                                     // unique_ptr would either leak or delete
+                                     // the builder during that clone.
 
   // Helper method to create an operation with the current node name
   template <typename OpTy, typename... Args>
