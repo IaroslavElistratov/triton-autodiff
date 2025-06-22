@@ -9,6 +9,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include <optional>
 
 // #include "triton/Dialect/Triton/IR/Dialect.h"
 // #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
@@ -16,28 +17,27 @@
 namespace mlir {
 namespace triton {
 
-// After basic includes
-#define GEN_PASS_DECL
+// TableGen generated declarations & registration helpers
+// include the .inc file *once* with the following blocks enabled:
+//   - GEN_PASS_DECL_*          : forward declarations
+//   - GEN_PASS_CLASSES         : CRTP base template
+//   - GEN_PASS_REGISTRATION    : inline register*() helpers
+// **No** GEN_PASS_DEF_* here -> definitions live in exactly one .cpp translation unit
+
+#define GEN_PASS_DECL_CONVERTTRITONTOAUTODIFF
+#define GEN_PASS_CLASSES
+#define GEN_PASS_REGISTRATION
 #include "autodiff/include/Conversion/TritonToAutodiff/Passes.h.inc"
-#undef GEN_PASS_DECL
-
-#define GEN_PASS_CLASSES        // Need this for function declarations
-// #define GEN_PASS_CLASSES     // This ONLY gives the base class template -- no seesm  this gives definition
-// #define GEN_PASS_REGISTRATION
-#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h.inc"
-
-
-// GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF gives:
-//  The base class template (needed for inheritance)
-//  The function implementations (causes multiple definitions)
-// #define GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF // generate the base class
-
 
 struct ConvertTritonToAutodiff
     // : public impl::ConvertTritonToAutodiffBase<ConvertTritonToAutodiff> {
     : public ConvertTritonToAutodiffBase<ConvertTritonToAutodiff> {
 
-  using ConvertTritonToAutodiffBase::ConvertTritonToAutodiffBase;
+  // Bring every constructor generated in the CRTP base (default/copy etc.)
+  // into this derived class.  MLIR clones passes via copy-ctor, so hiding
+  // them would break the pipeline.
+  using Base = ConvertTritonToAutodiffBase<ConvertTritonToAutodiff>;
+  using Base::Base;
   // using impl::ConvertTritonToAutodiffBase<ConvertTritonToAutodiff>::ConvertTritonToAutodiffBase;
 
   // instead of piping this variable through (which would require changing signature of all the functions) -- instead I set it as a global, so that all handlers can access it
@@ -49,7 +49,7 @@ struct ConvertTritonToAutodiff
   llvm::DenseMap<Value, Value> gradMap;
   llvm::DenseMap<Value, Value> ptrToAddedPtrMap;
   IRMapping origToCloned;
-  OpBuilder* builder;  // Pointer to builder, initialized in rewriteSplatAddOp
+  std::optional<OpBuilder> builder; // Builder lives inside the pass (copy-able)
 
   // Helper method to create an operation with the current node name
   template <typename OpTy, typename... Args>
@@ -71,12 +71,7 @@ private:
 Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder);
 NameLoc createNodeName(Operation *op, std::string prefix);
 
-
-// NOTE: needs to be inside the namepace -- function inside the template base class can't find the factory function in the right scope:
-// Pass registration
-#define GEN_PASS_REGISTRATION
-#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h.inc"
-
+// NOTE: registration helpers already emitted above with GEN_PASS_REGISTRATION
 
 } // namespace triton
 } // namespace mlir
