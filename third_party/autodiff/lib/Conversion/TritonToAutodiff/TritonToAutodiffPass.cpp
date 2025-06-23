@@ -41,10 +41,10 @@ namespace triton {
   void ConvertTritonToAutodiff::runOnOperation() {
     // grab the module (IOW root) op
     auto mod = getOperation();
-    // walk this recursively structred IR, and call rewriteSplatAddOp only on "triton::FuncOp"
-    // todo-med: since I'm not using recursive funcs in "rewriteSplatAddOp", I'm not traversing body of the fn recursively (only the upper-most level)
+    // walk this recursively structred IR, and call rewriteIntoBackward only on "triton::FuncOp"
+    // todo-med: since I'm not using recursive funcs in "rewriteIntoBackward", I'm not traversing body of the fn recursively (only the upper-most level)
     mod->walk([&](triton::FuncOp func) {
-      rewriteSplatAddOp(func);
+      rewriteIntoBackward(func);
     });
   }
 
@@ -67,7 +67,7 @@ namespace triton {
   }
 
   // walk the IR backward, rewrite each operation with its corresponding backward function
-  void ConvertTritonToAutodiff::rewriteSplatAddOp(triton::FuncOp func) {
+  void ConvertTritonToAutodiff::rewriteIntoBackward(triton::FuncOp func) {
 
     enableNameLocSSA();
 
@@ -389,7 +389,7 @@ namespace triton {
       }
     }); // lambda function for the walk
 
-  } // RewriteSplatOp function
+  } // rewriteIntoBackward function
 
 
 
