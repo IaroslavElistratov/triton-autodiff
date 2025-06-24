@@ -43,9 +43,15 @@ namespace triton {
     auto mod = getOperation();
     // walk this recursively structred IR, and call rewriteIntoBackward only on "triton::FuncOp"
     // todo-med: since I'm not using recursive funcs in "rewriteIntoBackward", I'm not traversing body of the fn recursively (only the upper-most level)
+
+    // todo-now:
+    // think this will recursively traverse nested ops (e.g. body of the for loop) -- which I don't want
+    //  Because handling a particualr nested graph (e.g. ForOp) is designed to be done by "handleForLoop"
+    // When you use block.getOperations(), you're only getting the direct operations in that block. This does not recursively walk into any nested regions that those operations might have.
+    // No, this matches only to function
     mod->walk([&](triton::FuncOp func) {
       rewriteIntoBackward(func);
-    });
+    });  // lambda function for the walk
   }
 
   void ConvertTritonToAutodiff::enableNameLocSSA() {
@@ -71,15 +77,15 @@ namespace triton {
 
     enableNameLocSSA();
 
-    // todo-now: undo
-    unrollAllForOps(func);
-    // func.getBody().front().dump();
-    // exit(1);
-    if (DEBUG_PRINTS) {
-      llvm::errs() << "flattening for loop:\n";
-      func.getBody().front().print(llvm::errs());
-      llvm::errs() << "\n";
-    }
+    // // todo: enable only for "inline" pattern
+    // unrollAllForOps(func);
+    // // func.getBody().front().dump();
+    // // exit(1);
+    // if (DEBUG_PRINTS) {
+    //   llvm::errs() << "flattening for loop:\n";
+    //   func.getBody().front().print(llvm::errs());
+    //   llvm::errs() << "\n";
+    // }
 
     // Assign to member variables so handlers can access them
     ptrToAddedPtrMap = addPointerArgsToFunction(func);
@@ -209,13 +215,108 @@ namespace triton {
 
     }
 
+    // todo-now:
+    // dreference pointer (handleAllOps expects reference)
+    handleAllOps(*entryBlock, builder, gradMap, origToCloned, lastFwdOp);
+
+
+    // Second pass: handle LoadOp operations
+    // because its derivative (storeOp) destroyaes semantics of input args
+    // for (Operation *op : llvm::reverse(forwardSlice)) {
+    for (Operation &it : llvm::reverse(entryBlock->getOperations())) {
+      // todo: temp -- convert reference to pointer (to avoid modifying the the places below -- e.g. dyn_cast)
+      Operation *op = &it;
+
+      if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
+          if (DEBUG_PRINTS) llvm::errs() << "Skipping visited" << "\n";
+          continue;
+      }
+
+      NameLoc nodeName = createNodeName(op, "bwd_");
+      // Store the name in the member variable for use in handlers
+      currentNodeName = nodeName;
+
+      if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
+        handleLoadBackward(loadOp, func, *this);
+      }
+    } // for loop over loads
 
 
 
+
+
+    // I think it's bc here i explicitly delete all operations that don't have autogradVisited or isCloned attributes
+    //  set -- the problem is this func->wall recursive walks on all IR nodes (including ones contained inside bodies of other
+    // ops like reduce in thiscase)
+    //
+    // So actually I don't want to delete ops (even that doesn't have isCloned  or autogradVisited set) provided that the op
+    // they are embedded into (e.g. reduce in this case has these attributes) -- so modify that function that walks that ir and
+    // deletes nodes to also check attributes of the outher op -- and to not delete the current op in this case
+
+    // the below modifications make sure I don't delete nested op (in this case %171) even if its unmarked -- provided that the outer op (in this case %18) is marked
+    // %18 = "tt.reduce"(%17) <{axis = 0 : i32}> ({
+    // ^bb0(%arg20: f32, %arg21: f32):
+    //   %171 = "arith.addf"(%arg20, %arg21) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
+    //   "tt.reduce.return"(%171) : (f32) -> ()
+    // }) {autogradVisited = true, isCloned = true} : (tensor<8192xf32>) -> f32
+
+
+    // Final pass: remove unmarked operations
+    func->walk<WalkOrder::PostOrder>([&](Operation *op) {
+
+      auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
+      // auto isClonedAttr = op->getAttrOfType<BoolAttr>("isCloned");
+
+      if (DEBUG_PRINTS) {
+        if (visitedAttr) llvm::errs() << "  Operation is marked as visited: " << *op << "\n";
+        else llvm::errs() << "  Operation is NOT marked as visited: " << *op << "\n";
+      }
+
+      // Check if this operation or any parent operation has the required attributes
+      bool shouldPreserve = visitedAttr || isa<triton::FuncOp, triton::ReturnOp>(op);
+
+      // todo-now: i don't think I want to check for "parent node" but rather for an "outer node"
+      // If not, check if any ancestor has the attributes
+      if (!shouldPreserve) {
+        Operation *parent = op->getParentOp();
+        while (parent && !shouldPreserve) {
+          shouldPreserve = parent->getAttrOfType<BoolAttr>("autogradVisited") || parent->getAttrOfType<BoolAttr>("isCloned");
+          parent = parent->getParentOp();
+        }
+      }
+
+      // Only delete if neither this op nor any parent has the required attributes
+      if (!shouldPreserve) {
+        if (DEBUG_PRINTS) llvm::errs() << "Deleting unmarked node" << *op << "\n";
+        op->dropAllUses();
+        op->erase();
+
+      }
+    }); // lambda function for the walk
+
+  } // rewriteIntoBackward function
+
+
+
+
+
+
+  // [for-loop over handlers]
+  // answer-now: abstracting this into a separate function allows me to call this fn standalone recursively from inside each ForOp handler
+  void handleAllOps(Block &block, // SetVector<Operation *> &forwardSlice,
+                    OpBuilder &builder,
+                    llvm::DenseMap<Value, Value> &gradMap,
+                    IRMapping &origToCloned,
+                    Operation *lastFwdOp){
 
 
     // First pass: handle all operations except LoadOp
-    for (Operation *op : llvm::reverse(forwardSlice)) {
+    // for (Operation *op : llvm::reverse(forwardSlice)) {
+    for (Operation &it : llvm::reverse(block.getOperations())) {
+      // todo: temp conver ref to pointer (alternative is modify all the places below (e.g. dyn_cast) to do this line below)
+      // get a pointer to the reference
+      Operation *op = &it;
+
 
       if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
           if (DEBUG_PRINTS) llvm::errs() << "Skipping visited" << "\n";
@@ -297,6 +398,10 @@ namespace triton {
         handleExpBackward(expOp, *this);
       } else if (auto exp2Op = dyn_cast<math::Exp2Op>(op)){
         handleExp2Backward(exp2Op, *this);
+
+      // scf ops
+      } else if (auto forOp = dyn_cast<scf::ForOp>(op)){
+        handleForBackward(forOp, *this);
       }
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
@@ -317,87 +422,6 @@ namespace triton {
 
     } // for loop over ops
 
-
-    // Second pass: handle LoadOp operations
-    // because its derivative (storeOp) destroyaes semantics of input args
-    for (Operation *op : llvm::reverse(forwardSlice)) {
-
-      if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
-          if (DEBUG_PRINTS) llvm::errs() << "Skipping visited" << "\n";
-          continue;
-      }
-
-      NameLoc nodeName = createNodeName(op, "bwd_");
-      // Store the name in the member variable for use in handlers
-      currentNodeName = nodeName;
-
-      if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, func, *this);
-      }
-    } // for loop over loads
-
-
-
-
-
-    // I think it's bc here i explicitly delete all operations that don't have autogradVisited or isCloned attributes
-    //  set -- the problem is this func->wall recursive walks on all IR nodes (including ones contained inside bodies of other
-    // ops like reduce in thiscase)
-    //
-    // So actually I don't want to delete ops (even that doesn't have isCloned  or autogradVisited set) provided that the op
-    // they are embedded into (e.g. reduce in this case has these attributes) -- so modify that function that walks that ir and
-    // deletes nodes to also check attributes of the outher op -- and to not delete the current op in this case
-
-    // the below modifications make sure I don't delete nested op (in this case %171) even if its unmarked -- provided that the outer op (in this case %18) is marked
-    // %18 = "tt.reduce"(%17) <{axis = 0 : i32}> ({
-    // ^bb0(%arg20: f32, %arg21: f32):
-    //   %171 = "arith.addf"(%arg20, %arg21) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
-    //   "tt.reduce.return"(%171) : (f32) -> ()
-    // }) {autogradVisited = true, isCloned = true} : (tensor<8192xf32>) -> f32
-
-
-    // Final pass: remove unmarked operations
-    func->walk<WalkOrder::PostOrder>([&](Operation *op) {
-
-      auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
-      // auto isClonedAttr = op->getAttrOfType<BoolAttr>("isCloned");
-
-      if (DEBUG_PRINTS) {
-        if (visitedAttr) llvm::errs() << "  Operation is marked as visited: " << *op << "\n";
-        else llvm::errs() << "  Operation is NOT marked as visited: " << *op << "\n";
-      }
-
-      // Check if this operation or any parent operation has the required attributes
-      bool shouldPreserve = visitedAttr || isa<triton::FuncOp, triton::ReturnOp>(op);
-
-      // todo-now: i don't think I want to check for "parent node" but rather for an "outer node"
-      // If not, check if any ancestor has the attributes
-      if (!shouldPreserve) {
-        Operation *parent = op->getParentOp();
-        while (parent && !shouldPreserve) {
-          shouldPreserve = parent->getAttrOfType<BoolAttr>("autogradVisited") || parent->getAttrOfType<BoolAttr>("isCloned");
-          parent = parent->getParentOp();
-        }
-      }
-
-      // Only delete if neither this op nor any parent has the required attributes
-      if (!shouldPreserve) {
-        if (DEBUG_PRINTS) llvm::errs() << "Deleting unmarked node" << *op << "\n";
-        op->dropAllUses();
-        op->erase();
-
-      }
-    }); // lambda function for the walk
-
-  } // rewriteIntoBackward function
-
-
-
-
-
-// }; // ConvertTritonToAutodiff stuct
-
-// } // private namespace
 
 // Close the top-level namespaces opened at the top of this file
 } // namespace triton
