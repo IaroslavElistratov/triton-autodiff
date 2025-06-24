@@ -24,26 +24,27 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Signals.h" // report_fatal_error
 
+#include "mlir/IR/PatternMatch.h" // IRRewriter for replaceWithAdditionalYields
+
 namespace mlir {
 namespace triton {
 
 
   void handleForBackward(scf::ForOp forOp, ConvertTritonToAutodiff& pass) {
 
+    // pass.builder is an optional<OpBuilder> -- dereference the optional before using
     OpBuilder& builder = *pass.builder;
 
     // rm
     builder.setInsertionPoint(forOp);
 
     llvm::outs() << "handleForBackward\n";
-    Block *entryBlock = &forOp.getRegion().front();
+    Block *loopBody = &forOp.getRegion().front();
     // Operation *yieldOp = &entryBlock->back();
     Operation *yieldOp = forOp.getBody()->getTerminator();
 
-    Block &loopBody = forOp.getRegion().front();
-
     SmallVector<Value> origYieldOperands(yieldOp->getOperands());
-    Block::BlockArgListType origBodyArgs = loopBody.getArguments(); // forOp.getRegionIterArgs();
+    Block::BlockArgListType origBodyArgs = loopBody->getArguments(); // forOp.getRegionIterArgs();
 
     SmallVector<Value> origForOpOperands(forOp.getOperands()); // forOp.getRegionIterArgs();
 
@@ -74,32 +75,51 @@ namespace triton {
 
     // unsigned origNumIterArgs = forOp.getNumRegionIterArgs();
 
-    // seems you can add iter args wt replacing entire forOp:
-    //    - scfFor.getInitArgsMutable -- returns MutableOperandRange, that class has .append method
-    //    - can modify iteration args without replacing the ForOp itself
-    //        - erase existing yield (inside the loop body) and add a new yield op which has as its arguments all Value you want to return as iter args
-    //        - add block arguments to the loop body for each new iteration argument
-
     // the number of upstream grads wrt loop outputs is the same as the number of outputs (one upstream for each ouput)
     SmallVector<Value> upstreamOutsideValues; // note these are Value from outside of the forOp
-    for (Value v : forOp.getResults()){
+    for (Value v : forOp.getResults()) {
       Value gradVal = pass.gradMap[v];
+      if (!gradVal) {
+        llvm::errs() << "[handleForBackward] Missing gradient for loop result: " << v << "\n";
+        llvm::report_fatal_error("gradMap missing entry for loop result");
+      }
       upstreamOutsideValues.push_back(gradVal);
     }
 
-    // Get mutable range of init args and append the new ones
-    MutableOperandRange initArgsMutable = forOp.getInitArgsMutable();
-    initArgsMutable.append(upstreamOutsideValues);
-
     // Add block arguments to the loop body for each new iteration argument
-    // todo: generally I work with Values, but these are BlockArgs
+    // Append the upstream gradients as new loop-carried values
+    //
+    // MLIR requires: num_initOperands == num_regionIterArgs == num_results,
+    // but seems cannot mutate the result (`Operation` result seems immutable).
+    // So, use and MLIR helper that rebuilds the loop with additional iter-operands.
+    // helper expects a RewriterBase, use IRRewriter (simpler than PatternRewriter)
+    mlir::IRRewriter rewriter(builder.getContext());
+    rewriter.setInsertionPoint(forOp);
+    auto maybeNewLoop = forOp.replaceWithAdditionalYields(
+        rewriter,                            // rewriter
+        upstreamOutsideValues,               // new init operands
+        /*replaceInitOperandUsesInLoop*/ false,
+        // lambda that tells the helper what the loop must yield for each of the new iter-operands
+        [&](OpBuilder &b, Location loc, ValueRange newIterArgs) {
+          // forward the iter-args themselves to the next iteration
+          return SmallVector<Value>(newIterArgs.begin(), newIterArgs.end());
+        });
 
-    // used later -- represents same upstream values, but now local Value inside for-loop bodies
+    if (failed(maybeNewLoop))
+      llvm::report_fatal_error("[handleForBackward] failed to extend loop with upstream grads");
+
+    // Update our handle to the (replacement) loop and related helpers.
+    forOp = cast<scf::ForOp>(maybeNewLoop->getOperation());
+    // Recompute commonly used pointers after the replacement.
+    loopBody = &forOp.getRegion().front();
+    yieldOp = forOp.getBody()->getTerminator();
+
+    // used later -- represents same upstream values, but now local Value inside for-loop body;
+    // The newly added block arguments correspond 1-to-1 to the upstream values.
     SmallVector<BlockArgument> upstreamInsideValues;
-    for (Value arg : upstreamOutsideValues) {
-      BlockArgument currentArg = loopBody.addArgument(arg.getType(), arg.getLoc());
-      upstreamInsideValues.push_back(currentArg); // used later
-    }
+    ArrayRef<BlockArgument> newIterArgsArray =
+        forOp.getBody()->getArguments().take_back(upstreamOutsideValues.size());
+    upstreamInsideValues.append(newIterArgsArray.begin(), newIterArgsArray.end());
 
     // Update the yield operation to yield values for the new iteration arguments
     // Later, when the grad is computed
@@ -140,7 +160,7 @@ namespace triton {
 
     // don't want to copy yeild itself
     Operation *beforeYieldOp = yieldOp->getPrevNode();
-    builder.setInsertionPointToStart(entryBlock);
+    builder.setInsertionPointToStart(loopBody);
     Operation *lastFwdOp = cloneSubtree(beforeYieldOp, localOrigToCloned, builder);
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder.setInsertionPointAfter(lastFwdOp);
@@ -171,11 +191,11 @@ namespace triton {
 
     llvm::outs() << "[handleForBackward] recursively calling handleAllOps (on the body of the for-loop):\n";
     // todo: pass lastFwdOp?
-    pass.handleAllOps(*entryBlock);
+    pass.handleAllOps(*loopBody);
 
     // todo-now: also, need to add additional logic from rewriteIntoBackward, such as: deleting unmarked nodes, (?) deleting last store 
     llvm::outs() << "[handleForBackward] done handleAllOps:\n";
-    entryBlock->print(llvm::outs());
+    loopBody->print(llvm::outs());
 
     // llvm::outs() << "exit\n";
     // exit(1);
