@@ -265,9 +265,118 @@ namespace triton {
       if (isa<BlockArgument>(operand))
         continue;
 
+      // @@@@@@@@@@@@@@@@@@@@@@@@@ forOp related @@@@@@@@@@@@@@@@@@@@@@@@@
+
+      /* used when inside ForOp handler, and want to duplicate the body of the
+      current forOp -- wt the condition below, it also duplicates in to the
+      loop-body ops that are from outside of the loop body -- below condition avoids this
+
+      // input:
+
+        %10 = tt.splat %arg0
+        %11 = tt.addptr %10, %9
+        %12 = tt.load %11
+
+        %16 = scf.for %arg2 = %c0_i32_2 to %c2_i32_1 step %c1_i32_0 iter_args(%arg3 = %15)
+          %17 = arith.sitofp %arg2
+          %18 = tt.splat %17
+          %19 = arith.mulf %12, %18
+          %20 = arith.addf %arg3, %19
+          scf.yield %20
+        }
+        tt.store %14, %16
+        tt.return
+
+      // result:
+
+        %16 = scf.for %arg2 = %c0_i32_2 to %c2_i32_1 step %c1_i32_0 iter_args(%arg3 = %15)
+          %17 = tt.splat %arg0 {isCloned}
+          %18 = tt.make_range {end = 4
+          %19 = tt.addptr %17, %18 {isCloned}
+          %20 = tt.load %19 {isCloned}
+          %21 = arith.sitofp %arg2 {isCloned}
+          %22 = tt.splat %21 {isCloned}
+          %23 = arith.mulf %20, %22 {isCloned}
+          %24 = arith.addf %arg3, %23 {isCloned}
+          %25 = arith.sitofp %arg2
+          %26 = tt.splat %25
+          %27 = arith.mulf %12, %26
+          %28 = arith.addf %arg3, %27
+          scf.yield %28
+      */
+
+      // important to compare pointers to Blocks here, instead of directly
+      // comparing blocks -- as the later doesn't have comparison operator != defiend
+      if (operand.getParentBlock() != targetOp->getBlock()){
+        continue;
+      }
+      // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
       if (Operation *defOp = operand.getDefiningOp())
         cloneSubtree(defOp, mapper, builder);
     }
+
+
+    // @@@@@@@@@@@@@@@@@@@@@@@@@ forOp related @@@@@@@@@@@@@@@@@@@@@@@@@
+
+    /* This is relevant when you're copying entire outer graph
+
+    Clone subgraph does not correctly clone a graph with a nested graph (forOp
+    contained inside of it) bc %14 is not directly an input to the scf-for op,
+    but rather accessed from inside the scf.for loop; and bc my CloneSubgraph
+    is essential iterates over OPERANDS of an op, and clone them -- here bc
+    %14 is not an operand of the loop it is not cloned, and the entire subgraph
+    leading to producing %14 is not cloned either
+
+    ```mlir
+    %12 = "tt.splat"(%arg0)
+    %13 = "tt.addptr"(%12, %11)
+    %14 = "tt.load"(%13)
+
+    %18 = "scf.for"(%10, %9, %8, %17) ({^bb0(%arg2: i32, %arg3: tensor<4xf32>):
+        // NOTE: %14 used from inside the loop
+        %21 = "arith.mulf"(%14, %20)
+        [...]
+    })
+    ```
+    */
+
+    // todo-low: in general, can be any op that contains inner graph: not necessarily a scf.for
+    if (auto forOp = dyn_cast<scf::ForOp>(targetOp)){
+
+      llvm::outs() << "Clone subgraph: this condition is hit\n";
+
+      Block *entryBlock = &forOp.getRegion().front();
+
+      for (Operation &op : entryBlock->getOperations()) {
+
+        for (Value operand : op.getOperands()) {
+          if (operand.getParentBlock() != entryBlock){
+
+            llvm::outs() << "[for-loop] operand " << operand << "is accessed from outside\n";
+
+            if (Operation *defOp = operand.getDefiningOp())
+              cloneSubtree(defOp, mapper, builder);
+          }
+        }
+
+      }
+    }
+
+    /*
+    %12 = tt.load %11
+    %13 = tt.splat %arg1
+    %14 = tt.addptr %13, %9
+    %15 = tt.load %14
+    %16 = scf.for %arg2 = %c0_i32_2 to %c2_i32_1 step %c1_i32_0 iter_args(%arg3 = %15)
+      %17 = arith.sitofp %arg2
+      %18 = tt.splat %17
+      %19 = arith.mulf %12, %18
+      %20 = arith.addf %arg3, %19
+      scf.yield %20
+    */
+
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
     /* currently the order of cloned ops is different from the original
       you can see how cloning left children first in original graph
