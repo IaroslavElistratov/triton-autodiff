@@ -74,6 +74,8 @@ struct ConvertTritonToAutodiff
   // main function - declaration only, implementation in .cpp file
   void runOnOperation();
 
+  void handleAllOps(Block &block);
+
 private:
   void enableNameLocSSA();
   void rewriteIntoBackward(triton::FuncOp func);

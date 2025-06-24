@@ -7,6 +7,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 // for reverse topo sort
 #include "mlir/Analysis/SliceAnalysis.h"
@@ -17,6 +18,7 @@
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Passes.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Handlers.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/HandlerForOp.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
 #include "llvm/ADT/APSInt.h"
@@ -33,9 +35,6 @@ namespace triton {
 #define GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF
 #include "autodiff/include/Conversion/TritonToAutodiff/Passes.h.inc"
 
-// #define GEN_PASS_DEF_CONVERTTRITONTOAUTODIFF
-
-// namespace {
 
   // main function
   void ConvertTritonToAutodiff::runOnOperation() {
@@ -217,7 +216,7 @@ namespace triton {
 
     // todo-now:
     // dreference pointer (handleAllOps expects reference)
-    handleAllOps(*entryBlock, builder, gradMap, origToCloned, lastFwdOp);
+    handleAllOps(*entryBlock);
 
 
     // Second pass: handle LoadOp operations
@@ -303,11 +302,9 @@ namespace triton {
 
   // [for-loop over handlers]
   // answer-now: abstracting this into a separate function allows me to call this fn standalone recursively from inside each ForOp handler
-  void handleAllOps(Block &block, // SetVector<Operation *> &forwardSlice,
-                    OpBuilder &builder,
-                    llvm::DenseMap<Value, Value> &gradMap,
-                    IRMapping &origToCloned,
-                    Operation *lastFwdOp){
+  void ConvertTritonToAutodiff::handleAllOps(
+      Block &block // SetVector<Operation *> &forwardSlice
+    ){
 
 
     // First pass: handle all operations except LoadOp
@@ -331,7 +328,7 @@ namespace triton {
       //   %96 = "arith.addf"(%arg18, %arg19) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32
       //   "tt.reduce.return"(%96) : (f32) -> ()
       // ERROR: Expected gradient in gradMap
-      if (op->getBlock() != entryBlock){
+      if (op->getBlock() != &block){
           if (DEBUG_PRINTS) llvm::errs() << "Skipping nested ops" << "\n";
           continue;
       }
@@ -346,7 +343,7 @@ namespace triton {
       // print only if changed
       std::string initialIR;
       llvm::raw_string_ostream initialStream(initialIR);
-      entryBlock->print(initialStream);
+      block.print(initialStream);
 
       // triton ops
       if (auto mmOp = dyn_cast<triton::DotOp>(op)){
@@ -411,19 +408,19 @@ namespace triton {
       if (DEBUG_PRINTS) {
         std::string currentIR;
         llvm::raw_string_ostream currentStream(currentIR);
-        entryBlock->print(currentStream);
+        block.print(currentStream);
         if (initialIR != currentIR){
-          // llvm::errs() << entryBlock->print();
+          // llvm::errs() << block.print();
           // dump writes to std err, but I want these be in "sync" with my other prints --
           llvm::raw_ostream &os = llvm::errs();
-          entryBlock->print(os);
+          block.print(os);
         }
       }
 
     } // for loop over ops
 
+  } // handleAllOps
 
-// Close the top-level namespaces opened at the top of this file
 } // namespace triton
 } // namespace mlir
 

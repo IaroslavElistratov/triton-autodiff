@@ -1,18 +1,49 @@
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+
+// for reverse topo sort
+#include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/IR/Operation.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/APSInt.h"
+#include "llvm/ADT/STLExtras.h"  // enumerate, make_range, zip
+#include "mlir/IR/Block.h"
+#include <numeric>
+
+#include "triton/Dialect/Triton/IR/Dialect.h"
+
+
+#include "autodiff/include/Conversion/TritonToAutodiff/Passes.h"
+#include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Handlers.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
+
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/Signals.h" // report_fatal_error
+
+namespace mlir {
+namespace triton {
+
 
   void handleForBackward(scf::ForOp forOp, ConvertTritonToAutodiff& pass) {
 
+    OpBuilder& builder = *pass.builder;
 
     // rm
     builder.setInsertionPoint(forOp);
 
     llvm::outs() << "handleForBackward\n";
     Block *entryBlock = &forOp.getRegion().front();
-    Operation *yieldOp = &entryBlock->back();
+    // Operation *yieldOp = &entryBlock->back();
+    Operation *yieldOp = forOp.getBody()->getTerminator();
 
     Block &loopBody = forOp.getRegion().front();
 
     SmallVector<Value> origYieldOperands(yieldOp->getOperands());
-    BlockArgListType origBodyArgs = loopBody.getArguments(); // forOp.getRegionIterArgs();
+    Block::BlockArgListType origBodyArgs = loopBody.getArguments(); // forOp.getRegionIterArgs();
 
     SmallVector<Value> origForOpOperands(forOp.getOperands()); // forOp.getRegionIterArgs();
 
@@ -51,8 +82,8 @@
 
     // the number of upstream grads wrt loop outputs is the same as the number of outputs (one upstream for each ouput)
     SmallVector<Value> upstreamOutsideValues; // note these are Value from outside of the forOp
-    for (value v : forOp.getResults()){
-      Value gradVal gradMap[v];
+    for (Value v : forOp.getResults()){
+      Value gradVal = pass.gradMap[v];
       upstreamOutsideValues.push_back(gradVal);
     }
 
@@ -67,7 +98,7 @@
     SmallVector<BlockArgument> upstreamInsideValues;
     for (Value arg : upstreamOutsideValues) {
       BlockArgument currentArg = loopBody.addArgument(arg.getType(), arg.getLoc());
-      upstreamInsideValues.push_back(currentArg) // used later
+      upstreamInsideValues.push_back(currentArg); // used later
     }
 
     // Update the yield operation to yield values for the new iteration arguments
@@ -85,10 +116,9 @@
 
     // note: init'ing a separate new grad map (for calling HandleAllOps on the body of for loop)
     llvm::DenseMap<Value, Value> localGradMap;
-    Operation *yieldOp = forOp.getBody()->getTerminator();
-    for (auto operand : llvm::enumerate(yieldOp->getOperands()){ // auto [i, innerGraphVal] :
+    for (auto operand : llvm::enumerate(yieldOp->getOperands())){ // auto [i, innerGraphVal] :
       // grad wrt each operand of yeild, is corresponding to the newly added "upstream" loop iter arg
-      localGradMap[operand.value()] = upstreamInsideValues[operand.index()]
+      localGradMap[operand.value()] = upstreamInsideValues[operand.index()];
     }
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -140,7 +170,8 @@
     //  ==> But bc you now iterating over
 
     llvm::outs() << "[handleForBackward] recursively calling handleAllOps (on the body of the for-loop):\n";
-    handleAllOps(*entryBlock, builder, localGradMap, localOrigToCloned, /* lastFwdOp = */ lastFwdOp);
+    // todo: pass lastFwdOp?
+    pass.handleAllOps(*entryBlock);
 
     // todo-now: also, need to add additional logic from rewriteIntoBackward, such as: deleting unmarked nodes, (?) deleting last store 
     llvm::outs() << "[handleForBackward] done handleAllOps:\n";
@@ -182,7 +213,7 @@
 
     // replace yield op (note also returns upstream grad and todo: grads wrt outside values)
     // Replace the old yield with a new one that yields all values
-    rewriter.setInsertionPoint(yieldOp);
+    builder.setInsertionPoint(yieldOp);
 
     // gather all values that you want to output from the new yield
     SmallVector<Value> allYieldOperands;
@@ -195,8 +226,8 @@
     // allYieldOperands.append(gradsOutsideValues.begin(), gradsOutsideValues.end());
 
     // replace original yield
-    rewriter.create<scf::YieldOp>(yieldOp->getLoc(), allYieldOperands);
-    rewriter.eraseOp(yieldOp);
+    builder.create<scf::YieldOp>(yieldOp->getLoc(), allYieldOperands);
+    yieldOp->erase();
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
@@ -213,7 +244,7 @@
 
     // populate grads wrt original inputs
     for (auto [i, value] : llvm::enumerate(origForOpOperands)){
-      gradMap[value] = forOp.getOutput(i);
+      pass.gradMap[value] = forOp.getResult(i);
     }
 
     // todo: later
@@ -222,7 +253,7 @@
     // for (auto [i, value] : llvm::enumerate(accessedOutsideValues)){
     //   // I think this mapping from ouputs to vector of accessedOutsideValues
     //   // is valid bc "gradsOutsideValues" (which was used for creating additional outputs of yeild) is 1:1 with "accessedOutsideValues"
-    //   gradMap[value] = forOp.getOutput(offsetGradsOutsideValues + i);
+    //   pass.gradMap[value] = forOp.getOutput(offsetGradsOutsideValues + i);
     // }
 
     /*
@@ -323,3 +354,7 @@
 
 
     // // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+
+} // namespace triton
+} // namespace mlir
