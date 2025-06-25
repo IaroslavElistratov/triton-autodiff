@@ -38,7 +38,7 @@ namespace triton {
     // rm
     builder.setInsertionPoint(forOp);
 
-    llvm::outs() << "handleForBackward\n";
+    llvm::errs() << "handleForBackward\n";
     Block *loopBody = &forOp.getRegion().front();
     // Operation *yieldOp = &entryBlock->back();
     Operation *yieldOp = forOp.getBody()->getTerminator();
@@ -66,6 +66,7 @@ namespace triton {
 
 
     // @@@@@@@@@@@@@@@@@@@@ 1. add additional args for the upstream grad @@@@@@@@@@@@@@@@@@@@
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 1 ============\n\n\n";
 
     // getInitArgsMutable  // getInitArgs
     // forOp.getInitArgs() returns the initial values for the iteration arguments - these are the values provided when creating the ForOp that initialize the loop-carried variables before the first iteration.
@@ -76,14 +77,37 @@ namespace triton {
     // unsigned origNumIterArgs = forOp.getNumRegionIterArgs();
 
     // the number of upstream grads wrt loop outputs is the same as the number of outputs (one upstream for each ouput)
-    SmallVector<Value> upstreamOutsideValues; // note these are Value from outside of the forOp
+    SmallVector<Value> upstreamOutsideValues; // Grad values for results that have gradients
+    // save the indices, because after the loop is replaced I can
+    // no longer iterate over forOp.getResults() and look them up in
+    // pass.gradMap. The replacement introduces new SSA values that are not
+    // in the map, so record indices instead of the Value objects whose
+    // identity will change (after I replace the loop below)
+    SmallVector<unsigned> gradResultIdx;     // Indices of the loop results that have gradients
+    unsigned resIdxCtr = 0;
     for (Value v : forOp.getResults()) {
-      Value gradVal = pass.gradMap[v];
-      if (!gradVal) {
-        llvm::errs() << "[handleForBackward] Missing gradient for loop result: " << v << "\n";
-        llvm::report_fatal_error("gradMap missing entry for loop result");
-      }
-      upstreamOutsideValues.push_back(gradVal);
+        // use pass.gradMap.find(v) instead of operator[], so we no longer create "dummy" entries with a null Value
+        auto it = pass.gradMap.find(v);
+        if (it == pass.gradMap.end()) {
+          // not all forOp results may have grads -- that's ok as long as the ones that don't have grad are basically offset-calculations
+          // this will be checked in handleAllOps (if a value turns out not be offset calculation is matched -- the grad lookup fail there)
+          // so here safe to skip the assert.
+          // IOW: in my for-loop-no-unroll test the second loop-carry value is used only for indexing, so it is correct
+          // that it has no gradient. So, no need to assert here that every forOp result must have its grad.
+          // Also, not having the assert here doesn't sacrifice robustness, bc you will fail in handleAllOps if
+          // you try to fetch a gradient for a value that does not have one.
+          // On the other hand, if the value will never be matched in handleAllOps (e.g. if it's an integer offset calculation)
+          // then it's totally fine for a Value (corresponding to such loopCarry) to not have grads.
+          // So, don't raise error here if grad is not found
+          continue;
+        }
+
+        Value gradVal = it->second;
+        if (gradVal) {
+            upstreamOutsideValues.push_back(gradVal);
+            gradResultIdx.push_back(resIdxCtr);
+        }
+        ++resIdxCtr;
     }
 
     // Add block arguments to the loop body for each new iteration argument
@@ -114,12 +138,12 @@ namespace triton {
     loopBody = &forOp.getRegion().front();
     yieldOp = forOp.getBody()->getTerminator();
 
-    // used later -- represents same upstream values, but now local Value inside for-loop body;
-    // The newly added block arguments correspond 1-to-1 to the upstream values.
-    SmallVector<BlockArgument> upstreamInsideValues;
-    ArrayRef<BlockArgument> newIterArgsArray =
-        forOp.getBody()->getArguments().take_back(upstreamOutsideValues.size());
-    upstreamInsideValues.append(newIterArgsArray.begin(), newIterArgsArray.end());
+    // these block arguments correspond 1-to-1 to the newly appended
+    // iter-args and represent the same upstream values, but inside the
+    // loop body;
+    // `take_back` already returns an ArrayRef, so no copy is necessary
+    ArrayRef<BlockArgument> upstreamInsideValues =
+        forOp.getRegionIterArgs().take_back(upstreamOutsideValues.size());
 
     // Update the yield operation to yield values for the new iteration arguments
     // Later, when the grad is computed
@@ -127,20 +151,52 @@ namespace triton {
 
 
     // ********  add additional elements to the grad map ********
+    llvm::errs() << "add additional elements to the grad map\n";
 
     // used for later differentiation
     // populate upstream grad otherwise errors handleAllOps errors (expected gradient in the map)
     // from the outer grad, you do have grad wrt %7, but when the inner graph starts iterating from the back
     // and sees %11 (does not see %7) -- it expects grads wrt be present in the map. So re-map
-    // grad %11 -> grad %7 -- so that re-writting inner graph can proceed (in handleAllOps)
+    // grad %11 -> grad %7 -- so that re-writing inner graph can proceed (in handleAllOps)
 
-    // note: init'ing a separate new grad map (for calling HandleAllOps on the body of for loop)
+    // initialise a separate grad map that (to be used
+    // in handleAllOps when processing the loop body)
     llvm::DenseMap<Value, Value> localGradMap;
-    for (auto operand : llvm::enumerate(yieldOp->getOperands())){ // auto [i, innerGraphVal] :
-      // grad wrt each operand of yeild, is corresponding to the newly added "upstream" loop iter arg
-      localGradMap[operand.value()] = upstreamInsideValues[operand.index()];
+
+    // can't just iterate over added yeild operands and map these 1:1 to forOp results (at
+    // the same idx as the yield operand). Because they are not necessarily 1:1 -- e.g. if
+    // forOp has 2 ouput and only 1st ouput has grads wrt to it, and we add 1 more yield
+    // operand -- naive that logic would extract 2nd forOp output grad (which is incorrect)
+
+    // Map each ORIGINAL forward yield value that actually has a gradient to the
+    // corresponding upstream-gradient block argument. The order of
+    // `upstreamInsideValues` matches the order in which we added iter args, i.e.
+    // exactly the subset of loop results that have gradients.
+
+    assert(gradResultIdx.size() == upstreamInsideValues.size() && "Mismatch results indices vs inside values");
+
+    for (auto [j, idx] : llvm::enumerate(gradResultIdx)) {
+      Value fwdVal = origYieldOperands[idx];
+      Value gradArg = upstreamInsideValues[j];
+      // Only the results that were present in the outer gradMap received an
+      localGradMap[fwdVal] = gradArg;
+      llvm::errs() << "adding grads to localGradMap: " << printName(fwdVal) << " " << printName(gradArg) << "\n";
     }
 
+    // only iterating over the added yeiled args (not over all yeild args)
+    // grad wrt each operand of yeild, is corresponding to the newly added "upstream" loop iter arg
+    unsigned upstreamIdx = upstreamInsideValues.size();
+    assert(upstreamIdx == upstreamInsideValues.size() &&
+           "Did not consume all upstream gradient block arguments");
+
+    // print the contents
+    for (const auto &kv : localGradMap) {
+      const Value key = kv.first;
+      const Value val = kv.second;
+      // check nulls
+      if (key && val)
+        llvm::errs() << "[upstreamInsideValues] key: " << printName(key) << "  ->  value: " << printName(val) << '\n';
+    }
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
@@ -149,6 +205,8 @@ namespace triton {
 
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2. Clone inner graph: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 2 ============\n\n\n";
 
     // previously (in rewriteIntoBackward) I cloned all the ops including this forOp that we matched to (to be more precise what I cloned semantically bc fwd part, and was iterating over the backward (ie. original) part)
     // but previously I did not clone the body of that for loop -- here bc the for-loop I matched to -- represents backward op -- its body needs to contain both fwd and bwd
@@ -165,8 +223,8 @@ namespace triton {
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder.setInsertionPointAfter(lastFwdOp);
 
-    llvm::outs() << "[handleForBackward]cloned for-loop body:\n";
-    forOp.print(llvm::outs());
+    llvm::errs() << "[handleForBackward]cloned for-loop body:\n";
+    forOp.print(llvm::errs());
 
 
     // todo: this logic is basically the same as in rewriteIntoBackward -- can put this logic into handleAllOps and share between these two funcs, instead of re-implementing it here
@@ -180,6 +238,7 @@ namespace triton {
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 3. Diff the inner graph: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 3 ============\n\n\n";
 
     // remember in the outer graph you've duplicated nodes (isClone'ed) nodes represent the forward part of the outer graph,
     //  and you the way you got to the current handler HandleForBackward is by iterating over the original (not cloned) nodes in the outher graph
@@ -189,16 +248,33 @@ namespace triton {
     //  So, all the op-handlers, when they need some intermediate value (to compute derivative) they use origToCloned to get a particular value in the forward part of the outer graph (bc the forward part will not be re-written: so it's safe to use intermediates from there)
     //  ==> But bc you now iterating over
 
-    llvm::outs() << "[handleForBackward] recursively calling handleAllOps (on the body of the for-loop):\n";
+    llvm::errs() << "[handleForBackward] recursively calling handleAllOps (on the body of the for-loop):\n";
+
+    // Merge localGradMap into the pass-wide grad map for use inside handleAllOps.
+    auto globalGradMap = pass.gradMap;
+    pass.gradMap = localGradMap;
+    // pass.gradMap.insert(localGradMap.begin(), localGradMap.end());
+
     // todo: pass lastFwdOp?
     pass.handleAllOps(*loopBody);
 
     // todo-now: also, need to add additional logic from rewriteIntoBackward, such as: deleting unmarked nodes, (?) deleting last store 
-    llvm::outs() << "[handleForBackward] done handleAllOps:\n";
-    loopBody->print(llvm::outs());
+    //    1) clone
+    //    2) handleStore
+    //    3) handleLoad
+    //    4) delete unused
+    //  ==> yes, seems need all of these, so basically you need to call rewriteIntoBackward form here (recursively), and not just handleAllOps
+    llvm::errs() << "[handleForBackward] done handleAllOps:\n";
+    loopBody->print(llvm::errs());
 
-    // llvm::outs() << "exit\n";
+    // llvm::errs() << "exit\n";
     // exit(1);
+
+
+    // Restore original grad map entries after processing the body.
+    pass.gradMap = globalGradMap;
+
+
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
@@ -330,7 +406,7 @@ namespace triton {
 
     //   for (Value operand : op.getOperands()) {
     //       if (operand.getParentBlock() != entryBlock){
-    //         llvm::outs() << "[handleForBackward] for-loop operand " << operand << "is accessed from outside\n";
+    //         llvm::errs() << "[handleForBackward] for-loop operand " << operand << "is accessed from outside\n";
     //         accessedOutsideValues.push_back(operand);
     //       }
     //   }

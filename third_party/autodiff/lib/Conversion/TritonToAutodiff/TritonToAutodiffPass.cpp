@@ -87,10 +87,10 @@ namespace triton {
     // }
 
     // Assign to member variables so handlers can access them
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
+    // func.getFunctionType().getInputs()
+
     ptrToAddedPtrMap = addPointerArgsToFunction(func);
-    if (DEBUG_PRINTS) {
-      llvm::errs() << "adding new pointers:\n" << func.getFunctionType().getInputs() << "\n\n";
-    }
     gradMap.clear(); // Initialize as empty
     origToCloned.clear(); // Initialize as empty
 
@@ -128,6 +128,12 @@ namespace triton {
 
 
 
+    // todo-now:
+    //  do not need to clone the loop for my "for-loop-no-unroll" -- bc the only ops after ForOp are Store[s];
+    //  still do need to clone other nodes outside/before of the for-op though
+    // Seems, this is an optimization (can do even w cloning, but less efficient) -- so leave it for later
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ cloning ============\n\n\n";
     // Clones the entire fwd graph (not just a single subgraph leading from the last fwd op)
     DenseSet<Operation*> visitedLoads;
     // todo: cleanup
@@ -135,12 +141,12 @@ namespace triton {
     Operation *currFwdOp;
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
-      if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
-
       auto currStoreOp = dyn_cast<triton::StoreOp>(op);
       if (visitedLoads.contains(op) || !currStoreOp || op->getBlock() != entryBlock){
         continue;
       }
+
+      if (DEBUG_PRINTS) llvm::errs() << "cloning nodes leading to op: " << *op << "\n";
 
       // note: important to pass the same map (origToCloned) -- so that the cloning logic
       //  does not re-clone nodes that are common between the subgraphs of nodes leading to different StoreOps
@@ -151,16 +157,15 @@ namespace triton {
       }
     }
 
+    if (DEBUG_PRINTS) {
+      llvm::errs() << "after cloning:\n";
+      func.getBody().front().print(llvm::errs());
+    }
 
 
 
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder->setInsertionPointAfter(lastFwdOp);
-
-    if (DEBUG_PRINTS) {
-      llvm::errs() << "after cloning:\n";
-      func.getBody().front().print(llvm::errs());
-    }
 
     // the above mapping: original nodes -> inserted nodes.
     // To lookup intermideats in the cloned (aka cloned subgraph),
@@ -174,33 +179,39 @@ namespace triton {
     // func->walk<WalkOrder::PostOrder>([&](Operation *op) {           // https://mlir.llvm.org/doxygen/classmlir_1_1Operation.html#a59740592240b950b8c8afcf4a2eb4113
 
 
-
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ loop over handleStore ============\n\n\n";
 
     // separate loop for handle store[s]
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
-      if (DEBUG_PRINTS) llvm::errs() << "\n\n\niterating over op " << *op << "\n";
-
-      if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
-          if (DEBUG_PRINTS) llvm::errs() << "Skipping visited" << "\n";
+      StoreOp storeOp = dyn_cast<triton::StoreOp>(op);
+      auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
+      if (!storeOp || visitedAttr) {
           continue;
       }
 
+      if (DEBUG_PRINTS) llvm::errs() << "\niterating over op " << *op << "\n";
+
+      // todo: why currentNodeName
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
 
       // print only if changed
       std::string initialIR;
-      llvm::raw_string_ostream initialStream(initialIR);
-      entryBlock->print(initialStream);
-
-      Operation *lastBwdOp = lastFwdOp;
-      if (auto storeOp = dyn_cast<triton::StoreOp>(op)){
-        lastBwdOp = handleStoreBackward(storeOp, lastBwdOp, *this);
+      if (DEBUG_PRINTS) {
+        llvm::raw_string_ostream initialStream(initialIR);
+        entryBlock->print(initialStream);
       }
 
+
+      // todo: cleanup
+      Operation *lastBwdOp = lastFwdOp;
+      lastBwdOp = handleStoreBackward(storeOp, lastBwdOp, *this);
+
+
       if (DEBUG_PRINTS) {
+        llvm::errs() << "\nIR after calling handleStoreBackward\n";
         std::string currentIR;
         llvm::raw_string_ostream currentStream(currentIR);
         entryBlock->print(currentStream);
@@ -214,10 +225,13 @@ namespace triton {
 
     }
 
-    // todo-now:
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ handleAllOps ============\n\n\n";
+
     // dreference pointer (handleAllOps expects reference)
     handleAllOps(*entryBlock);
 
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ loop over handleLoad ============\n\n\n";
 
     // Second pass: handle LoadOp operations
     // because its derivative (storeOp) destroyaes semantics of input args
@@ -259,6 +273,8 @@ namespace triton {
     //   "tt.reduce.return"(%171) : (f32) -> ()
     // }) {autogradVisited = true, isCloned = true} : (tensor<8192xf32>) -> f32
 
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ remove unmarked ops ============\n\n\n";
 
     // Final pass: remove unmarked operations
     func->walk<WalkOrder::PostOrder>([&](Operation *op) {

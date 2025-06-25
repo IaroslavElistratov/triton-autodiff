@@ -25,6 +25,16 @@
 namespace mlir {
 namespace triton {
 
+  std::string printName(Value v) {
+    std::string str;
+    llvm::raw_string_ostream os(str);
+    // emits only the SSA value identifier (e.g. %%arg, %42) instead of re-printing the whole defining operation
+    // keeping the output concise for debugging
+    v.printAsOperand(os, mlir::OpPrintingFlags().useLocalScope());
+    os.flush();
+    return str;
+  }
+
   NameLoc createNodeName(Operation *op, std::string prefix){
     // Only use this approach with -mlir-use-nameloc-as-prefix compilation flag
 
@@ -122,13 +132,14 @@ namespace triton {
     // no existing grad
     if (it == gradMap.end()) {
       gradMap[val] = grad;
+      if (DEBUG_PRINTS) llvm::errs() << "[maybeAccumulateGrad] added grad wrt value: " << printName(val) << ", grad: " << printName(grad) << "\n";
 
     // found existing grad wrt val
     } else {
       auto existingGrad = it->second;
 
-      if (DEBUG_PRINTS) llvm::errs() << "[maybeAccumulateGrad] found existing grad wrt " << val << "\n";
-      if (DEBUG_PRINTS) llvm::errs() << "existing grad: " << existingGrad << " new grad: " << grad << "\n";
+      if (DEBUG_PRINTS) llvm::errs() << "[maybeAccumulateGrad] found existing grad wrt " << printName(val) << "\n";
+      if (DEBUG_PRINTS) llvm::errs() << "existing grad: " << existingGrad << " new grad: " << printName(grad) << "\n";
 
       // otherwise "does not dominate its use"  err
       // Note: when the newGrad value was defined by an op, which was inserted by
@@ -344,7 +355,7 @@ namespace triton {
     // todo-low: in general, can be any op that contains inner graph: not necessarily a scf.for
     if (auto forOp = dyn_cast<scf::ForOp>(targetOp)){
 
-      llvm::outs() << "Clone subgraph: this condition is hit\n";
+      llvm::errs() << "Clone subgraph: this condition is hit\n";
 
       Block *entryBlock = &forOp.getRegion().front();
 
@@ -353,7 +364,7 @@ namespace triton {
         for (Value operand : op.getOperands()) {
           if (operand.getParentBlock() != entryBlock){
 
-            llvm::outs() << "[for-loop] operand " << operand << "is accessed from outside\n";
+            llvm::errs() << "[for-loop] operand " << operand << "is accessed from outside\n";
 
             if (Operation *defOp = operand.getDefiningOp())
               cloneSubtree(defOp, mapper, builder);
@@ -396,17 +407,12 @@ namespace triton {
 
 
     // Now clone this operation
-    if (DEBUG_PRINTS) llvm::outs() << "cloning: " << *targetOp << "\n";
+    if (DEBUG_PRINTS) llvm::errs() << "cloning: " << *targetOp << "\n";
     // passing the mapper, maps the results of the original operation
     // to the results of the cloned operation in the IRMapping;
     // IRMapping used to ensure when I clone operations, the operands of the cloned
     // ops refer to the cloned values, not the original ones.
     Operation *clonedOp = builder.clone(*targetOp, mapper);
-
-    // add prefix to the name
-    NameLoc prefixedLoc = createNodeName(clonedOp, "fwd_");
-    clonedOp->setLoc(prefixedLoc);
-
     markVisited(builder, visitedType::Cloned, clonedOp);
 
     // if (clonedOp) {
@@ -649,6 +655,8 @@ namespace triton {
       if (auto ptrType = dyn_cast<triton::PointerType>(inputType)) {
         additionalPtrTypes.push_back(ptrType); // Remember only the new ones
 
+        if (DEBUG_PRINTS) llvm::errs() << "Adding ptr input: " << ptrType << "\n";
+
         auto numAdded = ptrIdxToAddedPtrIdxMap.size();
         ptrIdxToAddedPtrIdxMap[i] = numOrigInputs + numAdded;
       }
@@ -687,7 +695,7 @@ namespace triton {
 
       if (DEBUG_PRINTS)
         // here still see BlockArgument printing overloads due to RTTI
-        llvm::outs() << origPtrSSA << "(orig ptr) maps to " << addedPtrSSA << "(added ptr)\n";
+        llvm::errs() << origPtrSSA << "(orig ptr) maps to " << addedPtrSSA << "(added ptr)\n";
     }
 
     return ptrToAddedPtrMap;

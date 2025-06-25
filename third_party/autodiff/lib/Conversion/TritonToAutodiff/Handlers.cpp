@@ -222,7 +222,8 @@ namespace triton {
     Value upstream = getUpstreamGrad(mulfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
     // insert operations after the gradient value, they depend on, is defined
-    setInsertionPointAfterLastUse(upstream, builder);
+    // todo-now: errs when called from inside the forOp
+    // setInsertionPointAfterLastUse(upstream, builder);
 
     Value lhs = mulfOp.getOperand(0);
     Value rhs = mulfOp.getOperand(1);

@@ -76,6 +76,8 @@ namespace triton {
 
   NameLoc createNodeName(Operation *op, std::string prefix);
 
+  std::string printName(Value v);
+
 } // namespace triton
 } // namespace mlir
 
