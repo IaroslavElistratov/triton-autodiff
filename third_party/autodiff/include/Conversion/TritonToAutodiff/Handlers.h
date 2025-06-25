@@ -2,6 +2,7 @@
 #define TRITON_CONVERSION_TRITON_TO_AUTODIFF_HANDLERS_H
 
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/Block.h"
 #include "mlir/Pass/Pass.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -21,7 +22,7 @@ struct ConvertTritonToAutodiff;
 
 Operation* handleStoreBackward(triton::StoreOp storeOp, Operation *lastBwdOp, ConvertTritonToAutodiff& pass);
 
-void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func, ConvertTritonToAutodiff& pass);
+void handleLoadBackward(triton::LoadOp loadOp, mlir::Block &block, ConvertTritonToAutodiff &pass);
 
 void handleAddBackward(arith::AddFOp addfOp, ConvertTritonToAutodiff& pass);
 

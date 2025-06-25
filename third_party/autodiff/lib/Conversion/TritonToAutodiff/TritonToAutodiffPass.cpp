@@ -12,6 +12,7 @@
 // for reverse topo sort
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/Block.h"
 #include "llvm/ADT/SetVector.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -49,7 +50,7 @@ namespace triton {
     // When you use block.getOperations(), you're only getting the direct operations in that block. This does not recursively walk into any nested regions that those operations might have.
     // No, this matches only to function
     mod->walk([&](triton::FuncOp func) {
-      rewriteIntoBackward(func);
+      rewriteIntoBackward(func.getBody().front());
     });  // lambda function for the walk
   }
 
@@ -71,10 +72,14 @@ namespace triton {
                                       /*Overview=*/"");  // overview text is optional
   }
 
-  // walk the IR backward, rewrite each operation with its corresponding backward function
-  void ConvertTritonToAutodiff::rewriteIntoBackward(triton::FuncOp func) {
+  // walk the IR backward, rewrite each operation with its corresponding backward function;
+  // Accepts an MLIR Block rather than the FuncOp itself to enable
+  // recursive application on nested regions such as loop bodies
+  void ConvertTritonToAutodiff::rewriteIntoBackward(Block &block) {
 
     enableNameLocSSA();
+
+    Block *blockPtr = &block;
 
     // // todo: enable only for "inline" pattern
     // unrollAllForOps(func);
@@ -86,44 +91,39 @@ namespace triton {
     //   llvm::errs() << "\n";
     // }
 
-    // Assign to member variables so handlers can access them
-    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
-    // func.getFunctionType().getInputs()
 
-    ptrToAddedPtrMap = addPointerArgsToFunction(func);
+    // resolve the enclosing Triton function (if any)
+    triton::FuncOp func = nullptr;
+    {
+      Operation *parentOp = block.getParentOp();
+      while (parentOp && !llvm::isa<triton::FuncOp>(parentOp))
+        parentOp = parentOp->getParentOp();
+      if (parentOp)
+        func = cast<triton::FuncOp>(parentOp);
+    }
+
+    if (func) {
+      // Only add the extra pointer arguments when processing the top-level Triton function.
+      // Assign to member variables so handlers can access them
+      if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
+
+      ptrToAddedPtrMap = addPointerArgsToFunction(func);
+    }
+
+
+    // so nested (recursive) invocations no longer overwrite an existing OpBuilder.
+    if (!builder)
+      // builder uses std::optional so the pass remains copy-constructible (MLIR internals rely on)
+      builder.emplace(blockPtr->getParentOp()->getContext());
     gradMap.clear(); // Initialize as empty
     origToCloned.clear(); // Initialize as empty
-
-    // printOperation(func, true);
-
-    // assimung there's upstream grad only wrt to a single variable initially
-    // bool is_first_node
 
     // error happening because Value (which is the type I'm trying to put into std::map) does not have move interface
     // (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
 
-    // copy entire forward graph once
-    // func.getBody() returns Region, but "setInsertionPointToStart" expects pass Block,
-    // .front() gets the first block in that region, which is the entry block
-    Block *entryBlock = &func.getBody().front();
-    Operation *returnOp = &entryBlock->back();
-    // last op before return op
-    Operation *beforeReturnOp = returnOp->getPrevNode();
-    // because these marked as visited, you will not match
-    // them in your loop below, and thus you will not re-write
-    // them -- so effectively this cloned is your *Forward* graph
-
-    // Initialise the per-function OpBuilder
-    //  Construct the builder *inside* the std::optional so the pass
-    //  remains trivially copy-constructible. The builder is placed at the
-    //  start of the function body so that cloning of the forward slice emits
-    //  IR before any newly-generated gradient ops.
-    builder.emplace(func.getContext());
-    builder->setInsertionPointToStart(entryBlock);
-
     // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
     SetVector<Operation *> forwardSlice;
-    getForwardSlice(func.getOperation(), &forwardSlice);
+    getForwardSlice(blockPtr->getParentOp(), &forwardSlice);
 
 
 
@@ -134,6 +134,13 @@ namespace triton {
     // Seems, this is an optimization (can do even w cloning, but less efficient) -- so leave it for later
 
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ cloning ============\n\n\n";
+
+    // because these marked as visited, you will not match
+    // them in your loop below, and thus you will not re-write
+    // them -- so effectively this cloned is your *Forward* graph
+
+    builder->setInsertionPointToStart(blockPtr);
+
     // Clones the entire fwd graph (not just a single subgraph leading from the last fwd op)
     DenseSet<Operation*> visitedLoads;
     // todo: cleanup
@@ -142,7 +149,7 @@ namespace triton {
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
       auto currStoreOp = dyn_cast<triton::StoreOp>(op);
-      if (visitedLoads.contains(op) || !currStoreOp || op->getBlock() != entryBlock){
+      if (visitedLoads.contains(op) || !currStoreOp || op->getBlock() != blockPtr){
         continue;
       }
 
@@ -159,7 +166,7 @@ namespace triton {
 
     if (DEBUG_PRINTS) {
       llvm::errs() << "after cloning:\n";
-      func.getBody().front().print(llvm::errs());
+      blockPtr->print(llvm::errs());
     }
 
 
@@ -201,7 +208,7 @@ namespace triton {
       std::string initialIR;
       if (DEBUG_PRINTS) {
         llvm::raw_string_ostream initialStream(initialIR);
-        entryBlock->print(initialStream);
+        blockPtr->print(initialStream);
       }
 
 
@@ -214,12 +221,12 @@ namespace triton {
         llvm::errs() << "\nIR after calling handleStoreBackward\n";
         std::string currentIR;
         llvm::raw_string_ostream currentStream(currentIR);
-        entryBlock->print(currentStream);
+        blockPtr->print(currentStream);
         if (initialIR != currentIR){
-          // llvm::errs() << entryBlock->print();
+          // llvm::errs() << blockPtr->print();
           // dump writes to std err, but I want these be in "sync" with my other prints --
           llvm::raw_ostream &os = llvm::errs();
-          entryBlock->print(os);
+          blockPtr->print(os);
         }
       }
 
@@ -228,7 +235,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ handleAllOps ============\n\n\n";
 
     // dreference pointer (handleAllOps expects reference)
-    handleAllOps(*entryBlock);
+    handleAllOps(*blockPtr);
 
 
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ loop over handleLoad ============\n\n\n";
@@ -236,7 +243,7 @@ namespace triton {
     // Second pass: handle LoadOp operations
     // because its derivative (storeOp) destroyaes semantics of input args
     // for (Operation *op : llvm::reverse(forwardSlice)) {
-    for (Operation &it : llvm::reverse(entryBlock->getOperations())) {
+    for (Operation &it : llvm::reverse(blockPtr->getOperations())) {
       // todo: temp -- convert reference to pointer (to avoid modifying the the places below -- e.g. dyn_cast)
       Operation *op = &it;
 
@@ -249,8 +256,8 @@ namespace triton {
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
 
-      if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
-        handleLoadBackward(loadOp, func, *this);
+      if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
+        handleLoadBackward(loadOp, *blockPtr, *this);
       }
     } // for loop over loads
 
@@ -277,7 +284,7 @@ namespace triton {
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ remove unmarked ops ============\n\n\n";
 
     // Final pass: remove unmarked operations
-    func->walk<WalkOrder::PostOrder>([&](Operation *op) {
+    blockPtr->walk<WalkOrder::PostOrder>([&](Operation *op) {
 
       auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
       // auto isClonedAttr = op->getAttrOfType<BoolAttr>("isCloned");

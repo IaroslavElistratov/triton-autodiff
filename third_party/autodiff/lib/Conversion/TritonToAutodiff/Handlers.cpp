@@ -94,7 +94,7 @@ namespace triton {
   // todo-now:
   //  Don't just blindly add atomics in all cases, instead have an analysis pass of what kernel instances actually conflict and add finer grained atomics (locks) only for them
   // this version of the func adds atomics
-  void handleLoadBackward(triton::LoadOp loadOp, triton::FuncOp func, ConvertTritonToAutodiff& pass){
+  void handleLoadBackward(triton::LoadOp loadOp, mlir::Block &block, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.load op\n";
 
     Value upstream = getUpstreamGrad(loadOp, pass.gradMap);
@@ -104,8 +104,7 @@ namespace triton {
     // Seems no constructor to specify "InsertionPointAfter" at the time of construction
 
     // set insertion point to before the last operation (before ReturnOp)
-    // .front() gets the first block in that region
-    Block *entryBlock = &func.getBody().front();
+    Block *entryBlock = &block;
     Operation *lastOp = &entryBlock->back();
     builder.setInsertionPoint(lastOp);
 
