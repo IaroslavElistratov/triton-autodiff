@@ -44,8 +44,11 @@ namespace triton {
     Operation *yieldOp = forOp.getBody()->getTerminator();
 
     SmallVector<Value> origYieldOperands(yieldOp->getOperands());
-    Block::BlockArgListType origBodyArgs = loopBody->getArguments(); // forOp.getRegionIterArgs();
+    // region iter-args exclude the induction variable; they line up 1-to-1 with
+    // the init operands and the loop results
+    ArrayRef<BlockArgument> origBodyArgs = forOp.getRegionIterArgs();
 
+    // incudes the 3 args for loop bounds + loop-carry args
     SmallVector<Value> origForOpOperands(forOp.getOperands()); // forOp.getRegionIterArgs();
 
 
@@ -68,12 +71,8 @@ namespace triton {
     // @@@@@@@@@@@@@@@@@@@@ 1. add additional args for the upstream grad @@@@@@@@@@@@@@@@@@@@
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 1 ============\n\n\n";
 
-    // getInitArgsMutable  // getInitArgs
-    // forOp.getInitArgs() returns the initial values for the iteration arguments - these are the values provided when creating the ForOp that initialize the loop-carried variables before the first iteration.
-    // Differences between related methods:
     // getInitArgs() - Returns the initial values for iteration arguments (values OUTSIDE the loop)
     // getRegionIterArgs() - Returns the BlockArguments for iteration arguments inside the loop body
-
     // unsigned origNumIterArgs = forOp.getNumRegionIterArgs();
 
     // the number of upstream grads wrt loop outputs is the same as the number of outputs (one upstream for each ouput)
@@ -119,6 +118,10 @@ namespace triton {
     // helper expects a RewriterBase, use IRRewriter (simpler than PatternRewriter)
     mlir::IRRewriter rewriter(builder.getContext());
     rewriter.setInsertionPoint(forOp);
+
+    // the below keeps original fwd outputs of yield (I guess needed when original for-loop uses
+    //  its own result as input to the next iteration). Wt preserving this arg,
+    //  I guess can't correctly re-compute forward itermideats in next loop iter
     auto maybeNewLoop = forOp.replaceWithAdditionalYields(
         rewriter,                            // rewriter
         upstreamOutsideValues,               // new init operands
@@ -126,6 +129,11 @@ namespace triton {
         // lambda that tells the helper what the loop must yield for each of the new iter-operands
         [&](OpBuilder &b, Location loc, ValueRange newIterArgs) {
           // forward the iter-args themselves to the next iteration
+          // todo:
+          // adding iter-args for upstream seems only required when the value must be updated on every
+          // iteration -- if not (which is the case for for-loop-no-unroll example)
+          // then can just access the upstream value (inside the loop) from outside the loop directly
+          // (available read-only in every iteration)
           return SmallVector<Value>(newIterArgs.begin(), newIterArgs.end());
         });
 
@@ -287,14 +295,12 @@ namespace triton {
     pass.gradMap = globalGradMap;
     pass.origToCloned = globalOrigToCloned;
 
-
-
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
 
 
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     4) for each Block arg, connect grad wrt that arg to the ouput @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 4) for each Block arg, connect grad wrt that arg to the ouput @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
     // map outputs of differenciated for-loop as grads of arguments to the for loop
 
     // grad wrt each of the for-loop inputs have been populated into the localGradMap, as a result of running HandleAllOps above
@@ -304,59 +310,43 @@ namespace triton {
     //    [original iter args ... ] -> [ADDED upstream args ...] -> [todo: ADDED grads wrt outside values]
     // Need to preserve this order for args of the yield op (bc these mapped exactly in the same order to the iter args of the next iteration)
 
-    // gradsArgs will be some of the added yield operands
-    SmallVector<Value> gradsArgs;
-    for (BlockArgument arg : origBodyArgs){
-      Value gradArg = localGradMap[arg];
-      gradsArgs.push_back(gradArg);
-    }
-
-    // I don't replace the yield right here bc later will do it together with added yield operands for
-    //  the grads of outside Values as well -- avoids needing to replace the yield op twice
-
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-
-
-    // @@@@@@@@@@@@@@@@@@@@ return more Values from each iteration @@@@@@@@@@@@@@@@@@@@
-
-    // replace yield op (note also returns upstream grad and todo: grads wrt outside values)
-    // Replace the old yield with a new one that yields all values
-    builder.setInsertionPoint(yieldOp);
-
-    // gather all values that you want to output from the new yield
-    SmallVector<Value> allYieldOperands;
-    // original fwd outputs of yield (I guess needed when original for-loop uses
-    //  its own result as input to the next iteration). Wt preserving this arg,
-    //  I guess can't correctly re-compute forward itermideats in next loop iter
-    allYieldOperands.append(origYieldOperands.begin(), origYieldOperands.end());
-    // newly added outputs
-    allYieldOperands.append(gradsArgs.begin(), gradsArgs.end());
-    // allYieldOperands.append(gradsOutsideValues.begin(), gradsOutsideValues.end());
-
-    // replace original yield
-    builder.create<scf::YieldOp>(yieldOp->getLoc(), allYieldOperands);
-    yieldOp->erase();
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-
-
-
+    // // gradsArgs will be some of the added yield operands
+    // SmallVector<Value> gradsArgs;
+    // for (BlockArgument arg : origBodyArgs){
+    //   Value gradArg = localGradMap[arg];
+    //   gradsArgs.push_back(gradArg);
+    // }
 
 
     // @@@@@@@@@@@@@@@@@@@@ 5. populate outer-graph's gradMap @@@@@@@@@@@@@@@@@@@@
 
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 5 ============\n\n\n";
 
-    // figure out which of the ouput idxs represent:
-    //    - upstream grads;
-    //    - grad wrt outside variables
+    /*
+    [see exclidraw "REF-1"]
+    - the reverse loop carries a gradient accumulator in each extra iter-arg
+    - each iter updates that accumulator locally and yields it
+    - after the final iter, the accumulator holds the gradient wrt the original loop input, which the scf.for result contains
+    */
 
     // populate grads wrt original inputs
-    for (auto [i, value] : llvm::enumerate(origForOpOperands)){
-      pass.gradMap[value] = forOp.getResult(i);
+    unsigned origNumIter = origYieldOperands.size();
+    auto initArgs = forOp.getInitArgs();
+    for (auto [j, idx] : llvm::enumerate(gradResultIdx)) {
+      // map the corresponding init operand to the appended gradient result
+      pass.gradMap[initArgs[idx]] = forOp.getResult(origNumIter + j);
     }
 
-    // todo: later
+    // todo-now: add upstream grads from outside the loop as loop-carry initializers?
+
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] HANDLER FINISHED ============\n\n\n";
+
+  }
+
+  // comment: temporarily removed for simplicity, for now don't handle grads wrt value accessed from the outside-graph
+
     // // populate grads wrt values accessed from outside
     // unsigned offsetGradsOutsideValues = origYieldOperands.size() + gradsArgs.size();
     // for (auto [i, value] : llvm::enumerate(accessedOutsideValues)){
@@ -364,40 +354,6 @@ namespace triton {
     //   // is valid bc "gradsOutsideValues" (which was used for creating additional outputs of yeild) is 1:1 with "accessedOutsideValues"
     //   pass.gradMap[value] = forOp.getOutput(offsetGradsOutsideValues + i);
     // }
-
-    /*
-    > Expected gradient in the map for Value: %23 = "tt.load"(%22) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>
-
-        %16 = "arith.constant"() <{value = 0 : i32}> : () -> i32
-        %17 = "tt.make_range"() <{end = 4 : i32, start = 0 : i32}> : () -> tensor<4xi32>
-        %18 = "tt.splat"(%arg0) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
-        %19 = "tt.addptr"(%18, %17) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-        %20 = "tt.load"(%19) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>
-        %21 = "tt.splat"(%arg1) : (!tt.ptr<f32>) -> tensor<4x!tt.ptr<f32>>
-        %22 = "tt.addptr"(%21, %17) : (tensor<4x!tt.ptr<f32>>, tensor<4xi32>) -> tensor<4x!tt.ptr<f32>>
-        // todo: this value is passed as one of the args to the for loop, now since I differenciated my for loop, it contains
-        %23 = "tt.load"(%22) <{boundaryCheck = array<i32>, cache = 1 : i32, evict = 1 : i32, isVolatile = false, operandSegmentSizes = array<i32: 1, 0, 0>}> : (tensor<4x!tt.ptr<f32>>) -> tensor<4xf32>
-
-        // answer-now: the for-loop returns one SSA value (24), but it actually contains 3 results (i32, i32, i32, tensor<4xf32>)
-        %24 = "scf.for"(%16, %15, %14, %23) ({
-        ^bb0(%arg2: i32, %arg3: tensor<4xf32>):
-          %25 = "arith.sitofp"(%arg2) {autogradVisited = true, isCloned = true} : (i32) -> f32
-          %26 = "tt.splat"(%25) {autogradVisited = true, isCloned = true} : (f32) -> tensor<4xf32>
-          %27 = "arith.mulf"(%20, %26) <{fastmath = #arith.fastmath<none>}> {autogradVisited = true, isCloned = true} : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
-          %28 = "arith.addf"(%arg3, %27) <{fastmath = #arith.fastmath<none>}> {autogradVisited = true, isCloned = true} : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
-          %29 = "arith.sitofp"(%arg2) : (i32) -> f32
-          %30 = "tt.splat"(%29) : (f32) -> tensor<4xf32>
-          %31 = "arith.mulf"(%20, %30) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
-          %32 = "arith.addf"(%arg3, %31) <{fastmath = #arith.fastmath<none>}> : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
-          "scf.yield"(%32) : (tensor<4xf32>) -> ()
-        }) : (i32, i32, i32, tensor<4xf32>) -> tensor<4xf32>
-    */
-
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-  }
-
-  // comment: temporarily removed for simplicity, for now don't handle grads wrt value accessed from the outside-graph
 
     // // @@@@@@@@@@@@@@@@@@@@ handle grads wrt values accessed in the loop form ouside the loop @@@@@@@@@@@@@@@@@@@@
     // //                        STEP 1/2: Figure out how many new loop-carry variable to add (for grad wrt outer values)

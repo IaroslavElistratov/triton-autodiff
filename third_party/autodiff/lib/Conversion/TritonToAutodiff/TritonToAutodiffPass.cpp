@@ -420,7 +420,7 @@ namespace triton {
       }
 
       // todo-high: add else here (catch all) -- and explicitly error if none of the above
-      // (otherwise users can have unsorted ops in their programs, and mine will just silently fail)
+      // (otherwise users can have unexpected ops in their programs, and mine will just silently fail)
 
       // cleaner and more robust than adding printing to each handler
       if (DEBUG_PRINTS) {
