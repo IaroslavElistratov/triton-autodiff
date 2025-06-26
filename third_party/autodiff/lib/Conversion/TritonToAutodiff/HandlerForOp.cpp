@@ -242,9 +242,8 @@ namespace triton {
     IRMapping localOrigToCloned;
 
     // don't want to copy yeild itself
-    Operation *beforeYieldOp = yieldOp->getPrevNode();
     builder.setInsertionPointToStart(loopBody);
-    Operation *lastFwdOp = cloneSubtree(beforeYieldOp, localOrigToCloned, builder);
+    Operation *lastFwdOp = cloneSubtree(yieldOp, localOrigToCloned, builder);
     // let the ops inserted during rewriting backward be inserted after the forward ops
     builder.setInsertionPointAfter(lastFwdOp);
 
