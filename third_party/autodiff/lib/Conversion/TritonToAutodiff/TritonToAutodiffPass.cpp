@@ -39,21 +39,43 @@ namespace triton {
 
   // main function
   void ConvertTritonToAutodiff::runOnOperation() {
+
+    enableNameLocSSA();
+
     // grab the module (IOW root) op
     auto mod = getOperation();
-    // walk this recursively structred IR, and call rewriteIntoBackward only on "triton::FuncOp"
-    // todo-med: since I'm not using recursive funcs in "rewriteIntoBackward", I'm not traversing body of the fn recursively (only the upper-most level)
 
-    // todo-now:
-    // think this will recursively traverse nested ops (e.g. body of the for loop) -- which I don't want
-    //  Because handling a particualr nested graph (e.g. ForOp) is designed to be done by "handleForLoop"
-    // When you use block.getOperations(), you're only getting the direct operations in that block. This does not recursively walk into any nested regions that those operations might have.
-    // No, this matches only to function
-    mod->walk([&](triton::FuncOp func) {
-      rewriteIntoBackward(func.getBody().front());
-    });  // lambda function for the walk
+    auto funcOps = mod.getOps<triton::FuncOp>();
+    if (funcOps.empty() || std::next(funcOps.begin()) != funcOps.end()) {
+      llvm::report_fatal_error("expect exactly one Triton function in the module");
+      return;
+    }
+    triton::FuncOp func = *funcOps.begin();
+
+
+    // ----------------
+    // init pass state
+    // ----------------
+    // moved member variables init to outside of rewriteIntoBackward;
+    lastFwdOp = nullptr;
+    builder.emplace(func.getContext());
+    gradMap.clear();     // init as empty
+    origToCloned.clear(); // init as empty
+
+    // -------------------------------------------
+    // add gradient pointer arguments to the func
+    // --------------------------------------------
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
+    ptrToAddedPtrMap = addPointerArgsToFunction(func);
+
+    // ---------------------------------------
+    // rewrite the block (possibly recursive)
+    // ---------------------------------------
+    // no need for walk, since all my current use cases involve only a single ForOp
+    rewriteIntoBackward(func.getBody().front());
   }
 
+  // todo-low: mv to utils, no need to be a pass class member
   void ConvertTritonToAutodiff::enableNameLocSSA() {
     mlir::registerAsmPrinterCLOptions();   // registers --mlir-use-nameloc-as-prefix
 
@@ -77,8 +99,6 @@ namespace triton {
   // recursive application on nested regions such as loop bodies
   void ConvertTritonToAutodiff::rewriteIntoBackward(Block &block) {
 
-    enableNameLocSSA();
-
     Block *blockPtr = &block;
 
     // // todo: enable only for "inline" pattern
@@ -91,41 +111,12 @@ namespace triton {
     //   llvm::errs() << "\n";
     // }
 
-
-    // resolve the enclosing Triton function (if any)
-    triton::FuncOp func = nullptr;
-    {
-      Operation *parentOp = block.getParentOp();
-      while (parentOp && !llvm::isa<triton::FuncOp>(parentOp))
-        parentOp = parentOp->getParentOp();
-      if (parentOp)
-        func = cast<triton::FuncOp>(parentOp);
-    }
-
-    if (func) {
-      // Only add the extra pointer arguments when processing the top-level Triton function.
-      // Assign to member variables so handlers can access them
-      if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
-
-      ptrToAddedPtrMap = addPointerArgsToFunction(func);
-    }
-
-
-    // so nested (recursive) invocations no longer overwrite an existing OpBuilder.
-    if (!builder)
-      // builder uses std::optional so the pass remains copy-constructible (MLIR internals rely on)
-      builder.emplace(blockPtr->getParentOp()->getContext());
-    gradMap.clear(); // Initialize as empty
-    origToCloned.clear(); // Initialize as empty
-
     // error happening because Value (which is the type I'm trying to put into std::map) does not have move interface
     // (< comparitor), which it appers the impl of map is trying ot use to compare eleemtns of the map
 
     // copied from: llvm-project/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp
     SetVector<Operation *> forwardSlice;
     getForwardSlice(blockPtr->getParentOp(), &forwardSlice);
-
-
 
 
     // todo-now:
@@ -143,12 +134,14 @@ namespace triton {
 
     // Clones the entire fwd graph (not just a single subgraph leading from the last fwd op)
     DenseSet<Operation*> visitedLoads;
-    // todo: cleanup
-    Operation *lastFwdOp = nullptr;
     Operation *currFwdOp;
+    // note: if rewriteIntoBackward was called form HandleForOp then lastFwdOp was populated
+    //  and the comparison below will compare currFwdOp (from the current clone call)
+    //  to the lastFwdOp (from the HandleForOp's clone that cloned from yeild) -- this is desirable
     for (Operation *op : llvm::reverse(forwardSlice)) {
 
       auto currStoreOp = dyn_cast<triton::StoreOp>(op);
+      // todo: cleanup
       if (visitedLoads.contains(op) || !currStoreOp || op->getBlock() != blockPtr){
         continue;
       }
@@ -170,9 +163,7 @@ namespace triton {
     }
 
 
-
-    // let the ops inserted during rewriting backward be inserted after the forward ops
-    builder->setInsertionPointAfter(lastFwdOp);
+    // todo-now: use the lastFwdOp that forOp handler used, bc the above cloning may do nothing (in case there as no additional store[s] in the user fn) bc I laready copied averythign leading to yeild in handleForOp
 
     // the above mapping: original nodes -> inserted nodes.
     // To lookup intermideats in the cloned (aka cloned subgraph),
@@ -193,7 +184,11 @@ namespace triton {
 
       StoreOp storeOp = dyn_cast<triton::StoreOp>(op);
       auto visitedAttr = op->getAttrOfType<BoolAttr>("autogradVisited");
-      if (!storeOp || visitedAttr) {
+      // only process StoreOps that belong to the block I'm rewriting;
+      // otherwise the below will try to handle tt.store from outside
+      // the current block being re-written -- undesirable when
+      // called rewriteIntoBackward on a loop body from handleForOp
+      if (!storeOp || visitedAttr || op->getBlock() != blockPtr) {
           continue;
       }
 

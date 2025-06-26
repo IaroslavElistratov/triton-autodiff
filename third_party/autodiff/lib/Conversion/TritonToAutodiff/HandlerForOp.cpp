@@ -203,17 +203,42 @@ namespace triton {
 
 
 
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2. clone form yield: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2. Clone inner graph: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 2 - clone from yeild ============\n\n\n";
 
-    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 2 ============\n\n\n";
+    /* the reason I do cloning here, even when calling rewriteIntoBackward below (which also does cloning), is
+      the cloning in rewriteIntoBackward is done from the Store[s] (which makes sense to use store[s] as terminal
+      nodes for differentiation in the "inline" pattern) but in the forOp body there can be ops which you may want
+      to diff after the Store[s] (which is not the case in the "inline" patter)
+      Specifically there can be ops after StoreOp[s] but before yield op.
+      I want to make sure that these get cloned as well -- thus do the copying there as well.
+      Then rewriteIntoBackward does its, but only copying the subgraphs leading to the StoreOps
+      -- both clones (1) from yield op (here) and (2) from store ops (in rewriteIntoBackward),
+      are needed bc they clone from different "anchors" sort of speak.
 
-    // previously (in rewriteIntoBackward) I cloned all the ops including this forOp that we matched to (to be more precise what I cloned semantically bc fwd part, and was iterating over the backward (ie. original) part)
-    // but previously I did not clone the body of that for loop -- here bc the for-loop I matched to -- represents backward op -- its body needs to contain both fwd and bwd
-    // so cloning the body of that loop here
+      And then another, independent reason (for cloning here), is that forOp body may simply not have any StoreOp
+      (e.g. for-loop-no-unroll example) in which case the logic in rewriteIntoBackward (which does cloning based
+      on StoreOps) will clone nothing.
 
-    // answer-now: note this is a brand new map -- otherwise I guess the values inside the loop body are already in the map "OrigToCloned" (not local) and thus the below loop does nothing
-    // otherwise cloneSubtree does nothing
+      Also when calling rewriteIntoBackward from inside the forOpHandler, you can't just omit that "clone based on storeOps logic"
+      bc in general a forOp body may have the StoreOps.
+
+      Seems fine that there can be overlap in some nodes they might want to clone -- bc when calling rewriteIntoBackward
+      I'm passing localOrigToCloned, so no redundant cloning should happen (bc the nodes that appear in both: coming form
+      yeild, and coming from store -- will already be in the localOrigToCloned thus they aren't needed to be cloned again there)
+    */
+
+    // Clone inner graph
+    //  previously (in outer rewriteIntoBackward) I cloned all the ops including this forOp that we matched
+    //  to (to be more precise what I cloned semantically bc fwd part, and was iterating over the backward
+    //  (ie. original) part) but previously I did not clone the body of that for loop -- here bc the for-loop
+    //  I matched to -- represents backward op -- its body needs to contain both fwd and bwd so cloning the body
+    //  of that loop here
+
+    // note this is a brand new map -- otherwise I guess the values inside
+    // the loop body are already in the map "OrigToCloned" (not local) and
+    // thus the below loop does nothing otherwise cloneSubtree does nothing
     IRMapping localOrigToCloned;
 
     // don't want to copy yeild itself
@@ -225,20 +250,13 @@ namespace triton {
 
     llvm::errs() << "[handleForBackward]cloned for-loop body:\n";
     forOp.print(llvm::errs());
-
-
-    // todo: this logic is basically the same as in rewriteIntoBackward -- can put this logic into handleAllOps and share between these two funcs, instead of re-implementing it here
-
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
 
 
 
-
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 3. Diff the inner graph: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 3 ============\n\n\n";
 
     // remember in the outer graph you've duplicated nodes (isClone'ed) nodes represent the forward part of the outer graph,
     //  and you the way you got to the current handler HandleForBackward is by iterating over the original (not cloned) nodes in the outher graph
@@ -248,31 +266,27 @@ namespace triton {
     //  So, all the op-handlers, when they need some intermediate value (to compute derivative) they use origToCloned to get a particular value in the forward part of the outer graph (bc the forward part will not be re-written: so it's safe to use intermediates from there)
     //  ==> But bc you now iterating over
 
-    llvm::errs() << "[handleForBackward] recursively calling handleAllOps (on the body of the for-loop):\n";
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 3 -- recursively calling handleForBackward ============\n\n\n";
 
     // Merge localGradMap into the pass-wide grad map for use inside handleAllOps.
     auto globalGradMap = pass.gradMap;
+    auto globalOrigToCloned = pass.origToCloned;
+
     pass.gradMap = localGradMap;
-    // pass.gradMap.insert(localGradMap.begin(), localGradMap.end());
+    pass.origToCloned = localOrigToCloned;
 
-    // todo: pass lastFwdOp?
-    pass.handleAllOps(*loopBody);
+    pass.lastFwdOp = lastFwdOp;
+    // 1) clone 2) handleStore 3) handleLoad 4) delete unused
+    //  ==> yes, seems need all of these, so call rewriteIntoBackward (not just handleAllOps) from here recursively
+    pass.rewriteIntoBackward(*loopBody);
 
-    // todo-now: also, need to add additional logic from rewriteIntoBackward, such as: deleting unmarked nodes, (?) deleting last store 
-    //    1) clone
-    //    2) handleStore
-    //    3) handleLoad
-    //    4) delete unused
-    //  ==> yes, seems need all of these, so basically you need to call rewriteIntoBackward form here (recursively), and not just handleAllOps
     llvm::errs() << "[handleForBackward] done handleAllOps:\n";
     loopBody->print(llvm::errs());
-
-    // llvm::errs() << "exit\n";
-    // exit(1);
 
 
     // Restore original grad map entries after processing the body.
     pass.gradMap = globalGradMap;
+    pass.origToCloned = globalOrigToCloned;
 
 
 
