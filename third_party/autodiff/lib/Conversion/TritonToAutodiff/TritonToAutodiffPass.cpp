@@ -320,24 +320,19 @@ namespace triton {
 
   // [for-loop over handlers]
   // answer-now: abstracting this into a separate function allows me to call this fn standalone recursively from inside each ForOp handler
-  void ConvertTritonToAutodiff::handleAllOps(
-      Block &block // SetVector<Operation *> &forwardSlice
-    ){
+  void ConvertTritonToAutodiff::handleAllOps(Block &block){
 
-
-    // First pass: handle all operations except LoadOp
-    // for (Operation *op : llvm::reverse(forwardSlice)) {
-    for (Operation &it : llvm::reverse(block.getOperations())) {
-      // todo: temp conver ref to pointer (alternative is modify all the places below (e.g. dyn_cast) to do this line below)
-      // get a pointer to the reference
-      Operation *op = &it;
-
+    // walk the block in reverse order but make sure to advance the iterator
+    // *before* calling any handler that might erase or replace the current
+    // operation (e.g. forOpHandler replaces the op) [REF-2]
+    for (auto it = block.rbegin(), e = block.rend(); it != e;) {
+      Operation &itCurr = *it++;
+      Operation *op = &itCurr;
 
       if (op->getAttrOfType<BoolAttr>("autogradVisited")) {
           if (DEBUG_PRINTS) llvm::errs() << "Skipping visited" << "\n";
           continue;
       }
-
 
       // Note: I want to handle nested ops by dedicated handlers (e.g. reduce handler) -- not by the main loop
       //
