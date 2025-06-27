@@ -286,7 +286,7 @@ namespace triton {
       }
 
       // Check if this operation or any parent operation has the required attributes
-      bool shouldPreserve = visitedAttr || isa<triton::FuncOp, triton::ReturnOp>(op);
+      bool shouldPreserve = visitedAttr || isa<triton::FuncOp, triton::ReturnOp, scf::YieldOp>(op);
 
       // todo-now: i don't think I want to check for "parent node" but rather for an "outer node"
       // If not, check if any ancestor has the attributes
@@ -298,13 +298,34 @@ namespace triton {
         }
       }
 
-      // Only delete if neither this op nor any parent has the required attributes
-      if (!shouldPreserve) {
-        if (DEBUG_PRINTS) llvm::errs() << "Deleting unmarked node" << *op << "\n";
-        op->dropAllUses();
-        op->erase();
-
+      // when removing IR "unmarked" op, can't:
+      // (1) do a single pass that erases every op whose use_empty() is true, because in a dead
+      //  sub-graph every interior node still has users (its children) so only the final leaf
+      //  would be deleted and the rest would stay;
+      // (2) force-delete nodes by calling dropAllUses() first, bc MLIR forbids null operands, so
+      //  subsequent IR operations would assert-fail;
+      // Therefore first collect every "unmarked" op, then erase them in post-order
+      //  (leaf-to-root). Deleting leaves first causes their parents to become leaf nodes on the
+      //  same walk, allowing safe, incremental cleanup of the entire unused sub-graph without violating MLIR semantics
+      // [REF-4]
+      SmallVector<Operation *> toErase;
+      block.walk<WalkOrder::PostOrder>([&](Operation *op) {
+        bool unmarked = !op->getAttrOfType<BoolAttr>("autogradVisited") &&
+                        !op->getAttrOfType<BoolAttr>("isCloned") &&
+                        !isa<triton::FuncOp, triton::ReturnOp, scf::YieldOp>(op);
+        if (unmarked)
+          toErase.push_back(op);
+      });
+      // erase from leaves upward
+      for (Operation *dead : toErase) {
+        if (!dead->use_empty()) {
+          // all users must be in toErase as well, but erase them first
+          continue;
+        }
+        dead->erase();
       }
+
+
     }); // lambda function for the walk
 
   } // rewriteIntoBackward function
