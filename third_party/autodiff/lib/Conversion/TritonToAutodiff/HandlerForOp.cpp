@@ -183,12 +183,19 @@ namespace triton {
 
     assert(gradResultIdx.size() == upstreamInsideValues.size() && "Mismatch results indices vs inside values");
 
+
+    // 1. iterate over each original yield operand
+    // 2. for each operand, init its grads with the loop-carry
+    //    values I added above (these loop-carry[s] represent the
+    //    upstream grads wrt corresponding yield outputs)
+    // upstreamInsideValues  – the extra iter-args we just added
+    // gradResultIdx         – indices of loop results that do have grads
     for (auto [j, idx] : llvm::enumerate(gradResultIdx)) {
-      Value fwdVal = origYieldOperands[idx];
+      Value yieldOperand = origYieldOperands[idx];
       Value gradArg = upstreamInsideValues[j];
       // Only the results that were present in the outer gradMap received an
-      localGradMap[fwdVal] = gradArg;
-      llvm::errs() << "adding grads to localGradMap: " << printName(fwdVal) << " " << printName(gradArg) << "\n";
+      localGradMap[yieldOperand] = gradArg;
+      llvm::errs() << "adding grads to localGradMap: " << printName(yieldOperand) << " " << printName(gradArg) << "\n";
     }
 
     // only iterating over the added yeiled args (not over all yeild args)
