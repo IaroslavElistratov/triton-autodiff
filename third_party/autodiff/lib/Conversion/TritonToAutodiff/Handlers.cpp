@@ -40,12 +40,12 @@ namespace triton {
 
 
   Operation* handleStoreBackward(triton::StoreOp storeOp,
-                              Operation *lastBwdOp, ConvertTritonToAutodiff& pass){
+                              Operation *lastFwdOp, ConvertTritonToAutodiff& pass){
 
     OpBuilder& builder = *pass.builder;
     // because this will effectively load the upstream grad, I want to set the insertion point to right after the last node in fwd
-    builder.setInsertionPointAfter(lastBwdOp);
-    if (DEBUG_PRINTS) llvm::errs() << "[handleStoreBackward] lastBwdOp: " << lastBwdOp << "\n";
+    builder.setInsertionPointAfter(lastFwdOp);
+    if (DEBUG_PRINTS) llvm::errs() << "[handleStoreBackward] lastFwdOp: " << lastFwdOp << "\n";
 
     // see all available constructors in -- triton/include/triton/Dialect/Triton/IR/TritonOps.td -> "def TT_LoadOp"
     // Value ptr = pass.origToCloned.lookup(storeOp->getOperand(0));

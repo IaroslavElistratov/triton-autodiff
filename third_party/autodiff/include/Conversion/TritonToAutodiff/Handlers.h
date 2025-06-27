@@ -20,7 +20,7 @@ namespace triton {
 // Forward declaration
 struct ConvertTritonToAutodiff;
 
-Operation* handleStoreBackward(triton::StoreOp storeOp, Operation *lastBwdOp, ConvertTritonToAutodiff& pass);
+Operation* handleStoreBackward(triton::StoreOp storeOp, Operation *lastFwdOp, ConvertTritonToAutodiff& pass);
 
 void handleLoadBackward(triton::LoadOp loadOp, mlir::Block &block, ConvertTritonToAutodiff &pass);
 

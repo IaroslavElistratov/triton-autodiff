@@ -251,9 +251,28 @@ namespace triton {
 
     // don't want to copy yeild itself
     builder.setInsertionPointToStart(loopBody);
-    Operation *lastFwdOp = cloneSubtree(yieldOp, localOrigToCloned, builder);
-    // let the ops inserted during rewriting backward be inserted after the forward ops
-    builder.setInsertionPointAfter(lastFwdOp);
+    Operation *clonedYield = cloneSubtree(yieldOp, localOrigToCloned, builder);
+
+    // todo: the only place that used lastFwdOp is handleStoreBackward -- get rid of that concept all together
+
+    // MLIR requires scf.yield to be the last operation in a block,
+    // cloning the fwd sub-graph including the original scf.yield
+    // causes the clone to appear before the still-existing original ops,
+    // leaving illegal code where non-terminators follow the block terminator.
+    // So, pick the operand that is **latest** in the block to be used as
+    // lastFwdOp and delete the cloned yeild [REF-3]
+    Operation *lastFwdOp = nullptr;
+    for (Value v : clonedYield->getOperands()) {
+      if (Operation *def = v.getDefiningOp()) {
+        // if an operand is a block-argument it has no defining op, so skip it
+        if (!lastFwdOp || lastFwdOp->isBeforeInBlock(def))
+          lastFwdOp = def;
+      }
+    }
+    clonedYield->moveAfter(yieldOp);
+    yieldOp->erase();
+    // this is what later handlers should treat as “the last forward op”.
+    llvm::errs() << "lastFwdOp: " << *lastFwdOp << "\n";
 
     llvm::errs() << "[handleForBackward]cloned for-loop body:\n";
     forOp.print(llvm::errs());

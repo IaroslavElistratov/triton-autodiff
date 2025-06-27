@@ -206,11 +206,7 @@ namespace triton {
         blockPtr->print(initialStream);
       }
 
-
-      // todo: cleanup
-      Operation *lastBwdOp = lastFwdOp;
-      lastBwdOp = handleStoreBackward(storeOp, lastBwdOp, *this);
-
+      lastFwdOp = handleStoreBackward(storeOp, lastFwdOp, *this);
 
       if (DEBUG_PRINTS) {
         llvm::errs() << "\nIR after calling handleStoreBackward\n";
