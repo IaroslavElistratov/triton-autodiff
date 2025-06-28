@@ -97,7 +97,8 @@ namespace triton {
           // you try to fetch a gradient for a value that does not have one.
           // On the other hand, if the value will never be matched in handleAllOps (e.g. if it's an integer offset calculation)
           // then it's totally fine for a Value (corresponding to such loopCarry) to not have grads.
-          // So, don't raise error here if grad is not found
+          // So, don't raise error here if grad is not found;
+          // e.g. these don't have grads: (indices, integer accumulators, pointers)
           continue;
         }
 
@@ -256,6 +257,13 @@ namespace triton {
     // thus the below loop does nothing otherwise cloneSubtree does nothing
     IRMapping localOrigToCloned;
 
+    // in handleAllOps handlers use "pass.origToCloned.lookup" to grab fwd values of operands
+    // of an op that they matched to, because some of my fwd args are block args (and thus weren't cloned when calling clone above)
+    // where were not recorded in the origToCloned map, so when handlers to the lookup on them it fails.
+    // origToCloned.lookup(v) is used every time a handler needs the forward value of v
+    for (BlockArgument ba : loopBody->getArguments())
+        localOrigToCloned.map(ba, ba);   // identity
+
     // don't want to copy yeild itself
     builder.setInsertionPointToStart(loopBody);
     Operation *clonedYield = cloneSubtree(yieldOp, localOrigToCloned, builder);
@@ -278,7 +286,7 @@ namespace triton {
     }
     clonedYield->moveAfter(yieldOp);
     yieldOp->erase();
-    // this is what later handlers should treat as “the last forward op”.
+    // this is what later handlers should treat as "the last forward op".
     llvm::errs() << "lastFwdOp: " << *lastFwdOp << "\n";
 
     llvm::errs() << "[handleForBackward]cloned for-loop body:\n";
@@ -343,7 +351,6 @@ namespace triton {
     //   gradsArgs.push_back(gradArg);
     // }
 
-
     // @@@@@@@@@@@@@@@@@@@@ 5. populate outer-graph's gradMap @@@@@@@@@@@@@@@@@@@@
 
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 5 ============\n\n\n";
@@ -369,6 +376,7 @@ namespace triton {
 
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] HANDLER FINISHED ============\n\n\n";
 
+    // todo-now: use maybeAccumulate?
   }
 
   // comment: temporarily removed for simplicity, for now don't handle grads wrt value accessed from the outside-graph

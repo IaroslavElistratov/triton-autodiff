@@ -12,7 +12,7 @@ DEVICE = torch.device("cuda:0")
 
 
 #################
-#    Step 1     #
+#    Type 1     #
 #################
 
 # @triton.jit
@@ -55,19 +55,71 @@ DEVICE = torch.device("cuda:0")
 
 
 
+# #################
+# #    Type 2     #
+# #################
+# # comment:
+# #   Now there's a dependency between iterations -- they write to the same accum
+# #   That's close to what flash-attention kernel does
+
+# @autodiff(
+#     # pattern="elementwise-like",
+#     idxs_buffers=(2, )
+# )
+# @triton.jit
+# def kernel_v2(
+#       a_ptr,
+#       b_ptr,
+#       output_ptr,
+#       BLOCK_SIZE: tl.constexpr,
+#     ):
+
+#     offsets = tl.arange(0, BLOCK_SIZE) # (4, )
+
+#     accum = tl.load(output_ptr + offsets) # (4, )
+
+#     for i in range(2):
+#       a = tl.load(a_ptr + offsets) # (4, )
+#       b = tl.load(b_ptr + offsets) # (4, )
+
+#       out = a * b
+
+#       # accum into the same buffer
+#       accum += out
+
+#       offsets += 4
+
+#     # create new offsets overwise previous was overwritten inside the loop
+#     offsets = tl.arange(0, BLOCK_SIZE) # (4, )
+#     tl.store(output_ptr + offsets, accum)
+
+# def stub(a, b):
+#     output = torch.zeros((4, ), device=a.device)
+#     kernel_v2[(1, )](a, b, output, BLOCK_SIZE=4)
+#     return output
+
+# def torch_fn(torch_a, torch_b):
+#     output = torch.zeros((4, ), device=torch_a.device)
+#     output += torch_a[:4] * torch_b[:4]
+#     output += torch_a[4:] * torch_b[4:]
+#     return output
+
+
 #################
-#    Step 2     #
+#    Type 4     #
 #################
 # comment:
-#   Now there's a dependency between iterations -- they write to the same accum
-#   That's close to what flash-attention kernel does
+#   upstream needs to change for each bwd iteration (not just upstream wrt each yield == upstream wrt final for-op outputs)
+#   seems this also requires to reconstruct the fwd buffer at each iteration -- applying the inverse (not derivative) of the accumulation function
+#   e.g. when accum is "accum = accum * curr" -- grad wrt prev iteration's accum requires knowing the result of the current fwd iteration (curr)
+
 
 @autodiff(
     # pattern="elementwise-like",
     idxs_buffers=(2, )
 )
 @triton.jit
-def kernel_v2(
+def kernel_v4(
       a_ptr,
       b_ptr,
       output_ptr,
@@ -85,7 +137,7 @@ def kernel_v2(
       out = a * b
 
       # accum into the same buffer
-      accum += out
+      accum *= out
 
       offsets += 4
 
@@ -93,68 +145,79 @@ def kernel_v2(
     offsets = tl.arange(0, BLOCK_SIZE) # (4, )
     tl.store(output_ptr + offsets, accum)
 
-def stub(a, b):
-    output = torch.zeros((4, ), device=a.device)
-    kernel_v2[(1, )](a, b, output, BLOCK_SIZE=4)
-    return output
+def stub(a, b, buff):
+    kernel_v4[(1, )](a, b, buff, BLOCK_SIZE=4)
+    return buff
 
-def torch_fn(torch_a, torch_b):
-    output = torch.zeros((4, ), device=torch_a.device)
-    output += torch_a[:4] * torch_b[:4]
-    output += torch_a[4:] * torch_b[4:]
-    return output
+def torch_fn(torch_a, torch_b, buff):
+    # inplace mutation -- autograd err
+    # buff *= torch_a[:4] * torch_b[:4]
+    # buff *= torch_a[4:] * torch_b[4:]
+    buff = buff * (torch_a[:4] * torch_b[:4])
+    buff = buff * (torch_a[4:] * torch_b[4:])
+    return buff
+
 
 
 #################
 #    common     #
 #################
 
-size = 8
-a = torch.randn(size, device=DEVICE)
-b = torch.randn(size, device=DEVICE)
+# todo-now:
+# current autodiff logic still feeds the same upstream gradient
+# (the one for the final loop result) to every iteration, so the factors
+# that should appear in front of early elements are missing. That is why
+# the gradients coming out of my pass are different from torch's
 
-output_torch = torch_fn(a, b)
-output_triton = stub(a, b)
+size = 8
+a = torch.randn(size, device=DEVICE, requires_grad=True)
+b = torch.randn(size, device=DEVICE, requires_grad=True)
+# obviously can't start with zeros when accum is "*=", bc all local grads will be zeros;
+# to keep the numerics the same, passing similarly initialized buff to both my and torch_fn
+buff = torch.randn((4, ), device=DEVICE)
+upstream = torch.randn_like(buff)
+
+torch_a = a.clone().detach().requires_grad_(True)
+torch_b = b.clone().detach().requires_grad_(True)
+torch_buff = buff.clone().detach() # .requires_grad_(True)
+
+output_torch = torch_fn(a, b, buff)
+output_triton = stub(torch_a, torch_b, torch_buff)
 
 print("output_torch:", output_torch)
 print("output_triton:", output_triton)
 
-
 if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+    print("✅ [output] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ [output] Triton and Torch differ")
 
 #### test backward ####
 
-upstream = torch.randn_like(output_triton)
-a.requires_grad = True
-b.requires_grad = True
-torch_a = a.clone().detach().requires_grad_(True)
-torch_b = b.clone().detach().requires_grad_(True)
-
-my_out = stub(a, b)
-my_out.backward(upstream)
-
-# compare with pytorch
-
-torch_output = torch_fn(torch_a, torch_b)
-torch_output.backward(upstream)
+output_triton.backward(upstream)
+output_torch.backward(upstream)
 
 if torch.allclose(a.grad, torch_a.grad, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+    print("✅ [a's grad] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ [a's grad] Triton and Torch differ")
 
 if torch.allclose(b.grad, torch_b.grad, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
+    print("✅ [b's grad] Triton and Torch match")
 else:
-    print("❌ Triton and Torch differ")
+    print("❌ [b's grad] Triton and Torch differ")
+
+# if torch.allclose(buff.grad, torch_buff.grad, atol=1e-2, rtol=0):
+#     print("✅ Triton and Torch match")
+# else:
+#     print("❌ Triton and Torch differ")
 
 print("grad a: ", a.grad)
 print("grad b: ", b.grad)
+# print("grad buff: ", buff.grad)
 print()
 
 print("torch grad a: ", torch_a.grad)
 print("torch grad b: ", torch_b.grad)
-print()
+# print("torch grad buff: ", torch_buff.grad)
+# print()
