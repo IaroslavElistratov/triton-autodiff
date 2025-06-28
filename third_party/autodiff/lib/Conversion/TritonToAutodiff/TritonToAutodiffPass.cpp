@@ -94,6 +94,19 @@ namespace triton {
                                       /*Overview=*/"");  // overview text is optional
   }
 
+  // set insertion point after the **LAST USE** (in the bwd graph being re-written) of gradient value they depend on
+  // IOW: the last SSA value from the bwd (differentiated so far) that used the gradient value
+  void ConvertTritonToAutodiff::setInsertionPointAfterLastUse(Value upstream){
+    // special case for when rewriteIntoBackward (and thus the handlers) are
+    // called recursively from HandleForOp [REF-5]
+    if (isa<BlockArgument>(upstream)) {
+      builder->setInsertionPointAfter(lastFwdOp);
+      return;
+    }
+    Operation* lastUseInBwd = findLastNodeWithAttribute(upstream, "isInserted");
+    builder->setInsertionPointAfter(lastUseInBwd);
+  }
+
   // walk the IR backward, rewrite each operation with its corresponding backward function;
   // Accepts an MLIR Block rather than the FuncOp itself to enable
   // recursive application on nested regions such as loop bodies

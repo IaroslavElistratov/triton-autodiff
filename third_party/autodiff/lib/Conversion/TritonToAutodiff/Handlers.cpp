@@ -183,7 +183,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(truncfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = truncfOp.getOperand();
 
@@ -221,8 +221,7 @@ namespace triton {
     Value upstream = getUpstreamGrad(mulfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
     // insert operations after the gradient value, they depend on, is defined
-    // todo-now: errs when called from inside the forOp
-    // setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value lhs = mulfOp.getOperand(0);
     Value rhs = mulfOp.getOperand(1);
@@ -255,7 +254,7 @@ namespace triton {
     Value upstream = getUpstreamGrad(divfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
     // insert operations after the gradient value, they depend on, is defined
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value a = divfOp.getOperand(0);
     Value b = divfOp.getOperand(1);
@@ -298,7 +297,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(cosOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = cosOp.getOperand();
     Value xCloned = pass.origToCloned.lookup(x);
@@ -321,7 +320,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(sinOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = sinOp.getOperand();
     Value xCloned = pass.origToCloned.lookup(x);
@@ -340,7 +339,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(sqrtOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = sqrtOp.getOperand();
     Value sqrtResult = sqrtOp;
@@ -365,7 +364,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(logOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = logOp.getOperand();
     Value xCloned = pass.origToCloned.lookup(x);
@@ -385,7 +384,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(expOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = expOp.getOperand();
     Value expResult = expOp;
@@ -407,7 +406,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(mmOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     // Extract matrix multiplication operands
     Value a = mmOp.getA();
@@ -514,7 +513,7 @@ namespace triton {
 
       Value upstream = getUpstreamGrad(maxOp->getResult(0), pass.gradMap);
       OpBuilder& builder = *pass.builder;
-      setInsertionPointAfterLastUse(upstream, builder);
+      pass.setInsertionPointAfterLastUse(upstream);
 
       // Get both input tensors
       Value lhs = maxOp->getOperand(0);
@@ -606,7 +605,7 @@ namespace triton {
     //    same for getOperand(): reduceOp.getOperand(0) -- ERRORS OUT.    reduceOp->getOperand(0) -- works!
     Value upstream = getUpstreamGrad(reduceOp->getResult(0), pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     // Check that this is a sum reduction (contains only single node, e.g. arith.addf)
     Operation *combiner = reduceOp.getSingleCombiner();
@@ -698,7 +697,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(extfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = extfOp.getOperand();
 
@@ -722,7 +721,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(subfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     // For subtraction z = x - y
     Value lhs = subfOp.getOperand(0);
@@ -752,7 +751,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(selectOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     // Get operands
     Value condition = selectOp.getCondition();
@@ -826,7 +825,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(broadcastOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    // setInsertionPointAfterLastUse(upstream, builder);
+    // pass.setInsertionPointAfterLastUse(upstream);
 
     // the gradient is the reduction (sum) of the upstream gradient
     // along the dimensions that were broadcasted
@@ -845,7 +844,7 @@ namespace triton {
       // if this is the dim that was expanded (during fwd)
       if (inputShape[i] == 1 && resultShape[i] > 1) {
 
-        setInsertionPointAfterLastUse(upstream, builder);
+        pass.setInsertionPointAfterLastUse(upstream);
 
         // Sum along this dimension
         auto reduceOp = pass.createGradOp<triton::ReduceOp>(
@@ -924,7 +923,7 @@ namespace triton {
     // Reduce along all necessary dimensions
     // Only then propagate the final reduced gradient to the input
 
-    // setInsertionPointAfterLastUse(initialUpstream, builder);
+    // pass.setInsertionPointAfterLastUse(initialUpstream);
     maybeAccumulateGrad(input, upstream, pass.gradMap, builder);
   }
 
@@ -933,7 +932,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(log2Op, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = log2Op.getOperand();
     Value xCloned = pass.origToCloned.lookup(x);
@@ -956,7 +955,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(exp2Op, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     Value x = exp2Op.getOperand();
     Value resultCloned = pass.origToCloned.lookup(exp2Op);
@@ -996,7 +995,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(expandDimsOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
 
     // The backward operation for expand_dims is to remove the singleton dimension
@@ -1021,7 +1020,7 @@ namespace triton {
     // Get the upstream gradient
     Value upstream = getUpstreamGrad(transOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     // Get the input tensor and permutation order
     Value input = transOp.getSrc();
@@ -1071,7 +1070,7 @@ namespace triton {
 
     Value upstream = getUpstreamGrad(splatOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
-    setInsertionPointAfterLastUse(upstream, builder);
+    pass.setInsertionPointAfterLastUse(upstream);
 
     // For splat operations, gradient of scalar = sum of all elements in upstream gradient
     // We need to reduce all dimensions to get a scalar

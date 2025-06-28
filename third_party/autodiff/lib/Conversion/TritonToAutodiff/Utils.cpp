@@ -730,14 +730,6 @@ namespace triton {
     return lastOpWithAttr;
   }
 
-  // set insertion point after the **LAST USE** (in the bwd graph being re-written) of gradient value they depend on
-  // IOW: the last SSA value from the bwd (differentiated so far) that used the gradient value
-  void setInsertionPointAfterLastUse(Value val, OpBuilder &builder){
-    Operation* lastUseInBwd = findLastNodeWithAttribute(val, "isInserted");
-    builder.setInsertionPointAfter(lastUseInBwd);
-  }
-
-
   // Helper function to create either a SplatOp or ExpandDimsOp+BroadcastOp based on input type
   Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder) {
     // Check if input is a tensor or scalar

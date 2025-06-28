@@ -5,6 +5,7 @@
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Block.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace triton {
@@ -70,7 +71,7 @@ namespace triton {
 
   Operation* substituteBasePtr(Operation *targetOp, OpBuilder &builder, llvm::DenseMap<Value, Value> ptrToAddedPtrMap);
 
-  void setInsertionPointAfterLastUse(Value val, OpBuilder &builder);
+  Operation* findLastNodeWithAttribute(Value val, StringRef attrName);
 
   Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder);
 

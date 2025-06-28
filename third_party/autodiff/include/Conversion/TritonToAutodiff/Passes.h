@@ -85,6 +85,11 @@ struct ConvertTritonToAutodiff
 
   void rewriteIntoBackward(Block &block);
 
+  // made it a class member bc for forOp, need to access
+  // pass.lastFwdOp -- more convenient when it's a member
+  // than passing lastFwdOp to every call
+  void setInsertionPointAfterLastUse(Value val);
+
 private:
   void enableNameLocSSA();
 };
