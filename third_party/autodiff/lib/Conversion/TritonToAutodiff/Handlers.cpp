@@ -168,7 +168,7 @@ namespace triton {
     Value upstream = getUpstreamGrad(addfOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
 
-    // don't insert unnecessary multiply of upstream with 1 (since numerically result is the same as wt multiplying)
+    // don't insert unnecessary multiply of upstream with 1
     // float local_grad = 1.;
 
     Value lhs = addfOp.getOperand(0);

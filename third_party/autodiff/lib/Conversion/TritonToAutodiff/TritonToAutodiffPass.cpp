@@ -94,6 +94,8 @@ namespace triton {
                                       /*Overview=*/"");  // overview text is optional
   }
 
+  // todo-med: put the definition back to utils, and here add class memebrs that simply call (maybeAccumulateGrad, getUpstreamGrad, setInsertionPointAfterLastUse) and pass current pass state as the args -- this avoids having the defintions take space here
+
   // set insertion point after the **LAST USE** (in the bwd graph being re-written) of gradient value they depend on
   // IOW: the last SSA value from the bwd (differentiated so far) that used the gradient value
   void ConvertTritonToAutodiff::setInsertionPointAfterLastUse(Value upstream){
