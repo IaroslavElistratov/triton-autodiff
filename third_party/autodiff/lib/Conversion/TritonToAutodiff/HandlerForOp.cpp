@@ -344,12 +344,55 @@ namespace triton {
     //    [original iter args ... ] -> [ADDED upstream args ...] -> [todo: ADDED grads wrt outside values]
     // Need to preserve this order for args of the yield op (bc these mapped exactly in the same order to the iter args of the next iteration)
 
-    // // gradsArgs will be some of the added yield operands
-    // SmallVector<Value> gradsArgs;
-    // for (BlockArgument arg : origBodyArgs){
-    //   Value gradArg = localGradMap[arg];
-    //   gradsArgs.push_back(gradArg);
-    // }
+
+    // [REF-6-EXC]
+    // Replace the placeholder upstream iter-arg yields with real gradients
+    //
+    // when i created the extended loop above i forwarded the
+    // upstream iter-args unchanged. That is fine for additive accumulators "accum += curr"
+    // (where local grad = 1, so upstream grads wrt the final loop output accum **same as**
+    // upstream grad wrt accum **in every iteration**).
+    // But wrong for cases such as "accum *= curr" where the grad depends on the values
+    // computed in the *current* iteration (local grad for "accum" is "curr")
+    // -- therefore differs from iteration to iteration.
+    // After differentiating the loop body (rewriteIntoBackward) now have the true gradients of
+    // each original yield operand available in "localGradMap". Replace the
+    // previously forwarded values in the "scf.yield" with those gradients so
+    // that the next backward iteration receives the correct upstream value.
+
+
+    {
+      OpBuilder::InsertionGuard guard(builder);
+
+      Operation *currentYield = forOp.getBody()->getTerminator();
+      unsigned numOrigYield   = origYieldOperands.size();
+
+      // does not include induction value;
+      // 1:1 with loop-carry args, and with loop outputs
+      ArrayRef<BlockArgument> bodyArgs = forOp.getRegionIterArgs();
+
+
+      // gradResultIdx was computed before adding the extra grad-carrying iter-args,
+      // but those new iter-args were appended to the end of the list, so the indices
+      // of all original loop-carried values stayed the same; therefore the same
+      // gradResultIdx can safely index forOp.getRegionIterArgs().
+      for (auto [j, idx] : llvm::enumerate(gradResultIdx)) {
+        // must propagate the gradient wrt the iteration argument (value before the update), not wrt the value just yielded.
+        Value loopArg   = bodyArgs[idx];   // e.g. %accum_in
+        Value gradVal   = localGradMap.lookup(loopArg);
+        if (!gradVal){
+          // todo-now: unexpected why at idx 1 is doesn't have grads though!
+          // llvm::report_fatal_error("[handleForBackward] gradient for loop-carried value not found in localGradMap");
+          llvm::errs() << "loop body BlockArg " << loopArg << " does not have grad (after running rewriteIntoBackward) \n";
+          // llvm::errs() << "its consumers: " << loopArg.Resul
+          continue;
+        }
+
+        // Update the corresponding operand in scf.yield
+        currentYield->setOperand(numOrigYield + j, gradVal);
+      }
+    }
+
 
     // @@@@@@@@@@@@@@@@@@@@ 5. populate outer-graph's gradMap @@@@@@@@@@@@@@@@@@@@
 
