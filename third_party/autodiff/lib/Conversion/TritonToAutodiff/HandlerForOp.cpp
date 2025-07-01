@@ -23,6 +23,7 @@
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Signals.h" // report_fatal_error
+#include "mlir/Dialect/Arith/IR/Arith.h"
 
 #include "mlir/IR/PatternMatch.h" // IRRewriter for replaceWithAdditionalYields
 
@@ -30,15 +31,102 @@ namespace mlir {
 namespace triton {
 
 
+// build a new scf.for that iterates in reverse order. The body region is moved
+// into the new loop and the old loop is erased. Returns the new loop
+//
+// fwd: for iv = lb; iv < ub; iv += step
+// bwd: for iv = ub‑step; iv >= lb; iv += (‑step)
+static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
+                            DenseMap<Value, Value> *gradMap = nullptr) {
+  auto loc = forOp.getLoc();
+
+  Value lb   = forOp.getLowerBound();   // lower bound  (inclusive)
+  Value ub   = forOp.getUpperBound();   // upper bound  (exclusive)
+  Value step = forOp.getStep();
+
+
+  // helper: ensure a value is of IndexType (required by scf.for
+  //  and by arith.subi when we later do "ub - step", "lb - step").
+  auto asIndex = [&](Value v) -> Value {
+    if (v.getType().isIndex())
+      return v;
+    // constant  (e.g. arith.constant 4 : i32)  ->  arith.constant 4 : index
+    if (auto cInt = v.getDefiningOp<arith::ConstantIntOp>())
+      return builder.create<arith::ConstantIndexOp>(loc, cInt.value());
+    // dynamic i32 / i64  ->  index  (runtime cast)
+    return builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), v);
+  };
+  lb   = asIndex(lb);
+  ub   = asIndex(ub);
+  step = asIndex(step);
+
+  // compute -step (negStep) -- works for both constant and dynamic step
+  Value negStep;
+  if (auto cst = step.getDefiningOp<arith::ConstantIndexOp>()) {
+    // step is a known compile‑time constant
+    // just flip the sign, emit the constant "‑cst"
+    negStep = builder.create<arith::ConstantIndexOp>(loc, -cst.value());
+  } else {
+    // general case: tep is a runtime value
+    // compute "0 − step" at run time
+    Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+    negStep = builder.create<arith::SubIOp>(loc, zero, step);
+  }
+
+  // reversed bounds:
+  //   start = ub - step     (upper bound executed)
+  //   end   = lb - step     (lower bound included)
+  // IOW: ith the loop header for (iv = start; iv > end; iv += negStep)
+  // the last value executed is iv == lb, mirroring the first fwd iter
+  Value start = builder.create<arith::SubIOp>(loc, ub, step);
+  Value end   = builder.create<arith::SubIOp>(loc, lb, step);
+
+  builder.setInsertionPoint(forOp);
+  auto revFor = builder.create<scf::ForOp>(loc, start, end, negStep, forOp.getInitArgs());
+
+  // move the body region (all operations) into the new loop
+  revFor.getRegion().takeBody(forOp.getRegion());
+
+  // replace uses of loop results with the new loop results.
+  for (auto [idx, res] : llvm::enumerate(forOp.getResults()))
+    res.replaceAllUsesWith(revFor.getResult(idx));
+
+
+  // map gradients from old results to the corresponding new results [REF-6]
+  if (gradMap) {
+
+    for (auto [oldRes, newRes] : llvm::zip(forOp.getResults(), revFor.getResults())) {
+      auto it = gradMap->find(oldRes);
+      if (it == gradMap->end())
+        continue;
+      // transfer the entry and remove the stale key
+      Value gradVal = it->second;
+      (*gradMap)[newRes] = it->second;
+      // gradMap->erase(it);
+    }
+
+  }
+
+  forOp.erase();
+  return revFor;
+}
+
   void handleForBackward(scf::ForOp forOp, ConvertTritonToAutodiff& pass) {
+    llvm::errs() << "handleForBackward\n";
 
     // pass.builder is an optional<OpBuilder> -- dereference the optional before using
     OpBuilder& builder = *pass.builder;
 
-    // rm
+
+    // @@@@@@@@@@@@@@@@@@@@ 0. reverse iteration order by swapping loop bounds/step @@@@@@@@@@@@@@@@@@@@
+
+    forOp = reverseLoop(forOp, builder, &pass.gradMap);
+
+
+    /// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
     builder.setInsertionPoint(forOp);
 
-    llvm::errs() << "handleForBackward\n";
     Block *loopBody = &forOp.getRegion().front();
     // Operation *yieldOp = &entryBlock->back();
     Operation *yieldOp = forOp.getBody()->getTerminator();
@@ -66,7 +154,6 @@ namespace triton {
     // Value upperBound = forOp.getUpperBound();
     // Value step = forOp.getStep();
     // .getInductionVar();
-
 
     // @@@@@@@@@@@@@@@@@@@@ 1. add additional args for the upstream grad @@@@@@@@@@@@@@@@@@@@
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 1 ============\n\n\n";
