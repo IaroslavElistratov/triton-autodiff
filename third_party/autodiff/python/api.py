@@ -330,7 +330,7 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, a
     # before it has been folded
 
     # sort because usr can pass idxs in arbitrary order
-    idxs_buffers = reversed(sorted(idxs_buffers))
+    idxs_buffers = list(reversed(sorted(idxs_buffers)))
 
     shifted_idxs_buffers = []
     for idx in idxs_buffers:
@@ -359,8 +359,25 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, a
     #  with that signature yet -- so my wrapping didnt' take place -- so
     #  calling the bellow will fail
 
-    # if VERBOSE: print("[wrap_bwd_kernel] fwd_args:", kernel_inputs)
-    if VERBOSE: print("[wrap_bwd_kernel] bwd_args:", bwd_args)
+
+
+    # bug: fwd produces output, then backward kernel again tries to re-create the fwd ouput but mistakenly uses the fwd output as initial buffer (instead it should have used zeros as the initial buffer)
+    # IOW: the backward kernel is “re‑playing” the forward loop starting from the value that the forward loop already produced, so every element of the accumulator is multiplied by curr one extra time per iteration. 
+    #
+    # The purpose of the first loop in the backward kernel is solely to
+    # push the pointer offset from [0 1 2 3] to [8 9 10 11] so that the
+    # reverse sweep can iterate in the opposite direction.
+    # Touching the value accumulator again is redundant and breaks the
+    # invariant that “backward starts from the exact forward output”.
+    #
+    # todo-now: you cannot start it with ones or zeros -- you need to use exactly the fwd accumulator
+    kernel_inputs[2] = torch.ones_like(kernel_inputs[2])
+
+    # for fwd_buff_idx in shifted_idxs_buffers:
+    #     kernel_inputs[fwd_buff_idx] = torch.zeros_like(kernel_inputs[fwd_buff_idx])
+
+    print("[wrap_bwd_kernel] fwd_args:", kernel_inputs)
+    print("[wrap_bwd_kernel] bwd_args:", bwd_args)
 
     bwd_kernel[grid](*kernel_inputs, *bwd_args)
     # bwd_kernel.run(grid=grid, warmup=False, *kernel_inputs, *bwd_args)

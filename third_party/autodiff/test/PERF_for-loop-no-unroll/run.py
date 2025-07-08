@@ -130,6 +130,7 @@ def kernel_v4(
 
     accum = tl.load(output_ptr + offsets) # (4, )
 
+    # answer-now: the loop varaible is not used
     for i in range(2):
       a = tl.load(a_ptr + offsets) # (4, )
       b = tl.load(b_ptr + offsets) # (4, )
@@ -149,13 +150,13 @@ def stub(a, b, buff):
     kernel_v4[(1, )](a, b, buff, BLOCK_SIZE=4)
     return buff
 
-def torch_fn(torch_a, torch_b, buff):
+def torch_fn(torch_a, torch_b, torch_buff):
     # inplace mutation -- autograd err
-    # buff *= torch_a[:4] * torch_b[:4]
-    # buff *= torch_a[4:] * torch_b[4:]
-    buff = buff * (torch_a[:4] * torch_b[:4])
-    buff = buff * (torch_a[4:] * torch_b[4:])
-    return buff
+    # torch_buff *= torch_a[:4] * torch_b[:4]
+    # torch_buff *= torch_a[4:] * torch_b[4:]
+    torch_buff = torch_buff * (torch_a[:4] * torch_b[:4])
+    torch_buff = torch_buff * (torch_a[4:] * torch_b[4:])
+    return torch_buff
 
 
 
@@ -174,20 +175,24 @@ a = torch.randn(size, device=DEVICE, requires_grad=True)
 b = torch.randn(size, device=DEVICE, requires_grad=True)
 # obviously can't start with zeros when accum is "*=", bc all local grads will be zeros;
 # to keep the numerics the same, passing similarly initialized buff to both my and torch_fn
-buff = torch.randn((4, ), device=DEVICE)
+# todo-now:
+# buff = torch.randn((4, ), device=DEVICE)
+buff = torch.ones((4, ), device=DEVICE)
+
 upstream = torch.randn_like(buff)
 
 torch_a = a.clone().detach().requires_grad_(True)
 torch_b = b.clone().detach().requires_grad_(True)
 torch_buff = buff.clone().detach() # .requires_grad_(True)
+torch_upstream = upstream.clone().detach()
 
-output_torch = torch_fn(a, b, buff)
-output_triton = stub(torch_a, torch_b, torch_buff)
+output_triton = stub(a, b, buff)
+output_torch = torch_fn(torch_a, torch_b, torch_buff)
 
-print("output_torch:", output_torch)
 print("output_triton:", output_triton)
+print("output_torch:", output_torch)
 
-if torch.allclose(output_torch, output_triton, atol=1e-2, rtol=0):
+if torch.allclose(output_triton, output_torch, atol=1e-2, rtol=0):
     print("✅ [output] Triton and Torch match")
 else:
     print("❌ [output] Triton and Torch differ")
@@ -195,7 +200,7 @@ else:
 #### test backward ####
 
 output_triton.backward(upstream)
-output_torch.backward(upstream)
+output_torch.backward(torch_upstream)
 
 if torch.allclose(a.grad, torch_a.grad, atol=1e-2, rtol=0):
     print("✅ [a's grad] Triton and Torch match")

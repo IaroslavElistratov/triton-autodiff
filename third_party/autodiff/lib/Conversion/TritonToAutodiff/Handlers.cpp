@@ -97,6 +97,11 @@ namespace triton {
   void handleLoadBackward(triton::LoadOp loadOp, mlir::Block &block, ConvertTritonToAutodiff& pass){
     if (DEBUG_PRINTS) llvm::errs() << "visiting tt.load op\n";
 
+    // todo-now:
+    // skip differentiation when the loaded value is dead-code (never used)
+    if (loadOp.getResult().use_empty())
+      return;
+
     Value upstream = getUpstreamGrad(loadOp, pass.gradMap);
     OpBuilder& builder = *pass.builder;
 

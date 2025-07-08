@@ -30,99 +30,327 @@
 namespace mlir {
 namespace triton {
 
-
-// build a new scf.for that iterates in reverse order. The body region is moved
-// into the new loop and the old loop is erased. Returns the new loop
-//
-// fwd: for iv = lb; iv < ub; iv += step
-// bwd: for iv = ub‑step; iv >= lb; iv += (‑step)
-static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
-                            DenseMap<Value, Value> *gradMap = nullptr) {
-  auto loc = forOp.getLoc();
-
-  Value lb   = forOp.getLowerBound();   // lower bound  (inclusive)
-  Value ub   = forOp.getUpperBound();   // upper bound  (exclusive)
-  Value step = forOp.getStep();
+// todo-high: for this pattern "elementwise" -- overwrite the HandleAllOps -> handleLoad -- to
+// use regular tt.store and not atomics -- bc for the elementwise pattern atomics aren't needed
 
 
-  // helper: ensure a value is of IndexType (required by scf.for
-  //  and by arith.subi when we later do "ub - step", "lb - step").
-  auto asIndex = [&](Value v) -> Value {
-    if (v.getType().isIndex())
-      return v;
-    // constant  (e.g. arith.constant 4 : i32)  ->  arith.constant 4 : index
-    if (auto cInt = v.getDefiningOp<arith::ConstantIntOp>())
-      return builder.create<arith::ConstantIndexOp>(loc, cInt.value());
-    // dynamic i32 / i64  ->  index  (runtime cast)
-    return builder.create<arith::IndexCastOp>(loc, builder.getIndexType(), v);
+// [REF-7] reverseLoopCounter related
+
+/// create an `arith.constant` whose type matches `ty` (either `index` or iN)
+static mlir::Value buildConst(mlir::OpBuilder &b, mlir::Location loc, mlir::Type ty, int64_t v) {
+  if (ty.isIndex())
+    return b.create<mlir::arith::ConstantIndexOp>(loc, v);
+  return b.create<mlir::arith::ConstantOp>(loc, ty, b.getIntegerAttr(ty, v));        // e.g. i32/i64
+}
+
+static mlir::scf::ForOp
+reverseLoopCounter(mlir::scf::ForOp forOp, mlir::IRMapping *origToCloned, DenseMap<Value, Value> *gradMap = nullptr) {
+  using namespace mlir;
+
+  // ─────────────────── 1.  Extract literal bounds & step ──────────────────
+  auto getConstInt = [](Value v, int64_t &out) -> bool {
+    if (auto cIdx = v.getDefiningOp<arith::ConstantIndexOp>()) {
+      out = cIdx.value();
+      return true;
+    }
+    if (auto cOp = v.getDefiningOp<arith::ConstantOp>()) {
+      if (auto intAttr = llvm::dyn_cast<IntegerAttr>(cOp.getValue())) {
+        out = intAttr.getValue().getSExtValue();
+        return true;
+      }
+    }
+    return false;
   };
-  lb   = asIndex(lb);
-  ub   = asIndex(ub);
-  step = asIndex(step);
 
-  // compute -step (negStep) -- works for both constant and dynamic step
-  Value negStep;
-  if (auto cst = step.getDefiningOp<arith::ConstantIndexOp>()) {
-    // step is a known compile‑time constant
-    // just flip the sign, emit the constant "‑cst"
-    negStep = builder.create<arith::ConstantIndexOp>(loc, -cst.value());
-  } else {
-    // general case: tep is a runtime value
-    // compute "0 − step" at run time
-    Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
-    negStep = builder.create<arith::SubIOp>(loc, zero, step);
+  int64_t lb, ub, step;
+  if (!getConstInt(forOp.getLowerBound(), lb)   ||
+      !getConstInt(forOp.getUpperBound(), ub)   ||
+      !getConstInt(forOp.getStep(),       step) || step <= 0)
+    llvm::report_fatal_error("cannot reverse for-loop: dynamic or negative");
+
+  const int64_t tripCnt = llvm::divideCeil(ub - lb, step);
+  if (tripCnt <= 0)
+    llvm::report_fatal_error("cannot reverse for-loop: empty loop");
+
+  // ─────────────────── 2.  IR builder setup ───────────────────────────────
+  OpBuilder b(forOp);
+  b.setInsertionPoint(forOp);                // insert before old loop
+  Location loc    = forOp.getLoc();
+  Type      ivTy  = forOp.getInductionVar().getType();
+
+  // Re‑usable typed constants
+  Value c0    = buildConst(b, loc, ivTy, 0);
+  Value c1    = buildConst(b, loc, ivTy, 1);
+  Value cTrip = buildConst(b, loc, ivTy, tripCnt);
+  Value cStep = buildConst(b, loc, ivTy, step);
+  Value cUb   = buildConst(b, loc, ivTy, ub);
+
+
+  // because my origToCloned maps Values and not Ops, but need to find the fwdOp itself
+  //    - take Value ouput of the current (original ForOP)
+  //    - map to the cloned Value
+  //    - access producer of that cloned Value -- that is the cloned FwdForOp (which corresponds to the current forOp)
+  Value fwdForOut = origToCloned->lookupOrNull(forOp.getResult(0));
+  if (!fwdForOut)
+    llvm::report_fatal_error("didn't find the fwd ForOp");
+  scf::ForOp fwdForOp = llvm::dyn_cast<scf::ForOp>(fwdForOut.getDefiningOp());
+
+
+  // build the new forward trip‑counter loop
+  auto newFor = b.create<scf::ForOp>(
+      // answer-now: initial values of the backward loop are the final values of the fwd loop
+      // loc, c0, cTrip, c1, forOp.getInitArgs(),
+      loc, c0, cTrip, c1, fwdForOp.getResults(),
+      [&](OpBuilder &bodyBuilder, Location loc, Value t, ValueRange iterArgs) {
+        // realIv = ub − step * (t + 1)
+        Value tPlus1 = bodyBuilder.create<arith::AddIOp>(loc, t, c1);
+        Value scaled = bodyBuilder.create<arith::MulIOp>(loc, cStep, tPlus1);
+        Value realIv = bodyBuilder.create<arith::SubIOp>(loc, cUb, scaled);
+
+        // clone original ops, remapping IV & loop‑carried values
+        IRMapping map;
+        map.map(forOp.getInductionVar(), realIv);
+        map.map(forOp.getRegionIterArgs(), iterArgs);
+
+        for (Operation &op : forOp.getBody()->without_terminator())
+          bodyBuilder.clone(op, map);
+
+        auto oldYield = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+        SmallVector<Value> yieldVals;
+        for (Value v : oldYield.getOperands())
+          yieldVals.push_back(map.lookupOrDefault(v));
+
+        bodyBuilder.create<scf::YieldOp>(loc, yieldVals);
+      });
+
+  // otherwise gets deleted later
+  markVisited(b, visitedType::Inserted, newFor);
+
+  if (gradMap) {
+    for (auto [oldR, newR] : llvm::zip(forOp.getResults(), newFor.getResults()))
+      if (auto it = gradMap->find(oldR); it != gradMap->end())
+        (*gradMap)[newR] = it->second;
   }
 
-  // reversed bounds:
-  //   start = ub - step     (upper bound executed)
-  //   end   = lb - step     (lower bound included)
-  // IOW: ith the loop header for (iv = start; iv > end; iv += negStep)
-  // the last value executed is iv == lb, mirroring the first fwd iter
-  Value start = builder.create<arith::SubIOp>(loc, ub, step);
-  Value end   = builder.create<arith::SubIOp>(loc, lb, step);
-
-  builder.setInsertionPoint(forOp);
-  auto revFor = builder.create<scf::ForOp>(loc, start, end, negStep, forOp.getInitArgs());
-
-  // move the body region (all operations) into the new loop
-  revFor.getRegion().takeBody(forOp.getRegion());
-
-  // replace uses of loop results with the new loop results.
-  for (auto [idx, res] : llvm::enumerate(forOp.getResults()))
-    res.replaceAllUsesWith(revFor.getResult(idx));
+  // replace & erase original loop
+  forOp.replaceAllUsesWith(newFor.getResults());
+  forOp.erase();
+  return newFor;
+}
 
 
-  // map gradients from old results to the corresponding new results [REF-6]
-  if (gradMap) {
 
-    for (auto [oldRes, newRes] : llvm::zip(forOp.getResults(), revFor.getResults())) {
-      auto it = gradMap->find(oldRes);
-      if (it == gradMap->end())
+//  essentially this function computes "accum" -- IOW accumulator at the current iteration BEFORE it was updated like so "accum_new = accum [op] curr"
+//    in the original loop-body, "accum_new = accum [op] curr" was computed and the returned from the current iteration of the loop (to the next)
+//    but here I return accum (before the update in the current iter) to the next iteration -- which as the effect of gradually undoing the updates as the loop progresses
+//  also notcie after this fn executes, original "accum_new" is still present in the loop-body, it just has no op that use its result (I can delete it, but for now i just keep it hoping the cacnonicaltion will prune it -- my cleanup pass will not delete them bc they have isCloned attibute)
+//  interpret inverse as fwd op: also note, when I add the "accum" in this fn -- I mark it as Inserted so that later when "RewriteIntoBackward -> handleAllOps" it doesn't try to differentiate the op that constructs the accum (the inverse op i insert here) itself
+//    remember you already done the cloning earlier in the handlerForOp so that there's already exists backward part of forOpBody -- and bc it was cloned before reverseAccumulatorUpdates ran -- that copied bwd part of the forOp body uses accum_new (bc that bwd part of the graph was simply created a clone fwd part of the graph -- and the fwd part of the graph used accum_new, so bwd part uses accum_new as well)
+//    and I want that bwd part of the body to use the result of my inverted op (accum) instead of the accum_new (which it is after cloning). So substitute all uses of "accum_new" with reconstructed "accum"
+//    this allows 2 things:
+//      1) replaces the yeild operand (accum_new -> accum) so now the loop yeilds the reversed "accum" to the next iter -- which corresponds to unwining the accumulator as the loop progresses
+//      2) the bwd part of the loopBody now uses "accum" -- which allows to natively run the handleAllOps and the local derivatives will be correct bc to differentiate the "accum_new = accum * curr" wrt to "curr" -- need the accum which the mul op now uses (after the below replace all uses with)
+Operation* reverseAccumulatorUpdates(scf::ForOp forOp, OpBuilder &builder, IRMapping &origToCloned) {
+
+  Operation *yieldTerm = forOp.getBody()->getTerminator();
+  Location loc = yieldTerm->getLoc();
+
+  auto regionArgs = forOp.getRegionIterArgs();
+
+  // rewriteIntoBwd inserts ops after fwd part of the graph but BEFORE that reconstructed
+  // accum -- this creates invalid IR (because the ops that it inserts actually use values of the
+  // reconstructed accum). Instead rewriteIntoBwd should insert ops AFTER the reconstructed accums,
+  // track the *last* inverse operation we insert so that later during backward-sweep, handlers
+  // can anchor the nodes they insert nodes after it
+  Operation *lastInverseOp = nullptr;
+
+
+  // I guess there's not only accum for the value but also another accumulator for the idxs (in fwd idxs are shifted
+  // in each iter of the loop) -- so need to invert it as well. To generically determine which one of the yield operands is such accum
+  // so the heuristic basically: 1) if it's a yeild operand; 2) which uses blockArgs as one of its operands -- that's the accum
+  //
+  // detecting the fwd-update pattern
+  // look for a binary op that
+  //  1) has one operand coming from the old accumulator (iterArgs[0]), and
+  //  2) feeds the scf.yield that returns the new accumulator
+  for (auto [idx, bbArg] : llvm::enumerate(regionArgs)) {
+    Value yielded       = yieldTerm->getOperand(idx);
+    Operation *updateOp = yielded.getDefiningOp();
+
+    // passthrough, not an updateOp (e.g. directly a BlockAarg)
+    if (!updateOp)
         continue;
-      // transfer the entry and remove the stale key
-      Value gradVal = it->second;
-      (*gradMap)[newRes] = it->second;
-      // gradMap->erase(it);
+
+    // is bbArg one of the operands of updateOp?
+    bool usesIterArg = false;
+    unsigned blockArgIdx = 0;
+    // recognise only binary updates for now
+    if (updateOp->getNumOperands() == 2) {
+      if (updateOp->getOperand(0) == bbArg) {
+        usesIterArg = true; blockArgIdx = 0;
+      } else if (updateOp->getOperand(1) == bbArg) {
+        usesIterArg = true; blockArgIdx = 1;
+      }
     }
 
+    // not an accumulator
+    if (!usesIterArg)
+      continue;
+
+    unsigned otherPos = (blockArgIdx == 0) ? 1 : 0;
+    Value other = updateOp->getOperand(otherPos);
+    Value accum = updateOp->getOperand(blockArgIdx);
+    Value stateAfter = yielded;
+    // accum -- accumulator **after** this fwd lap
+    // accPrev -- accumulate **before** this fwd lap (IOW inversed)
+
+    // bc the loop now iterates from last to first, the value that enters the body (%range_18)
+    // is the post‑update accumulator of the next forward iteration
+
+
+    // [REF-8] move the reversed ptr-idx accum right to the begining of the for-loop body (before both fwd-part and the bwd-part),
+    //  but keep reversed value accum below (IOW after) the fwd part (isCloned) of the loop body
+    //
+    // decide where to insert the inverse operation. If *all* operands it
+    // needs are already available at the start of the block (i.e. defined
+    // outside the body or are block arguments) emit the inverse at
+    // the very top of the block so the forward-clone will immediately see
+    // the reconstructed value. Otherwise place it right after the original updateOp
+    bool operandsDominateHeader = true;
+    Block *bodyBlock = forOp.getBody();
+    auto dominatesHeader = [&](Value v) {
+      if (auto *defOp = v.getDefiningOp())
+        return defOp->getBlock() != bodyBlock;   // defined outside
+      return true;                               // block argument
+    };
+    for (Value opVal : updateOp->getOperands()) {
+      if (!dominatesHeader(opVal)) { operandsDominateHeader = false; break; }
+    }
+
+    OpBuilder::InsertionGuard ipg(builder);
+    if (operandsDominateHeader)
+      builder.setInsertionPointToStart(bodyBlock);
+    else
+      builder.setInsertionPointAfter(updateOp);
+
+
+    // [done] if using [inverse-op](stateAfter, other) below
+    //    [ORIG]
+    //    %offsets_25 = arith.addi %range_19, %cst_6
+    //    [REVERSED]
+    //    %range_27 = arith.subi %offsets_25, %cst_6
+    //  ==> wrong, it instead should be "subi(range_19, cst_6)"
+    // After the fix -- using [inverse-op](accum, other)
+    //    [ORIG]
+    //     %offsets_25 = arith.addi %range_19, %cst_6
+    //    [REVERSED]
+    //     %range_27 = arith.subi %range_19, %cst_6
+
+    // compute the value that the *previous* iteration saw
+    Type resTy = accum.getType();
+    Operation *inverseOp = nullptr;
+    if (auto mulf = dyn_cast<arith::MulFOp>(updateOp)) {
+      inverseOp = builder.create<arith::DivFOp>(loc, resTy, accum, other).getOperation();
+    } else if (auto addf = dyn_cast<arith::AddFOp>(updateOp)) {
+      inverseOp = builder.create<arith::SubFOp>(loc, resTy, accum, other).getOperation();
+    } else if (auto addi = dyn_cast<arith::AddIOp>(updateOp)) {
+      inverseOp = builder.create<arith::SubIOp>(loc, resTy, accum, other).getOperation();
+    } else if (auto muli = dyn_cast<arith::MulIOp>(updateOp)) {
+      inverseOp = builder.create<arith::DivSIOp>(loc, resTy, accum, other).getOperation();
+    } else {
+      continue; // unsupported accumulator kind yet
+    }
+
+    Value accPrev = inverseOp->getResult(0); // reconstructed pre-update
+
+    // record the last inverse so callers can anchor their backward sweep.
+    if (!lastInverseOp || lastInverseOp->isBeforeInBlock(inverseOp))
+      lastInverseOp = inverseOp;
+
+    // [REF-9] now ops to be differentiated use the reconstructed buffer (not the original
+    // buffer) -- therefore when these "ops to be differentiated" will be matched with the
+    // handlers, the differentiation rules will automatically use their operands as local
+    // derivatives (these operands are reconstructed buffer) -- so backprop will correctly
+    // use reconstructed buffer as local grad
+    accum.replaceUsesWithIf(accPrev, [inverseOp](OpOperand &use) {
+      Operation *user = use.getOwner();
+      // rewrite only uses that are in the same block and appear *after* the inverse operation
+      return user->getBlock() == inverseOp->getBlock() &&
+             inverseOp->isBeforeInBlock(user) &&
+             user != inverseOp; // skip the inverse's own operands
+    });
+
+    // todo:
+    // updateOp->erase();
+
+    // [REF-10]
+    origToCloned.map(accPrev, accPrev);
+
+    // probably should select them from the fwd part of the graph (Iscloned) -- so that the parent
+    // nodes that this computation depends on don't get changed during fwd
+    markVisited(builder, visitedType::Inserted, inverseOp);
+
+    // crucial -- passes the reversed accum down to the next iter, which will:
+    //  1) use it as its block args, and 
+    //  2) inturn decrement the accum, and
+    //  3) pass that again decremented accum to the iter after that, so on...
+    //
+    // now ops in the loop body which correspond to the fwd graph -- will use thse
+    // reversed block-args (at the next iter) in the same way as they used original
+    // block-args -- e.g. load data based on these offsets (so now it loads data
+    // based on these reversed offsets -- great!)
+    // 
+    // %range_16:3 = scf.for %range_17 = %range_11 to %range_13 step %range_12 iter_args(%range_18 = %range#0, %range_19 = %range#1, %bwd_accum_20 = %bwd_accum) : i32 {
+    //
+    //   %offsets_24 = tt.addptr %offsets_23, %range_19
+    //   %b_temp1 = tt.load %offsets_24
+    //   ...
+    //   //inserted ops that reverse the accum
+    //   %range_26 = arith.divf %range_18, %b
+    //   %range_27 = arith.subi %range_19, %cst_6
+    //   ....
+    //   scf.yield %range_26, %range_27, %bwd_accum_20
+    //
+    // pass stateBefore to the next iter
+    yieldTerm->setOperand(idx, accPrev);
+
+
   }
 
-  forOp.erase();
-  return revFor;
+  if (DEBUG_PRINTS) {
+    llvm::errs() << "[reverseAccumulatorUpdates] reversed accum update:\n";
+    forOp.print(llvm::errs());
+  }
+
+  return lastInverseOp;
+
 }
 
   void handleForBackward(scf::ForOp forOp, ConvertTritonToAutodiff& pass) {
     llvm::errs() << "handleForBackward\n";
 
-    // pass.builder is an optional<OpBuilder> -- dereference the optional before using
+    // dereference the optional before using
     OpBuilder& builder = *pass.builder;
 
 
     // @@@@@@@@@@@@@@@@@@@@ 0. reverse iteration order by swapping loop bounds/step @@@@@@@@@@@@@@@@@@@@
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 0 -- reverseLoop bounds ============\n\n\n";
 
-    forOp = reverseLoop(forOp, builder, &pass.gradMap);
+    // note reverseLoopCounter is meaningless by itself -- only makes sense as part of
+    //  - swap initial/terminal values of an external buffer.
+    //  - invert the body's arithmetic (+= -> ‑=, *= -> /=)
+    //
+    // for the IR i'm testing on, reverseLoopCounter has no effect bc the loop-body in my ir doesn't even use the loop counter for anything
+    //  so all the semantics about "what does it mean to reverse a loop" is not controlled at all by swapping the order of induction variable
+    //  (my PERF_for-loop-no-unroll test does not use loop counter at all) -- instead, it's controlled by the
+    //  1) initial state of the accum which is set-up before the loop starts executing (Start from the final value %buf_final, not from the original zero), and 
+    //  2) inverting the update to the accumulator (Undo the body update so that each step walks the accumulator backwards)
 
-
+    // todo: bc later I run cloning which inserts cloned nodes right to the beginning of the forOp
+    //  body -- this causes the cloned nodes to be inserted above even the recreated idxs below
+    forOp = reverseLoopCounter(forOp, &pass.origToCloned, &pass.gradMap);
+    llvm::errs() << "[reverseLoop] reversed loop bounds:\n";
+    forOp.print(llvm::errs());
     /// @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
     builder.setInsertionPoint(forOp);
@@ -139,8 +367,7 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     // incudes the 3 args for loop bounds + loop-carry args
     SmallVector<Value> origForOpOperands(forOp.getOperands()); // forOp.getRegionIterArgs();
 
-
-    // todo-now: consider reversing the iteration order of the backward loop
+    // reverse the iteration order of the backward loop:
     // computing forward values is problematic when the loop passes
     // intermediates between iterations. For autodiff correctness the
     // backward pass must walk the unrolled forward loop from the last
@@ -156,11 +383,13 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     // .getInductionVar();
 
     // @@@@@@@@@@@@@@@@@@@@ 1. add additional args for the upstream grad @@@@@@@@@@@@@@@@@@@@
-    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 1 ============\n\n\n";
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 1 -- add iter-args for upstream ============\n\n\n";
 
     // getInitArgs() - Returns the initial values for iteration arguments (values OUTSIDE the loop)
     // getRegionIterArgs() - Returns the BlockArguments for iteration arguments inside the loop body
     // unsigned origNumIterArgs = forOp.getNumRegionIterArgs();
+
+    //  add upstream grads (from outside the loop) as loop-carry initializers
 
     // the number of upstream grads wrt loop outputs is the same as the number of outputs (one upstream for each ouput)
     SmallVector<Value> upstreamOutsideValues; // Grad values for results that have gradients
@@ -213,7 +442,12 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     auto maybeNewLoop = forOp.replaceWithAdditionalYields(
         rewriter,                            // rewriter
         upstreamOutsideValues,               // new init operands
-        /*replaceInitOperandUsesInLoop*/ false,
+        // otherwise every iteration of the loop re-reads the initial values of the loop-iter-values in each iteration
+        // MLIR doesn't go through the loop body and swap every use of the init operand for the corresponding block argument that is carried from the previous iteration
+        //  Init operand – the SSA value that lives outside the loop and seeds the first iteration.
+        //  Block argument – the per-iteration version that is produced by the last scf.yield and visible only inside the loop body of the next lap.
+        // When the flag is false, any operation in the body that was originally wired to the init operand continues to read that same outside value every time the body executes. The block argument still exists and is threaded through the header/yield machinery, but nothing in the body looks at it unless I rewired those uses myself
+        /*replaceInitOperandUsesInLoop*/ true,
         // lambda that tells the helper what the loop must yield for each of the new iter-operands
         [&](OpBuilder &b, Location loc, ValueRange newIterArgs) {
           // forward the iter-args themselves to the next iteration
@@ -300,13 +534,17 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
       if (key && val)
         llvm::errs() << "[upstreamInsideValues] key: " << printName(key) << "  ->  value: " << printName(val) << '\n';
     }
+
+    llvm::errs() << "[handleForBackward] added iter-args for upstream:\n";
+    forOp.print(llvm::errs());
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
 
 
+    // todo-med: it sets insertion point ABOVE the loop-counter computations added in step 0
 
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2. clone form yield: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2. clone from yield @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 2 - clone from yeild ============\n\n\n";
 
@@ -335,7 +573,7 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     // Clone inner graph
     //  previously (in outer rewriteIntoBackward) I cloned all the ops including this forOp that we matched
     //  to (to be more precise what I cloned semantically bc fwd part, and was iterating over the backward
-    //  (ie. original) part) but previously I did not clone the body of that for loop -- here bc the for-loop
+    //  (ie. original) part) but previously I did not clone the body of that loop -- here bc the for-loop
     //  I matched to -- represents backward op -- its body needs to contain both fwd and bwd so cloning the body
     //  of that loop here
 
@@ -382,9 +620,37 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
 
 
 
+    // ################ 3  Recreate acc_before for every accumulator slot ################
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 3 - reversing accum updates ============\n\n\n";
 
 
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 3. Diff the inner graph: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    // when inverting the accumulate -- I need to change (in the outside graph) what inputs get passed to
+    // the inverted-loop -- specifically by default i think it pass the initial (zero) state of the
+    // buffer -- but here I instead need to pass the last state of the buffer
+    //
+    // for reversing accum, note the after cloning in handleForBackward -- the for-op body graph looks like
+    // so. I do the cloning to recompute fwd intermideats in bwd (and avoid storing them from fwd) -- so
+    // after cloning there semantically 2 parts to this body: fwd-part-cloned and fwd-part, then from handleForBackward
+    // I re-write fwd-part into bwd-part -- and that bwd computations uses the fwd intermideats from fwd-part-cloned (see log)
+    //
+    // [RM]
+    // So when reverse the accum I guess only want to modify the fwd-part-cloned? but currently it seems modifying
+    // the fwd-part (which will be re-written into backward) when rewriteIntoBackward is called. I think want to use origToCloned
+    // to map the yeild operands to the cloned values and then reverse the accum in these cloned part of the subgraph (but not in
+    // the part of the subgraph which will be re-writen into bwd)
+
+    Operation *lastInverseOp = reverseAccumulatorUpdates(forOp, builder, localOrigToCloned);
+    if (lastFwdOp->isBeforeInBlock(lastInverseOp)){
+      lastFwdOp = lastInverseOp;
+    }
+
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+
+
+
+
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 4. Diff the inner graph: @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
     // remember in the outer graph you've duplicated nodes (isClone'ed) nodes represent the forward part of the outer graph,
     //  and you the way you got to the current handler HandleForBackward is by iterating over the original (not cloned) nodes in the outher graph
@@ -394,7 +660,7 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     //  So, all the op-handlers, when they need some intermediate value (to compute derivative) they use origToCloned to get a particular value in the forward part of the outer graph (bc the forward part will not be re-written: so it's safe to use intermediates from there)
     //  ==> But bc you now iterating over
 
-    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 3 -- recursively calling handleForBackward ============\n\n\n";
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 4 -- recursively calling handleForBackward ============\n\n\n";
 
     // Merge localGradMap into the pass-wide grad map for use inside handleAllOps.
     auto globalGradMap = pass.gradMap;
@@ -407,22 +673,25 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     // 1) clone 2) handleStore 3) handleLoad 4) delete unused
     //  ==> yes, seems need all of these, so call rewriteIntoBackward (not just handleAllOps) from here recursively
     pass.rewriteIntoBackward(*loopBody);
-
-    llvm::errs() << "[handleForBackward] done handleAllOps:\n";
-    loopBody->print(llvm::errs());
+    llvm::errs() << "[handleForBackward] rewriteIntoBackward done\n";
 
 
-    // Restore original grad map entries after processing the body.
+    // NOTE: needed bc "pass.gradMap = localGradMap;"" create a separate independent copy which does not update localGradMap
+    // thus in step 5 it failed bc localGradMap was never updated and thus didn't containt grads wrt original buffer (blockArg)
+    localGradMap = pass.gradMap;    // pull back the new entries
+    // restore original grad map entries after processing the body
     pass.gradMap = globalGradMap;
     pass.origToCloned = globalOrigToCloned;
+
+    loopBody->print(llvm::errs());
 
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
 
 
 
-    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 4) for each Block arg, connect grad wrt that arg to the ouput @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-    // map outputs of differenciated for-loop as grads of arguments to the for loop
+    // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ 5) for each Block arg, connect grad wrt that arg to the ouput @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    // map outputs of differentiated for-loop as grads of arguments to the for loop
 
     // grad wrt each of the for-loop inputs have been populated into the localGradMap, as a result of running HandleAllOps above
     // because I think my diff system computes grad wrt to original arguments, here I'm using them (org BlockAgs) to extract the grads from the grad map
@@ -445,7 +714,7 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
     // After differentiating the loop body (rewriteIntoBackward) now have the true gradients of
     // each original yield operand available in "localGradMap". Replace the
     // previously forwarded values in the "scf.yield" with those gradients so
-    // that the next backward iteration receives the correct upstream value.
+    // that the next backward iteration receives the correct upstream value
 
 
     {
@@ -462,31 +731,52 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
       // gradResultIdx was computed before adding the extra grad-carrying iter-args,
       // but those new iter-args were appended to the end of the list, so the indices
       // of all original loop-carried values stayed the same; therefore the same
-      // gradResultIdx can safely index forOp.getRegionIterArgs().
+      // gradResultIdx can safely index forOp.getRegionIterArgs()
       for (auto [j, idx] : llvm::enumerate(gradResultIdx)) {
-        // must propagate the gradient wrt the iteration argument (value before the update), not wrt the value just yielded.
-        Value loopArg   = bodyArgs[idx];   // e.g. %accum_in
-        Value gradVal   = localGradMap.lookup(loopArg);
+
+        // after  reverseAccumUpdate the block arg (accum_new) is not used as an operand to the ops being differentiated (bc you
+        // replace all uses of "accum_new" with the reconsturcted "accum") -- so here when I try to lookup grad wrt block arg
+        // (accum_new) I can't find it -- the correct thing is to use grad wrt accum;
+        //
+        // what happens after I “rewire” the accumulator reverseAccumulatorUpdates
+        // creates accPrev (value before this forward lap)
+        // rewrites every later use of accIn (%range_9) to accPrev (%range_19)
+        // So no operation that the autodiff sweep visits afterwards
+        // ever uses the original block argument, so localGradMap.lookup(loopArg) errs out
+        //
+        // Value loopArg   = bodyArgs[idx];   // e.g. %accum_in
+        //
+        // I think it lives under grad range_24 (which is bwd_out_23 here) that's why using yeild-arg
+        Value yeildArg  = currentYield->getOperand(idx);      // acc_prev
+        Value gradVal   = localGradMap.lookup(yeildArg);
+
+        // // must propagate the gradient wrt the iteration argument (value before the update), not wrt the value just yielded
+        // llvm::errs() << "checking grad wrt blockArg at idx: " << idx << "\n";
+
         if (!gradVal){
-          // todo-now: unexpected why at idx 1 is doesn't have grads though!
-          // llvm::report_fatal_error("[handleForBackward] gradient for loop-carried value not found in localGradMap");
-          llvm::errs() << "loop body BlockArg " << loopArg << " does not have grad (after running rewriteIntoBackward) \n";
-          // llvm::errs() << "its consumers: " << loopArg.Resul
-          continue;
+          // llvm::errs() << "loop body BlockArg " << loopArg << " does not have grad (after running rewriteIntoBackward) \n";
+          llvm::errs() << "loop body yeildArg " << yeildArg << " does not have grad (after running rewriteIntoBackward) \n";
+          llvm::report_fatal_error("[handleForBackward] gradient for loop-carried value not found in localGradMap");
         }
 
-        // Update the corresponding operand in scf.yield
+        // update the corresponding operand in scf.yield
         currentYield->setOperand(numOrigYield + j, gradVal);
+
+        // todo: use maybeAccumulate?
       }
     }
 
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 5 -- for each Block arg, connect grad wrt that arg to the ouput ============\n\n\n";
+    loopBody->print(llvm::errs());
 
-    // @@@@@@@@@@@@@@@@@@@@ 5. populate outer-graph's gradMap @@@@@@@@@@@@@@@@@@@@
 
-    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 5 ============\n\n\n";
+
+    // @@@@@@@@@@@@@@@@@@@@ 6. populate outer-graph's gradMap @@@@@@@@@@@@@@@@@@@@
+
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] step 6 -- populate outer-graph's gradMap ============\n\n\n";
 
     /*
-    [see exclidraw "REF-1"]
+    [exclidraw "REF-1"]
     - the reverse loop carries a gradient accumulator in each extra iter-arg
     - each iter updates that accumulator locally and yields it
     - after the final iter, the accumulator holds the gradient wrt the original loop input, which the scf.for result contains
@@ -500,16 +790,13 @@ static scf::ForOp reverseLoop(scf::ForOp forOp, OpBuilder &builder,
       pass.gradMap[initArgs[idx]] = forOp.getResult(origNumIter + j);
     }
 
-    // todo-now: add upstream grads from outside the loop as loop-carry initializers?
-
     // @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ [handleForBackward] HANDLER FINISHED ============\n\n\n";
 
-    // todo-now: use maybeAccumulate?
   }
 
-  // comment: temporarily removed for simplicity, for now don't handle grads wrt value accessed from the outside-graph
+  // comment: temporarily removed for simplicity, for now don't handle grads wrt value accessed from the outside
 
     // // populate grads wrt values accessed from outside
     // unsigned offsetGradsOutsideValues = origYieldOperands.size() + gradsArgs.size();
