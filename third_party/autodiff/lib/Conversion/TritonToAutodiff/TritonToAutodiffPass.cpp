@@ -48,29 +48,23 @@ namespace triton {
     auto funcOps = mod.getOps<triton::FuncOp>();
     if (funcOps.empty() || std::next(funcOps.begin()) != funcOps.end()) {
       llvm::report_fatal_error("expect exactly one Triton function in the module");
-      return;
     }
     triton::FuncOp func = *funcOps.begin();
 
-
-    // ----------------
     // init pass state
-    // ----------------
-    // moved member variables init to outside of rewriteIntoBackward;
+    // (moved member variables init to outside of rewriteIntoBackward);
     lastFwdOp = nullptr;
     builder.emplace(func.getContext());
     gradMap.clear();     // init as empty
     origToCloned.clear(); // init as empty
 
-    // -------------------------------------------
+    func->print(llvm::errs());
+
     // add gradient pointer arguments to the func
-    // --------------------------------------------
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
     ptrToAddedPtrMap = addPointerArgsToFunction(func);
 
-    // ---------------------------------------
     // rewrite the block (possibly recursive)
-    // ---------------------------------------
     // no need for walk, since all my current use cases involve only a single ForOp
     rewriteIntoBackward(func.getBody().front());
   }
