@@ -18,23 +18,53 @@
 #include <string>
 
 
-//  Attribute layout:
-//    - function arg / result : tt.axis_names                (per‑arg / per‑res)
-//    - single‑result op      : tt.axis_names
-//    - multi‑result  op      : tt.axis_names_<idx>
+// ────────────────────────────────────────────────────────────────────────────
+// AxisPropagation.cpp  -  propagate logical‑axis names through Triton/TT IR
+//
+// * Each tensor‑valued SSA value may carry `tt.axis_names = ["N","D",...]`
+//   describing the logical meaning of its *rank* dimensions.
+// * Every *index‑producer* (PID x/y/z, loop IV, etc.) must carry
+//   `tt.axis = "<logical‑name>"`; PIDs are not special – the loop IV that
+//   walks SEQ_LEN needs the same tag so `"SEQ_LEN"` survives inside the `scf.for` body.
+// * `tt.addptr` now **filters** its incoming `axis_names` list by the set
+//   of live tags seen on its dynamic operands (every numeric offset input of the tt.addptr,
+//   apart from the first base pointer) -> different offsets keep different names
+//      * Every dynamic *offset operand* (PID, loop‑IV math, etc.) carry
+//        `tt.axis = "NAME"` - these are the *live* logical axes for *this* ptr
+//      * Start from the incoming axis list on the base pointer, e.g. ["SEQ_LEN","HEAD","HEAD_DIM"]
+//      * Keep only names present in the live set (pointer that uses
+//        `pid.x` only keeps "SEQ_LEN", pointer that also adds `pid.z` keeps both)
+//      * Result: two pointers from the same base but with different offsets now
+//        carry *different* `axis_names`
+// * For every op compute the output axis list from the inputs based on per-op rules.
+// * Keep a scratch  AxisMap<Value, ArrayAttr>  (`tmp`) while walking
+//   forward once; when exit write every entry back into the IR.
+//
+// Attribute layout (agreed across Python & C++)
+//   function arg / result :  tt.axis_names              (ArrayAttr)
+//   single‑result   op     :  tt.axis_names
+//   multi‑result    op     :  tt.axis_names_<idx>       (one attr per result)
+//
+// Grid / loop config
+//   tt.grid_axes = ["SEQ_LEN","B","HEAD"]            tag PIDs, and
+//   tt.loop_axis = "SEQ_LEN"                         tag the (single) software loop IV
+//
+// ────────────────────────────────────────────────────────────────────────────
 
 namespace mlir::triton {
 namespace {
 
-using AxisMap = llvm::DenseMap<Value, ArrayAttr>;
+using AxisMap = llvm::DenseMap<Value, ArrayAttr>;          // scratch cache
 
 static constexpr StringLiteral kAxisNames = "tt.axis_names";
-static constexpr StringLiteral kAxisTag   = "tt.axis";
+static constexpr StringLiteral kAxisTag   = "tt.axis";     // on index ops
 static constexpr StringLiteral kGridAttr  = "tt.grid_axes";
 
 // ──────────────────────────────────────────────────────────────────────
 //  Helpers   StringVec <-> ArrayAttr
 // ──────────────────────────────────────────────────────────────────────
+
+// build an ArrayAttr from a list of StringRefs
 static ArrayAttr makeAttr(MLIRContext *ctx, ArrayRef<StringRef> v) {
   SmallVector<Attribute> out;
   out.reserve(v.size());
@@ -42,6 +72,7 @@ static ArrayAttr makeAttr(MLIRContext *ctx, ArrayRef<StringRef> v) {
   return ArrayAttr::get(ctx, out);
 }
 
+// convert an ArrayAttr back to a vector of StringRefs
 static SmallVector<StringRef> asVec(ArrayAttr a) {
   SmallVector<StringRef> v;
   if (a)
@@ -49,28 +80,32 @@ static SmallVector<StringRef> asVec(ArrayAttr a) {
   return v;
 }
 
-// ──────────────────────────────────────────────────────────────────────
-//  Attribute I/O  (works for Func args / results and arbitrary Values)
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+//  Attribute I/O  -  uniformly handle function args/results and op results
+// ──────────────────────────────────────────────────────────────────────────
+
+// Key for multi‑result ops is  "tt.axis_names_<idx>"
 static StringAttr perResultKey(MLIRContext *ctx, unsigned idx, bool multi) {
   return !multi ? StringAttr::get(ctx, kAxisNames)
                 : StringAttr::get(ctx, ("tt.axis_names_" + std::to_string(idx)));
 }
 
+// read attribute attached to a Value (arg, result, or temp)
 static ArrayAttr readAttr(Value v) {
   MLIRContext *ctx = v.getContext();
 
-  // function boundary
+  // function argument
   if (auto arg = dyn_cast<BlockArgument>(v))
     if (auto fn = dyn_cast<FunctionOpInterface>(arg.getParentBlock()->getParentOp()))
       return fn.getArgAttrOfType<ArrayAttr>(arg.getArgNumber(), kAxisNames);
 
+  // function result
   if (auto res = dyn_cast<OpResult>(v))
     if (auto fn = dyn_cast<FunctionOpInterface>(res.getOwner()))
       if (auto dict = fn.getResultAttrDict(res.getResultNumber()))
         return dyn_cast_or_null<ArrayAttr>(dict.get(kAxisNames));
 
-  // regular op
+  // regular op result
   if (auto res = dyn_cast<OpResult>(v)) {
     bool multi = res.getOwner()->getNumResults() > 1;
     return res.getOwner()->getAttrOfType<ArrayAttr>(
@@ -79,32 +114,34 @@ static ArrayAttr readAttr(Value v) {
   return {};
 }
 
+// write attribute back to the Value
 static void writeAttr(Value v, ArrayAttr a) {
   if (!a) return;
   MLIRContext *ctx = a.getContext();
   auto key         = StringAttr::get(ctx, kAxisNames);
 
-  // function boundary
+  // function arg
   if (auto arg = dyn_cast<BlockArgument>(v))
     if (auto fn = dyn_cast<FunctionOpInterface>(arg.getParentBlock()->getParentOp())) {
       fn.setArgAttr(arg.getArgNumber(), key, a);
       return;
     }
 
+  // function result
   if (auto res = dyn_cast<OpResult>(v))
     if (auto fn = dyn_cast<FunctionOpInterface>(res.getOwner())) {
       fn.setResultAttr(res.getResultNumber(), key, a);
       return;
     }
 
-  // regular op
+  // regular op result
   if (auto res = dyn_cast<OpResult>(v)) {
     bool multi = res.getOwner()->getNumResults() > 1;
     res.getOwner()->setAttr(perResultKey(ctx, res.getResultNumber(), multi), a);
   }
 }
 
-// Temporary map helpers
+// helpers operating on AxisMap
 static ArrayAttr get(Value v, AxisMap &m) {
   if (auto it = m.find(v); it != m.end()) return it->second;
   return readAttr(v);
@@ -112,10 +149,11 @@ static ArrayAttr get(Value v, AxisMap &m) {
 static void set(Value v, ArrayAttr a, AxisMap &m) { if (a) m[v] = a; }
 
 
-// ---------------------------------------------------------------------
-// helper to build x/y/z -> logical‑name map for one function
-// ---------------------------------------------------------------------
-using GridMap = llvm::StringMap<StringRef>;
+// ──────────────────────────────────────────────────────────────────────────
+//  *Grid map* - translate pid.x/y/z -> logical axis names
+// ──────────────────────────────────────────────────────────────────────────
+
+using GridMap = llvm::StringMap<StringRef>;   // "x"->"SEQ_LEN", etc.
 
 static GridMap buildGridMap(Operation *funcOp) {
   GridMap map;
@@ -130,28 +168,34 @@ static GridMap buildGridMap(Operation *funcOp) {
   return map;
 }
 
-// ──────────────────────────────────────────────────────────────────────
-//  Dynamic‑axis utilities
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+//  Dynamic‑axis utilities  (live‑axis discovery, filtering)
+// ──────────────────────────────────────────────────────────────────────────
+
+// collect axis names that appear on any dynamic operand
 static llvm::SmallDenseSet<StringRef>
 collectLiveAxes(mlir::ValueRange dynOps, AxisMap &m) {
   llvm::SmallDenseSet<StringRef> live;
   for (Value v : dynOps){
-    // dynamic operands that are Op results – have a definingOp(),
+    // op result: read tag from producing op
+    // dynamic operands that are Op results - have a definingOp(),
     // so can inspect the op itself for tt.axis = "SEQ_LEN"
     if (auto *def = v.getDefiningOp())
       if (auto s = def->getAttrOfType<StringAttr>(kAxisTag))
         live.insert(s.getValue());
+
+    // region argument: tag stored only in AxisMap
     // dynamic operands that are region arguments (e.g. the loop IV %iv)
-    // – do not have a defining op. The only place where we recorded
+    // - do not have a defining op. The only place where we recorded
     // the tag ("SEQ_LEN") is the temporary map m that the pass uses
     // to track axis information per Value
-    if (auto a = get(v, m))              // pick up tags on region args
+    if (auto a = get(v, m))
       for (StringRef n : asVec(a)) live.insert(n);
   }
   return live;
 }
 
+// keep only names that are still "live" in this address expression.
 static ArrayAttr
 filterByLiveAxes(ArrayAttr in, const llvm::SmallDenseSet<StringRef> &live,
                  MLIRContext *ctx) {
@@ -162,13 +206,13 @@ filterByLiveAxes(ArrayAttr in, const llvm::SmallDenseSet<StringRef> &live,
   return makeAttr(ctx, out);
 }
 
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
 //  Per‑op transfer rules
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
 
-// 1. Generic element‑wise
+// 1. Element‑wise ops - copy axis_names verbatim from first operand
 static const llvm::StringSet<> kElt = {
-    // Triton
+    // triton
     "tt.add", "tt.sub", "tt.mul", "tt.div", "tt.max", "tt.min",
     // arith
     "arith.addf", "arith.subf", "arith.mulf", "arith.divf",
@@ -186,7 +230,7 @@ static bool handleElt(Operation *op, AxisMap &m) {
   return true;
 }
 
-// 2. Dot  (...m k)@(k n...) -> (...m n...)
+// 2. tt.dot - drop the contracting K dim:  (...m k) x (k n...) -> (...m n...)
 static bool handleDot(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.dot") return false;
 
@@ -198,13 +242,13 @@ static bool handleDot(Operation *op, AxisMap &m) {
   if (L.empty() || R.empty()) return false;
 
   SmallVector<StringRef> out;
-  out.append(L.begin(), L.end() - 1);     // drop K from lhs
-  out.append(R.begin() + 1, R.end());     // drop K from rhs
+  out.append(L.begin(), L.end() - 1);     // drop trailing K of lhs
+  out.append(R.begin() + 1, R.end());     // drop leading  K of rhs
   set(op->getResult(0), makeAttr(op->getContext(), out), m);
   return true;
 }
 
-// 3. Transpose + legacy alias
+// 3. Transpose (and legacy alias tt.trans) - permute axis names
 static bool handleTranspose(Operation *op, AxisMap &m) {
   StringRef name = op->getName().getStringRef();
   if (name != "tt.transpose" && name != "tt.trans") return false;
@@ -223,7 +267,7 @@ static bool handleTranspose(Operation *op, AxisMap &m) {
   return true;
 }
 
-// 4. Reduce
+// 4. Reduce - erase every axis listed in `axes`
 static bool handleReduce(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.reduce") return false;
   auto a = get(op->getOperand(0), m);
@@ -244,7 +288,7 @@ static bool handleReduce(Operation *op, AxisMap &m) {
   return true;
 }
 
-// 5. Broadcast
+// 5. Broadcast - pad on the left with fresh placeholders
 static bool handleBcast(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.broadcast") return false;
   auto a  = get(op->getOperand(0), m);
@@ -261,7 +305,7 @@ static bool handleBcast(Operation *op, AxisMap &m) {
   return true;
 }
 
-// 6. Reshape / expand / collapse
+// 6. Reshape / expand / collapse - layout‑preserving, so copy
 static bool handleReshape(Operation *op, AxisMap &m) {
   static const llvm::StringSet<> kR = {"tensor.expand_shape",
                                        "tensor.collapse_shape",
@@ -272,12 +316,16 @@ static bool handleReshape(Operation *op, AxisMap &m) {
   return true;
 }
 
-// 7. scf.for loop
+// 7. scf.for - propagate iter‑args *and* tag the induction variable
 static bool handleLoop(Operation *op, AxisMap &m) {
 
   if (auto forOp = dyn_cast<scf::ForOp>(op)) {
-    for (auto [arg, init] : llvm::zip(forOp.getRegionIterArgs(), forOp.getInitArgs()))
+    // (a) loop‑carried tensors: copy axis_names init -> iter‑arg
+    for (auto [arg, init] : llvm::zip(forOp.getRegionIterArgs(),
+                                      forOp.getInitArgs()))
       set(arg, get(init, m), m);
+
+    // (b) give the induction var the function‑level tt.loop_axis, if any
 
     // bc set(iv, …) writes directly into the AxisMap, every arithmetic
     // value derived from the IV now shows the "SEQ_LEN" tag to
@@ -286,12 +334,14 @@ static bool handleLoop(Operation *op, AxisMap &m) {
     // attach tt.axis to the induction var if user supplied
     if (auto func = op->getParentOfType<FunctionOpInterface>()) {
       if (auto s = func->getAttrOfType<StringAttr>("tt.loop_axis")) {
-        auto iv = forOp.getInductionVar();                       // region arg
-        set(iv, makeAttr(op->getContext(), {s.getValue()}), m);  // tag IV
+        auto iv = forOp.getInductionVar();                     // region arg
+        set(iv, makeAttr(op->getContext(), {s.getValue()}), m);// tag IV
       }
     }
-    return true;               // walk into body
+    return true;   // body will be walked automatically
   }
+
+  // scf.yield: copy iter‑arg axis_names back to loop result
   if (auto y = dyn_cast<scf::YieldOp>(op))
     if (auto parent = dyn_cast<scf::ForOp>(y->getParentOp())) {
       for (auto [res, val] : llvm::zip(parent.getResults(), y.getOperands()))
@@ -301,31 +351,26 @@ static bool handleLoop(Operation *op, AxisMap &m) {
   return false;
 }
 
-// 8. Extra one‑liners
+// helpers
 static bool cloneAxes(Value src, Value dst, AxisMap &m) {
   if (auto a = get(src, m)) { set(dst, a, m); return true; }
   return false;
 }
 
-// ---------------------------------------------------------------------
-// tag every tt.get_program_id we meet
-// ---------------------------------------------------------------------
+// tag every tt.get_program_id  - attach  tt.axis = "<logical name>"
 static bool handleProgramId(Operation *op, const GridMap &grid) {
   if (op->getName().getStringRef() != "tt.get_program_id") return false;
 
   StringRef dim;
-  // Triton prints `x`, `y`, `z` token; in the IR it's stored under "axis".
   if (auto a = op->getAttrOfType<StringAttr>("axis")) dim = a.getValue();
   if (dim.empty()) return false;
   if (auto it = grid.find(dim); it != grid.end()) {
     op->setAttr(kAxisTag, StringAttr::get(op->getContext(), it->second));
   }
-  return false;                   // keep walking other handlers
+  return false;   // continue dispatch
 }
 
-// ---------------------------------------------------------------------
-// handleAddPtr with **dynamic‑axis filter**, fallback when no tag is present
-// ---------------------------------------------------------------------
+//  tt.addptr  - keep only axes that remain "live" after applying offsets
 static bool handleAddPtr(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.addptr") return false;
 
@@ -333,7 +378,7 @@ static bool handleAddPtr(Operation *op, AxisMap &m) {
   if (!inAxes) return false;
 
   auto live = collectLiveAxes(op->getOperands().drop_front(), m);
-  if (live.empty()) {                         // fallback: keep everything
+  if (live.empty()) {                         // no info -> keep all
     set(op->getResult(0), inAxes, m);
     return true;
   }
@@ -342,9 +387,7 @@ static bool handleAddPtr(Operation *op, AxisMap &m) {
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// tt.load  – keep the trailing  R = rank(result)  names
-// ---------------------------------------------------------------------------
+//  tt.load  - result rank  R  -> keep last R names, pad left if needed
 static bool handleLoad(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.load") return false;
 
@@ -354,8 +397,8 @@ static bool handleLoad(Operation *op, AxisMap &m) {
 
   auto v = asVec(in);
   unsigned R = rt.getRank();
-  if (v.size() > R) v.erase(v.begin(), v.end() - R);              // drop left
-  else if (v.size() < R) {                                        // pad left
+  if (v.size() > R) v.erase(v.begin(), v.end() - R);              // truncate
+  else if (v.size() < R) {                                       // pad left
     unsigned extra = R - v.size();
     static unsigned nextTmp = 0;
     for (unsigned i = 0; i < extra; ++i)
@@ -366,34 +409,29 @@ static bool handleLoad(Operation *op, AxisMap &m) {
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// tt.splat – leave unchanged (optional pad rule can be added later)
-// ---------------------------------------------------------------------------
-// static bool handleSplat(Operation *, AxisMap &) { return false; }
-
-// tt.splat  (scalar or pointer -> rank‑R tensor)
+//  tt.splat - copy trailing names, pad on left until ranks match
 static bool handleSplat(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.splat") return false;
 
-  auto a  = get(op->getOperand(0), m);      // take axes from the scalar / ptr
+  auto a  = get(op->getOperand(0), m);      // copy from scalar/ptr
   auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
   if (!a || !rt) return false;
 
-  auto v  = asVec(a);                       // existing names
-  while (v.size() < rt.getRank())           // pad on the *left*
+  auto v  = asVec(a);
+  while (v.size() < rt.getRank())           // pad on the left
     v.insert(v.begin(), "__b" + std::to_string(v.size()));
 
   set(op->getResult(0), makeAttr(op->getContext(), v), m);
   return true;
 }
 
-// arith.select  (predicate, lhs, rhs)
+//  arith.select - take axes from the true‑value operand
 static bool handleSelect(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "arith.select") return false;
   return cloneAxes(op->getOperand(1), op->getResult(0), m);
 }
 
-// tt.expand_dims  (insert length‑1 dim)
+//  tt.expand_dims - insert length‑1 dimension with fresh placeholder name
 static bool handleExpandDims(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.expand_dims") return false;
   auto a = get(op->getOperand(0), m);
@@ -406,7 +444,7 @@ static bool handleExpandDims(Operation *op, AxisMap &m) {
   return true;
 }
 
-// tt.make_range  (creates index tensor)
+//  tt.make_range - generate fresh placeholders  ["__bN", ...]
 static bool handleMakeRange(Operation *op, AxisMap &m) {
   if (op->getName().getStringRef() != "tt.make_range") return false;
   auto rt = dyn_cast<RankedTensorType>(op->getResult(0).getType());
@@ -420,9 +458,9 @@ static bool handleMakeRange(Operation *op, AxisMap &m) {
   return true;
 }
 
-// ──────────────────────────────────────────────────────────────────────
-//  Dispatcher   (keep order: specific -> generic)
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+//  Dispatcher - try specific handlers first, then generic element‑wise
+// ──────────────────────────────────────────────────────────────────────────
 static void propagate(Operation *op, AxisMap &m, const GridMap &grid) {
   if (handleProgramId(op, grid)) return;
   if (handleDot(op, m))       return;
@@ -442,23 +480,23 @@ static void propagate(Operation *op, AxisMap &m, const GridMap &grid) {
   handleElt(op, m);           // catch‑all element‑wise
 }
 
-// ──────────────────────────────────────────────────────────────────────
-//  Public API
-// ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+//  Public API - called once per kernel
+// ──────────────────────────────────────────────────────────────────────────
 ArrayAttr getAxisAttr(Value v) { return readAttr(v); }
 
 } // anonymous namespace
 
+// Walk a whole func.func once, filling in every missing tt.axis_names
 void propagateAxesInFuncOp(Block *entry) {
   if (!entry) return;
 
   Operation *top = entry->getParentOp();
-  AxisMap tmp;
+  AxisMap tmp;                              // value -> axis_names (scratch)
 
-  // build x/y/z -> logical name map once
-  GridMap grid = buildGridMap(top);
+  GridMap grid = buildGridMap(top);         // pid.x/y/z -> logical name
 
-  // seed with any labels on entry‑block args
+  // seed scratch map with labels already on entry arguments
   for (Value arg : entry->getArguments())
     if (auto a = readAttr(arg)) tmp[arg] = a;
 
@@ -470,40 +508,3 @@ void propagateAxesInFuncOp(Block *entry) {
 }
 
 } // triton namespace
-
-
-
-// /// Return the axis attribute attached to value `v` (or {} if none).
-// /// Works for: block arguments, function results, results of regular operations
-// inline ArrayAttr getAxisAttr(Value v) {
-
-//   // function arguments
-//   if (auto arg = dyn_cast<BlockArgument>(v))
-//     if (auto fn = dyn_cast<FunctionOpInterface>(arg.getParentBlock()->getParentOp()))
-//       return fn.getArgAttrOfType<ArrayAttr>(arg.getArgNumber(), kAxis);
-
-//   // results (function or plain op)
-//   if (auto res = dyn_cast<OpResult>(v)) {
-//     auto key = StringAttr::get(v.getContext(), kAxis);
-//     return res.getOwner()->getResultAttrOfType<ArrayAttr>(res.getResultNumber(), key);
-//   }
-//   return {};
-// }
-
-// /// Attach `a` to value `v`.  If `a == nullptr` the call is a no‑op.
-// inline void setAxisAttr(Value v, ArrayAttr a) {
-//   if (!a) return;
-//   auto key = StringAttr::get(a.getContext(), kAxis);
-
-//   // function arguments
-//   if (auto arg = dyn_cast<BlockArgument>(v))
-//     if (auto fn = dyn_cast<FunctionOpInterface>(arg.getParentBlock()->getParentOp())) {
-//       fn.setArgAttr(arg.getArgNumber(), key, a);
-//       return;
-//     }
-
-//   // results (function or plain op)
-//   if (auto res = dyn_cast<OpResult>(v))
-//     res.getOwner()->setResultAttr(res.getResultNumber(), key, a);
-// }
-
