@@ -1,7 +1,6 @@
 // #include "mlir/Config/Version.h"  // adds MLIR_VERSION_MAJOR macro
 // static_assert(MLIR_VERSION_MAJOR >= 18, "Old MLIR headers detected");
 
-
 #include "autodiff/include/Conversion/TritonToAutodiff/AxisPropagation.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -17,10 +16,11 @@
 
 #include <string>
 
-
 // ────────────────────────────────────────────────────────────────────────────
 // AxisPropagation.cpp  -  propagate logical‑axis names through Triton/TT IR
 //
+// * Every input ptr carries tt.axis_names; shapes alone are not enough to tell
+//   “SEQ vs HEAD” once the two happen to be of equal extent (e.g. 4 × 4).
 // * Each tensor‑valued SSA value may carry `tt.axis_names = ["N","D",...]`
 //   describing the logical meaning of its *rank* dimensions.
 // * Every *index‑producer* (PID x/y/z, loop IV, etc.) must carry
@@ -59,12 +59,23 @@ using AxisMap = llvm::DenseMap<Value, ArrayAttr>;          // scratch cache
 static constexpr StringLiteral kAxisNames = "tt.axis_names";
 static constexpr StringLiteral kAxisTag   = "tt.axis";     // on index ops
 static constexpr StringLiteral kGridAttr  = "tt.grid_axes";
+static constexpr StringLiteral kAliasAttr = "tt.axis_aliases";
+
+
+// filled once per kernel in propagateAxesInFuncOp(), visible to helpers.
+static DictionaryAttr gAliasMap;
+
+static StringRef canonical(StringRef s) {
+  if (!gAliasMap) return s;
+  if (auto v = gAliasMap.get(s))
+    return mlir::cast<StringAttr>(v).getValue();   // alias -> canonical
+  return s;                                        // already canonical
+}
 
 // ──────────────────────────────────────────────────────────────────────
 //  Helpers   StringVec <-> ArrayAttr
 // ──────────────────────────────────────────────────────────────────────
 
-// build an ArrayAttr from a list of StringRefs
 static ArrayAttr makeAttr(MLIRContext *ctx, ArrayRef<StringRef> v) {
   SmallVector<Attribute> out;
   out.reserve(v.size());
@@ -72,7 +83,6 @@ static ArrayAttr makeAttr(MLIRContext *ctx, ArrayRef<StringRef> v) {
   return ArrayAttr::get(ctx, out);
 }
 
-// convert an ArrayAttr back to a vector of StringRefs
 static SmallVector<StringRef> asVec(ArrayAttr a) {
   SmallVector<StringRef> v;
   if (a)
@@ -176,13 +186,13 @@ static GridMap buildGridMap(Operation *funcOp) {
 static llvm::SmallDenseSet<StringRef>
 collectLiveAxes(mlir::ValueRange dynOps, AxisMap &m) {
   llvm::SmallDenseSet<StringRef> live;
-  for (Value v : dynOps){
+  for (Value v : dynOps) {
     // op result: read tag from producing op
     // dynamic operands that are Op results - have a definingOp(),
     // so can inspect the op itself for tt.axis = "SEQ_LEN"
     if (auto *def = v.getDefiningOp())
       if (auto s = def->getAttrOfType<StringAttr>(kAxisTag))
-        live.insert(s.getValue());
+        live.insert(canonical(s.getValue()));
 
     // region argument: tag stored only in AxisMap
     // dynamic operands that are region arguments (e.g. the loop IV %iv)
@@ -190,19 +200,19 @@ collectLiveAxes(mlir::ValueRange dynOps, AxisMap &m) {
     // the tag ("SEQ_LEN") is the temporary map m that the pass uses
     // to track axis information per Value
     if (auto a = get(v, m))
-      for (StringRef n : asVec(a)) live.insert(n);
+      for (StringRef n : asVec(a)) live.insert(canonical(n));
   }
   return live;
 }
 
-// keep only names that are still "live" in this address expression.
+// keep only names that are still "live" in this address expression
 static ArrayAttr
 filterByLiveAxes(ArrayAttr in, const llvm::SmallDenseSet<StringRef> &live,
                  MLIRContext *ctx) {
   if (!in) return {};
   SmallVector<StringRef> out;
   for (StringRef name : asVec(in))
-    if (live.contains(name)) out.push_back(name);
+    if (live.contains(canonical(name))) out.push_back(name);
   return makeAttr(ctx, out);
 }
 
@@ -480,6 +490,7 @@ static void propagate(Operation *op, AxisMap &m, const GridMap &grid) {
   handleElt(op, m);           // catch‑all element‑wise
 }
 
+
 // ──────────────────────────────────────────────────────────────────────────
 //  Public API - called once per kernel
 // ──────────────────────────────────────────────────────────────────────────
@@ -493,6 +504,9 @@ void propagateAxesInFuncOp(Block *entry) {
 
   Operation *top = entry->getParentOp();
   AxisMap tmp;                              // value -> axis_names (scratch)
+
+  // capture alias map for this kernel
+  gAliasMap = top->getAttrOfType<DictionaryAttr>(kAliasAttr);
 
   GridMap grid = buildGridMap(top);         // pid.x/y/z -> logical name
 

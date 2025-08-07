@@ -115,7 +115,7 @@ DEVICE = torch.device("cuda:0")
 
 
 @autodiff(
-    # pattern="elementwise-like",
+    # pattern="elementwise-like", # todo: expose the pattern
     idxs_buffers=(2, )
 )
 @triton.jit
@@ -160,16 +160,6 @@ def torch_fn(torch_a, torch_b, torch_buff):
 
 
 
-#################
-#    common     #
-#################
-
-# todo-now:
-# current autodiff logic still feeds the same upstream gradient
-# (the one for the final loop result) to every iteration, so the factors
-# that should appear in front of early elements are missing. That is why
-# the gradients coming out of my pass are different from torch's
-
 size = 8
 a = torch.randn(size, device=DEVICE, requires_grad=True)
 b = torch.randn(size, device=DEVICE, requires_grad=True)
@@ -178,6 +168,135 @@ b = torch.randn(size, device=DEVICE, requires_grad=True)
 # todo-now:
 # buff = torch.randn((4, ), device=DEVICE)
 buff = torch.ones((4, ), device=DEVICE)
+
+
+
+# #################
+# #    Type 5     #
+# #################
+
+# # comment:
+# # requires changing the tile/stream structure,
+# # generating 2 for-loops.
+
+# @autodiff(
+#     # pattern="affine-like",
+#     idxs_buffers=(2, ),
+#     axis_names=[["m","k"],["k","n"],["m", "n"]]
+# )
+# @triton.jit
+# def kernel(
+#         # Pointers to matrices
+#         a_ptr, b_ptr, c_ptr,
+#         # Matrix dimensions
+#         M,
+#         N,
+#         K,
+#         # Strides
+#         stride_am,
+#         stride_ak,
+#         stride_bk,
+#         stride_bn,
+#         stride_cm,
+#         stride_cn,
+#         # Meta-parameters
+#         BLOCK_SIZE_M: tl.constexpr,
+#         BLOCK_SIZE_N: tl.constexpr,
+#         BLOCK_SIZE_K: tl.constexpr,
+# ):
+#     """Kernel for computing the matmul C = A x B.
+#     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+#     """
+#     pid = tl.program_id(axis=0)
+#     grid_n = tl.cdiv(N, BLOCK_SIZE_N)
+#     pid_m = pid // grid_n
+#     pid_n = pid % grid_n
+
+#     # ----------------------------------------------------------
+#     # Create pointers for the first blocks of A and B.
+#     # We will advance this pointer as we move in the K direction
+#     # and accumulate
+#     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+#     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+#     offs_k = tl.arange(0, BLOCK_SIZE_K)
+#     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+#     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+#     # -----------------------------------------------------------
+#     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+#     # for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+#     # using static bounds for simplicity
+#     for k in range(0, 2):
+#         # Load the next block of A and B, generate a mask by checking the K dimension.
+#         # If it is out of bounds, set it to 0.
+#         a = tl.load(a_ptrs)
+#         b = tl.load(b_ptrs)
+#         # We accumulate along the K dimension.
+#         accumulator = tl.dot(a, b, accumulator)
+#         # Advance the ptrs to the next K block.
+#         a_ptrs += BLOCK_SIZE_K * stride_ak
+#         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+#     c = accumulator.to(tl.float16)
+
+#     # -----------------------------------------------------------
+#     # Write back the block of the output matrix C with masks.
+#     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+#     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+#     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+#     tl.store(c_ptrs, c)
+
+# def stub(
+#         a,
+#         b,
+#         BLOCK_SIZE_M=16,
+#         BLOCK_SIZE_N=16,
+#         BLOCK_SIZE_K=16
+#     ):
+
+#     # Check constraints.
+#     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+#     assert a.is_contiguous(), "Matrix A must be contiguous"
+#     M, K = a.shape
+#     K, N = b.shape
+#     # Allocates output.
+#     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+#     # 1D launch kernel where each block gets its own program.
+#     # todo: passing grid with meta args isn't supported yet
+#     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
+#     print("grid: ", grid)
+#     kernel[grid](
+#         a, b, c,
+#         M, N, K,
+#         a.stride(0), a.stride(1),
+#         b.stride(0), b.stride(1),
+#         c.stride(0), c.stride(1),
+
+#         BLOCK_SIZE_M,
+#         BLOCK_SIZE_N,
+#         BLOCK_SIZE_K,
+#     )
+#     return c
+
+
+# def torch_fn(a, b):
+#     return torch.matmul(a, b)
+
+
+
+# size = (32, 32)
+# a = torch.randn(size, device=DEVICE, requires_grad=True)
+# b = torch.randn(size, device=DEVICE, requires_grad=True)
+
+# upstream = torch.randn_like(a)
+
+# output_triton = stub(a, b)
+# output_torch = torch_fn(torch_a, torch_b)
+
+#################
+#    common     #
+#################
+
 
 upstream = torch.randn_like(buff)
 

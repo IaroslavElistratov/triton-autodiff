@@ -1,3 +1,6 @@
+#include "mlir/Interfaces/FunctionInterfaces.h"   // keep at top of file
+
+
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
@@ -352,6 +355,10 @@ namespace triton {
     ```
     */
 
+    // otherwise No grad found for %accum_temp1_6 -- which is especially useless given i replace all the original initila buffers for this subgraph with ouputs of the fwd for-Op
+    // answer-now: no the no grad err was not comming from the cloned -- but rather from the original graph which is beign re-written into bwd -- and because i replaiced inital arrguments for my 2nd loop wiht ouputs of the first loop 
+    //    - the ops which were originally creating the initial values for the original fwd graph (whih is now the bwd graph being re-write) these valeus are not used and therefoee grad wrt them is not populated in the grad map
+
     // todo-low: in general, can be any op that contains inner graph: not necessarily a scf.for
     if (auto forOp = dyn_cast<scf::ForOp>(targetOp)){
 
@@ -633,74 +640,81 @@ namespace triton {
 
   */
   // todo: simplify this
-  llvm::DenseMap<Value, Value> addPointerArgsToFunction(triton::FuncOp funcOp) {
+  llvm::DenseMap<Value, Value>
+  addPointerArgsToFunction(triton::FuncOp funcOp) {
 
-    // isExternal() checks if the function is just a declaration without
-    // a body. If a function is external, it has no implementation block
     if (funcOp.isExternal())
       llvm::report_fatal_error("FuncOp body is emtpy\n");
 
-    // Get existing function type
     auto fnType = funcOp.getFunctionType();
     SmallVector<Type> newInputTypes;
-    SmallVector<Type> additionalPtrTypes; // Track only the new pointer types
+    SmallVector<Type> additionalPtrTypes;
 
     std::map<unsigned, unsigned> ptrIdxToAddedPtrIdxMap;
     unsigned numOrigInputs = fnType.getInputs().size();
 
-    // For each argument, if it's a pointer, add a corresponding additional pointer
+    // 0. Snapshot *all* current per‑argument attribute dictionaries
+    SmallVector<DictionaryAttr> oldArgAttrs;
+    oldArgAttrs.reserve(numOrigInputs);
+    for (unsigned i = 0; i < numOrigInputs; ++i)
+      oldArgAttrs.push_back(funcOp.getArgAttrDict(i));
+
+    // 1. Collect all original inputs + remember which are pointers
     for (auto [i, inputType] : llvm::enumerate(fnType.getInputs())) {
       newInputTypes.push_back(inputType);
 
       if (auto ptrType = dyn_cast<triton::PointerType>(inputType)) {
-        additionalPtrTypes.push_back(ptrType); // Remember only the new ones
+        additionalPtrTypes.push_back(ptrType);
 
         if (DEBUG_PRINTS) llvm::errs() << "Adding ptr input: " << ptrType << "\n";
 
         auto numAdded = ptrIdxToAddedPtrIdxMap.size();
         ptrIdxToAddedPtrIdxMap[i] = numOrigInputs + numAdded;
       }
-
     }
 
-    // append newly added args to the end of ALL original args (including after original non ptr args), iow:
-    //  Original inputs: (ptr_1, ptr_2, **int_1**, ptr_3)
-    //  Modified: (ptr_1, ptr_2, **int_1**, ptr_3, ADDED_ptr_1, ADDED_ptr_2, ADDED_ptr_3)
+    // Original inputs (...) , new gradient‑ptrs (...)
     newInputTypes.append(additionalPtrTypes.begin(), additionalPtrTypes.end());
 
-    // Create and set the new function type
-    auto newFnType = FunctionType::get(funcOp.getContext(), newInputTypes,  fnType.getResults());
+    // 2.  Update function type – **clears arg‑attrs internally**
+    auto newFnType = FunctionType::get(funcOp.getContext(),
+                                      newInputTypes, fnType.getResults());
     funcOp.setType(newFnType);
-
 
     Block &entryBlock = funcOp.getBody().front();
 
-    // Only add block arguments for the newly added pointer types
-    for (auto ptrType : additionalPtrTypes) {
+    // 3.  Append the actual BlockArguments for the new pointers
+    for (auto ptrType : additionalPtrTypes)
       entryBlock.addArgument(ptrType, funcOp.getLoc());
-    }
 
+    // 4.  Restore attributes on originals **and** copy to new grads
+    auto restoreDict = [&](unsigned dstIdx, DictionaryAttr dict) {
+      if (!dict) return;
+      for (NamedAttribute na : dict)
+        funcOp.setArgAttr(dstIdx, na.getName(), na.getValue());
 
-    // the below is only needed bc I also want to extract map from orig ptr args to the added ptr args (map from input ptr to its grad ptr)
-    // but can't get an SSA value directly from an inputType since types only describe the kind of value, not the actual value
-    // so need to get Values from entryBlock instead
-    llvm::DenseMap<Value, Value> ptrToAddedPtrMap; // map: input ptr -> its grad ptr
+    for (unsigned origIdx = 0; origIdx < numOrigInputs; ++origIdx) {
+      restoreDict(origIdx, oldArgAttrs[origId]);
 
-    for (auto [origIdx, addedIdx] : ptrIdxToAddedPtrIdxMap){
-      // Block.getArgument returns BlockArgument. BlockArgument inherits
-      // from Value, so can use it directly wherever a Value is expected
-      Value origPtrSSA = entryBlock.getArgument(origIdx);
+      if (auto it = ptrIdxToAddedPtrIdxMap.find(origIdx);
+          it != ptrIdxToAddedPtrIdxMap.end())
+        restoreDict(it->second, oldArgAttrs[origIdx]);
+
+    // 5.  Build the SSA‑value map   (unchanged code)
+    llvm::DenseMap<Value, Value> ptrToAddedPtrMap;
+
+    for (auto [origIdx, addedIdx] : ptrIdxToAddedPtrIdxMap) {
+      Value origPtrSSA  = entryBlock.getArgument(origIdx);
       Value addedPtrSSA = entryBlock.getArgument(addedIdx);
       ptrToAddedPtrMap[origPtrSSA] = addedPtrSSA;
 
       if (DEBUG_PRINTS)
-        // here still see BlockArgument printing overloads due to RTTI
-        llvm::errs() << origPtrSSA << "(orig ptr) maps to " << addedPtrSSA << "(added ptr)\n";
+        llvm::errs() << origPtrSSA << " (orig ptr) maps to "
+                    << addedPtrSSA << " (added ptr)\n";
     }
 
     return ptrToAddedPtrMap;
   }
-
 
 
 

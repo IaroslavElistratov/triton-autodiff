@@ -33,6 +33,7 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#include "mlir/IR/BuiltinAttributes.h"  // for StringAttr & friends
 
 namespace {
 
@@ -346,6 +347,10 @@ void init_triton_ir(py::module &&m) {
 
   py::class_<MLIRContext>(m, "context", py::module_local())
       .def(py::init<>())
+      // // let Python obtain the raw mlir::MLIRContext* like upstream does
+      // .def("__int__", [](MLIRContext *self) {
+      //   return reinterpret_cast<intptr_t>(self);
+      // })
       .def("printOpOnDiagnostic",
            [](MLIRContext &self, bool v) { self.printOpOnDiagnostic(v); })
       .def("printStackTraceOnDiagnostic",
@@ -515,6 +520,69 @@ void init_triton_ir(py::module &&m) {
   py::class_<IntegerAttr, Attribute>(m, "integer_attr", py::module_local());
   py::class_<BoolAttr, Attribute>(m, "bool_attr", py::module_local());
   py::class_<UnitAttr, Attribute>(m, "unit_attr", py::module_local());
+
+  // my understanding is that the current C-API in triton exposes bool, int, unit
+  // attributes -- so they can be set from python, but it didn't previsotty expose
+  // stinrgAttr -- so it could not be set from python
+  //
+  // Only the overload accepting an int was exposed, so could attach
+  // an integer attribute to a block/function argument but not a string
+  // attribute
+
+  // Expose StringAttr so Python can create string attributes inside the
+  // Triton-owned MLIR context.  Accepts (context, value) just like
+  // IntegerAttr.get in this file.
+  py::class_<StringAttr, Attribute>(m, "StringAttr", py::module_local())
+      .def_static(
+          "get",
+          [](MLIRContext &context, const std::string &value) {
+            return StringAttr::get(&context, value);
+          },
+          py::arg("context"), py::arg("value"));
+
+   // ArrayAttr
+  py::class_<ArrayAttr, Attribute>(m, "ArrayAttr", py::module_local())
+      .def_static(
+          "get",
+          [](MLIRContext &context, py::list elems) {
+            SmallVector<Attribute> attrs;
+            attrs.reserve(py::len(elems));
+            for (py::handle o : elems)
+              attrs.push_back(py::cast<Attribute>(o));  // borrow‑cast
+            return ArrayAttr::get(&context, attrs);
+          },
+          py::arg("context"), py::arg("elements"));
+
+
+  // DictAttr – map<string, Attribute>
+  py::class_<DictionaryAttr, Attribute>(m, "DictAttr", py::module_local())
+      // MLIR side has no dedicated DictAttr wrapper; DictionaryAttr is the type.
+      .def_static(
+          "get",
+          [](MLIRContext &context, py::dict mapping) {
+            SmallVector<NamedAttribute> attrs;
+            attrs.reserve(py::len(mapping));
+
+            for (auto item : mapping) {
+              // Keys must be StringAttr; cast values to generic Attribute
+              std::string key     = py::cast<std::string>(item.first);
+              Attribute    value  = py::cast<Attribute>(item.second);
+              attrs.emplace_back(StringAttr::get(&context, key), value);
+            }
+
+            // Keep determinism: MLIR expects attributes sorted by name.
+            // llvm::sort(attrs, [](auto &a, auto &b) {
+            //   return a.getName() < b.getName();
+            // });
+            // Compare the underlying string values rather than the StringAttr objects
+            // themselves, which don't support operator<.
+            llvm::sort(attrs, [](const NamedAttribute &a, const NamedAttribute &b) {
+              return a.getName().getValue().compare(b.getName().getValue()) < 0;
+            });
+
+            return DictionaryAttr::get(&context, attrs);
+          },
+          py::arg("context"), py::arg("mapping"));
 
   // Ops
   py::class_<OpState>(m, "OpState", py::module_local())
@@ -750,6 +818,17 @@ void init_triton_ir(py::module &&m) {
             // set arg attributes "name" to value "val"
             auto attrTy = IntegerType::get(self.getContext(), 32);
             self.setArgAttr(arg_no, name, IntegerAttr::get(attrTy, val));
+          },
+          ret::reference)
+      // New overload that allows passing a pre-constructed MLIR Attribute
+      .def(
+          "set_arg_attr",
+          [](FuncOp &self, int arg_no, const std::string &name,
+             Attribute &attr) {
+            if (arg_no >= self.getNumArguments())
+              throw pybind11::index_error(
+                  "Function argument index out of range");
+            self.setArgAttr(arg_no, name, attr);
           },
           ret::reference)
       //  .def("has_attr", &::FuncOp::hasAttr)

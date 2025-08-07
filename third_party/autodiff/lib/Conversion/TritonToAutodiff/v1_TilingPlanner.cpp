@@ -1,4 +1,3 @@
-
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -160,20 +159,21 @@ void inferTiling(Block *entry) {
       if (!xArr) continue;                       // scalars / un-tagged
 
       SmallVector<StringRef> Xv = asVec(xArr);
-      llvm::StringSet<>      Xset(Xv.begin(), Xv.end());
+      llvm::StringSet<>      Xset;
+      for (StringRef s : Xv) Xset.insert(s);
 
       // one-pass split of O into {tile, stream}
       SmallVector<StringRef> tile, stream;
       tile.reserve(O.size());
       stream.reserve(O.size());
 
+      // stream = O − X
+      // tile   = O ∩ X
       for (StringRef ax : O)
         (Xset.contains(ax) ? tile : stream).push_back(ax);
 
-      // optional promotion & canonical ordering 
-      std::tie(tile, stream) = promoteTileAxes(std::move(tile),
-                                               std::move(stream),
-                                               X);
+      // optional promotion & canonical ordering
+      std::tie(tile, stream) = promoteTileAxes(std::move(tile), std::move(stream), X);
 
       // build / intern signature 
       StringAttr sigStr = serialiseSig(ctx, tile, stream);

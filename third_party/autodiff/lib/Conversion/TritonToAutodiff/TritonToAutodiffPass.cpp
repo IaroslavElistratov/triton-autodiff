@@ -15,6 +15,9 @@
 #include "mlir/IR/Block.h"
 #include "llvm/ADT/SetVector.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "autodiff/include/Dialect/Autodiff/IR/Dialect.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Passes.h"
@@ -22,10 +25,15 @@
 #include "autodiff/include/Conversion/TritonToAutodiff/HandlerForOp.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/Utils.h"
 #include "autodiff/include/Conversion/TritonToAutodiff/UtilsIO.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/AxisPropagation.h"
+// #include "autodiff/include/Conversion/TritonToAutodiff/TilingPlanner.h"
+#include "autodiff/include/Conversion/TritonToAutodiff/ReuseFactor.h"
 #include "llvm/ADT/APSInt.h"
 #include <numeric>
 
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Casting.h"
+
 
 namespace mlir {
 namespace triton {
@@ -63,6 +71,7 @@ namespace triton {
     // add gradient pointer arguments to the func
     if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ adding grad pointers ============\n\n\n";
     ptrToAddedPtrMap = addPointerArgsToFunction(func);
+    // addPointerArgsToFunction(func);
 
     // rewrite the block (possibly recursive)
     // no need for walk, since all my current use cases involve only a single ForOp
@@ -109,6 +118,27 @@ namespace triton {
   void ConvertTritonToAutodiff::rewriteIntoBackward(Block &block) {
 
     Block *blockPtr = &block;
+
+    // // todo: enable only for "inline" pattern
+    // unrollAllForOps(func);
+    // // func.getBody().front().dump();
+
+
+    // propagate axis annotations for the entire function containing the loop
+    if (DEBUG_PRINTS) llvm::errs() << "\n\n\n============ propagate axis ============\n\n\n";
+    propagateAxesInFuncOp(blockPtr);
+    llvm::errs() << "after propagating axes:\n";
+    blockPtr->print(llvm::errs());
+
+    // inferTiling(blockPtr);
+    // llvm::errs() << "after inferTiling:\n";
+    // blockPtr->print(llvm::errs());
+
+    propagateReuseCounts(blockPtr);
+    llvm::errs() << "after propagateReuseCounts:\n";
+    blockPtr->print(llvm::errs());
+
+    // llvm::report_fatal_error("DONE");
 
     // // todo: enable only for "inline" pattern
     // unrollAllForOps(func);

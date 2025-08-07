@@ -10,6 +10,9 @@ add_triton_library(TritonToAutodiff
     HandlerForOp.cpp
     Utils.cpp
     UtilsIO.cpp
+    # TilingPlanner.cpp
+    ReuseFactor.cpp
+    AxisPropagation.cpp
 
     DEPENDS
     TritonToAutodiffPassIncGen

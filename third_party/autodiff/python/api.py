@@ -21,6 +21,7 @@ from triton.backends.compiler import GPUTarget
 VERBOSE = int(os.environ.get('VERBOSE', 0))
 assert VERBOSE in [0, 1, 2]
 
+
 dir = os.getenv("TRITON_AUTODIFF_DIR")
 if dir is None:
     raise ValueError("Please specify TRITON_AUTODIFF_DIR, see README.")
@@ -227,6 +228,95 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         with open(f"generated/{dir_name}/inp.ttir", "w") as f:
           f.write(fwd_compiled_kernel.asm['ttir'])
 
+
+
+        # the attribute name MUST contain "." inside of it (e.g. tt.axis_names) -- otherwise the verifier fails only because the key is not dialect‑qualified (err: 'tt.func' op arguments may only have dialect attributes)
+
+        from triton._C.libtriton import ir
+
+        ctx = ir.context()
+        ir.load_dialects(ctx); backend.load_dialects(ctx)
+
+        mod = ir.parse_mlir_module(f"generated/{dir_name}/inp.ttir", ctx)
+        fn  = mod.get_function(mod.get_entry_func_name())
+
+        for i, axis in enumerate(jit_fn._axis_names):
+            elems = [ir.StringAttr.get(ctx, name) for name in axis]
+            fn.set_arg_attr(i, "tt.axis_names", ir.ArrayAttr.get(ctx, elems))
+
+        # todo: pass this from user
+        # grid (x,y,z) -> logical names
+        #
+        # putting "BLOCK_M" there would confuse the pass, because
+        # BLOCK_M is a tile height, not an independent logical axis.
+        # program_id(0) enumerates tiles along the sequence dimension.
+        # Each tile happens to be BLOCK_M rows high, but the rows still belong
+        # to the same logical axis SEQ_LEN; tile size is irrelevant for shape reasoning
+
+        # question-now:
+        # another thing for "HEAD" dim -- the axis_names i pipe from python, I don't specify batch or head dim there (bc these are paralzied over the grid). So specifying it in grid_axes seems also wrong?
+        #
+        # axis_names on pointer arguments describe the logical tensor
+        # shape after I removed the grid‑parallel dimensions.
+        # In my kernels that means only "SEQ_LEN" (rows inside a block) and
+        # "HEAD_DIM" (columns) stay; I leave out "B" (batch) and
+        # "HEAD" (attention head) because each thread‑block is already pinned to
+        # a single B, HEAD pair
+        #
+        # tt.grid_axes = ["...","...","..."] is a totally separate map: it merely
+        # says “PID‑x is the loop over whatever logical concept X”.
+        # Those names never get written onto the pointer; they are used only to
+        # tag the three tt.get_program_id ops so the pass can see whether a
+        # particular pointer offset still depends on x, y or z
+        #
+        # So it is not an error if some grid‑axis names do not appear in any
+        # axis_names list—the filter will simply drop them the moment they are not
+        # present on the pointer
+
+        grid_axes = ["SEQ_LEN", "B", "HEAD"] # x, y, z order
+        elems     = [ir.StringAttr.get(ctx, s) for s in grid_axes]
+        fn.set_attr("tt.grid_axes", ir.ArrayAttr.get(ctx, elems))
+        print(fn)
+
+        # obtained  fn  (Function wrapper) and  ctx
+        fn.set_attr("tt.loop_axis", ir.StringAttr.get(ctx, "SEQ_LEN"))
+
+        # initial axis prop did not needed this
+        # tt.axis_aliases = {
+        #   "BLOCK_M" : "SEQ_LEN",     # rows   of the score matrix
+        #   "BLOCK_N" : "SEQ_LEN"      # columns of the score matrix
+        # }
+        # Build the alias map
+        #     { "BLOCK_M" : "SEQ_LEN",  "BLOCK_N" : "SEQ_LEN" }
+        # ————————————————————————————————
+        # aliases = ir.DictAttr.get(
+        #     {
+        #         "BLOCK_M": ir.StringAttr.get(ctx, "SEQ_LEN"),
+        #         "BLOCK_N": ir.StringAttr.get(ctx, "SEQ_LEN"),
+        #     },
+        #     context=ctx,
+        # )
+        # fn.set_attr("tt.axis_aliases", aliases)
+
+        aliases = ir.DictAttr.get(
+            ctx,
+            {
+                "BLOCK_M": ir.StringAttr.get(ctx, "SEQ_LEN"),
+                "BLOCK_N": ir.StringAttr.get(ctx, "SEQ_LEN"),
+            },
+        )
+
+        fn.set_attr("tt.axis_aliases", aliases)
+
+
+        with open(f"generated/{dir_name}/inp.ttir", "w") as f:
+            f.write(str(mod))
+
+
+
+
+
+
         # 3) autodiff
         run_mlir_pass(f"generated/{dir_name}")
 
@@ -371,7 +461,7 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, a
     # invariant that “backward starts from the exact forward output”.
     #
     # todo-now: you cannot start it with ones or zeros -- you need to use exactly the fwd accumulator
-    kernel_inputs[2] = torch.ones_like(kernel_inputs[2])
+    # kernel_inputs[2] = torch.ones_like(kernel_inputs[2])
 
     # for fwd_buff_idx in shifted_idxs_buffers:
     #     kernel_inputs[fwd_buff_idx] = torch.zeros_like(kernel_inputs[fwd_buff_idx])
@@ -530,7 +620,7 @@ def create_new_jitfn(jit_func):
 # todo-low: can idxs_buffers determine automatically:
 #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
 #   - or, in mlir pass output idx of all inputs which are used in store nodes
-def autodiff(idxs_buffers):
+def autodiff(idxs_buffers, axis_names):
 
     def inner(fwd_kernel):
 
@@ -551,6 +641,8 @@ def autodiff(idxs_buffers):
         # this flag is needed to be able to early exit from the hook (avoids triggering
         # the autograd machinery on already differentiated kernels)
         fwd_kernel._is_fwd_kernel = True
+
+        fwd_kernel._axis_names = axis_names
 
         wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idxs_buffers)
         kernels = (fwd_kernel, wrapped_bwd_kernel)

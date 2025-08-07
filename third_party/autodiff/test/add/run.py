@@ -11,7 +11,7 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-@autodiff(idxs_buffers=1)
+@autodiff(idxs_buffers=1, axis_names=[["m"],["m"]])
 @triton.jit
 def kernel(
         x_ptr,  # *Pointer* to first input vector.

@@ -9,8 +9,8 @@ torch.manual_seed(20)
 # torch.set_printoptions(sci_mode=False, linewidth=1000)
 DEVICE = torch.device("cuda:0")
 
-B=256
-NUM_HEADS=64
+B=4
+NUM_HEADS=2
 SEQ_LEN=32
 HEAD_DIM=16
 dtype=torch.float16

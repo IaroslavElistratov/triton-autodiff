@@ -75,6 +75,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = l_i * alpha + l_ij
         # -- update output accumulator --
+        # todo-now: the only place (in this kenrel) where acc is used (besides the "+=" across itters) is here
         acc = acc * alpha[:, None]
         # update acc
         v = tl.load(V_block_ptr)
@@ -84,10 +85,22 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
         m_i = m_ij
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+    # todo-now: this loop has 3 iter-arg accumulators not just o ne
     return acc, l_i, m_i
 
 
-@autodiff(idxs_buffers=(4, 5))
+
+@autodiff(idxs_buffers=(4, 5),
+          axis_names=[
+        # not specifying -- "B", "NUM_HEADS" bc these are paralized over
+                ["BLOCK_M", "HEAD_DIM"],  # Q
+                ["HEAD_DIM", "BLOCK_N"],  # K
+                ["BLOCK_N", "HEAD_DIM"],  # V
+                ["BLOCK_M"],              # M
+                ["BLOCK_M", "HEAD_DIM"],  # Out
+          ]
+
+    )
 # todo: rm do_not_specialize
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
@@ -104,10 +117,9 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 
 
     tl.static_assert(BLOCK_N <= HEAD_DIM)
-    start_m = tl.program_id(0)
-    off_hz = tl.program_id(1)
-    off_z = off_hz // H
-    off_h = off_hz % H
+    start_m = tl.program_id(0) # walks along the sequence dimension in blocks of BLOCK_M rows of Q/K/V/Output.
+    off_z = tl.program_id(1) # batch
+    off_h = tl.program_id(2) # head
     qvk_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
 
     # block pointers
@@ -167,7 +179,8 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
 
-    m_ptrs = M + off_hz * N_CTX + offs_m
+    # question-now: correct change?
+    m_ptrs = M + off_z*off_h * N_CTX + offs_m
     tl.store(m_ptrs, m_i)
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
@@ -186,7 +199,7 @@ def stub(q, k, v, causal, sm_scale):
     stage = 3 if causal else 1
     print("stage: ", stage)
 
-    grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
+    grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0], q.shape[1])
     print("grid: ", grid)
 
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
