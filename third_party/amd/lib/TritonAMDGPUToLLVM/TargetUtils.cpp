@@ -14,8 +14,6 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
   case llvm::AMDGPU::GK_GFX950:
     return ISAFamily::CDNA4;
   case llvm::AMDGPU::GK_GFX942:
-  case llvm::AMDGPU::GK_GFX941:
-  case llvm::AMDGPU::GK_GFX940:
     return ISAFamily::CDNA3;
   case llvm::AMDGPU::GK_GFX90A:
     return ISAFamily::CDNA2;
@@ -48,6 +46,33 @@ bool supportsVDot(llvm::StringRef arch) {
   default:
     break;
   }
+  return false;
+}
+
+bool isCDNA(ISAFamily isaFamily) {
+  switch (isaFamily) {
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+  case ISAFamily::CDNA4:
+    return true;
+  default:
+    break;
+  }
+
+  return false;
+}
+
+bool isRDNA(ISAFamily isaFamily) {
+  switch (isaFamily) {
+  case ISAFamily::RDNA1:
+  case ISAFamily::RDNA2:
+  case ISAFamily::RDNA3:
+    return true;
+  default:
+    break;
+  }
+
   return false;
 }
 

@@ -1,8 +1,8 @@
 add_triton_library(TritonAMDGPUToLLVM
+    AsyncUtility.cpp
+    AtomicRMWOpsEmitter.cpp
+    AllocateSharedMemory.cpp
     BufferOpsEmitter.cpp
-    ConvertLayoutOpToLLVM/SharedToDotOperandHelper.cpp
-    ConvertLayoutOpToLLVM/SharedToDotOperandMFMA.cpp
-    ConvertLayoutOpToLLVM/SharedToDotOperandWMMA.cpp
     ConvertLayoutOpToLLVM.cpp
     MemoryOpToLLVM.cpp
     DotOpToLLVM/FMA.cpp
@@ -17,18 +17,23 @@ add_triton_library(TritonAMDGPUToLLVM
     Utility.cpp
     TargetInfo.cpp
     TargetUtils.cpp
-    DecomposeUnsupportedConversions.cpp
     OptimizeLDSUsage.cpp
     OptimizeLDSUtility.cpp
     SPMDOpToLLVM.cpp
     SchedInstructions.cpp
     UpcastMXFPToLLVM.cpp
+    Fp4ToFpOpToLLVM.cpp
+    MembarUtility.cpp
+    ScalarizePackedFOps.cpp
 
     DEPENDS
     TritonAMDGPUConversionPassIncGen
+    LLVMIRIncGen
 
     LINK_LIBS PUBLIC
     TritonGPUToLLVM
     TritonAMDGPUIR
-    TritonProtonToLLVM
+    LLVMCore
+    LLVMPasses
+    LLVMSupport
 )

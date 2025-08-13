@@ -1,5 +1,6 @@
 add_triton_library(TritonNVIDIAGPUToLLVM
     ConvertLayoutOpToLLVM.cpp
+    ConvertWarpSpecializeToLLVM.cpp
     MemoryOpToLLVM.cpp
     DotOpToLLVM/MMAv2.cpp
     DotOpToLLVM/MMAv5.cpp
@@ -18,12 +19,17 @@ add_triton_library(TritonNVIDIAGPUToLLVM
     Utility.cpp
     Fp4ToFpOpToLLVM.cpp
     TargetInfo.cpp
+    Allocation.cpp
 
     DEPENDS
     TritonNVIDIAGPUConversionPassIncGen
     NVGPUAttrDefsIncGen
 
     LINK_LIBS PUBLIC
+    TritonAnalysis
     TritonGPUToLLVM
-    TritonProtonToLLVM
+    TritonInstrumentToLLVM
+    MLIRReconcileUnrealizedCasts
+    NVGPUIR
+    MLIRUBToLLVM
 )

@@ -1,17 +1,15 @@
-#include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
-#include "mlir/Analysis/DataFlow/DenseAnalysis.h"
-#include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
-#include "mlir/Analysis/SliceAnalysis.h"
+#include "TritonAMDGPUTransforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/Dominance.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "third_party/amd/include/Analysis/AxisInfoExt.h"
+#include "third_party/amd/include/Analysis/RangeAnalysis.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/Utility.h"
 #include "triton/Analysis/AxisInfo.h"
@@ -20,392 +18,84 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include <optional>
-
-#define GEN_PASS_CLASSES
-#include "TritonAMDGPUTransforms/Passes.h"
 
 #undef DEBUG_TYPE
 #define DEBUG_TYPE "tritonamdgpu-convert-buffer-ops"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
-using namespace mlir;
 using ::mlir::LLVM::AMD::getVectorSize;
 using mlir::triton::AMD::ISAFamily;
 
 namespace ttg = mlir::triton::gpu;
 namespace tt = mlir::triton;
 
+namespace mlir {
+
+#define GEN_PASS_DEF_TRITONAMDGPUCONVERTTOBUFFEROPS
+#include "TritonAMDGPUTransforms/Passes.h.inc"
+
 namespace {
 
-constexpr int64_t kDefaultMaxTripCount = 1024;
-const std::string kConvertBufferOpsPrefix = "__amdgpuconvertbufferops.";
-const std::string kOutputRange = kConvertBufferOpsPrefix + "output_range";
-
-std::optional<int64_t> maybeGetTripCount(LoopLikeOpInterface loop) {
-  std::optional<OpFoldResult> lowerBound = loop.getSingleLowerBound();
-  std::optional<OpFoldResult> upperBound = loop.getSingleUpperBound();
-  std::optional<OpFoldResult> step = loop.getSingleStep();
-  if (lowerBound && upperBound && step)
-    return constantTripCount(*lowerBound, *upperBound, *step);
-  return {};
-}
-
-void getEnclosingLoops(Operation &op, SmallVector<LoopLikeOpInterface> &ops) {
-  Operation *currOp = op.getParentOp();
-  while (currOp) {
-    if (isa<LoopLikeOpInterface>(currOp))
-      ops.push_back(llvm::cast<LoopLikeOpInterface>(currOp));
-    currOp = currOp->getParentOp();
-  }
-}
-
-void inferResultRanges(GetProgramIdOp *op, SetIntRangeFn setResultRange) {
-  constexpr int64_t kDefaultMaxProgramID = 2 << 15; // 65536
-  setResultRange(
-      op->getResult(),
-      ConstantIntRanges::range(
-          /*min*/ {/*numBits*/ 32, /*val*/ 0, /*isSigned*/ true},
-          /*max*/
-          {/*numBits*/ 32, /*val*/ kDefaultMaxProgramID, /*isSigned*/ true},
-          /*isSigned*/ true));
-}
-
-void inferResultRanges(MakeRangeOp *op, SetIntRangeFn setResultRange) {
-  setResultRange(
-      op->getResult(),
-      ConstantIntRanges::range(
-          /*min*/ {/*numBits*/ 32, /*val*/ op->getStart(), /*isSigned*/ true},
-          /*max*/ {/*numBits*/ 32, /*val*/ op->getEnd(), /*isSigned*/ true},
-          /*isSigned*/ true));
-}
-
-void inferResultRanges(SplatOp *op, ArrayRef<ConstantIntRanges> argRanges,
-                       SetIntRangeFn setResultRange) {
-  setResultRange(op->getResult(), argRanges[0]);
-}
-
-void inferResultRanges(ExpandDimsOp *op, ArrayRef<ConstantIntRanges> argRanges,
-                       SetIntRangeFn setResultRange) {
-  setResultRange(op->getResult(), argRanges[0]);
-}
-
-/// This struct (analysis) adapt's upstream's IntegerRangeAnalysis (inferring
-/// lower/upperbounds on integer constants) to our needs.
-/// Specifically there are 2 points of extension:
-///
-/// 1. Support for GetProgramIdOp, MakeRangeOp, SplatOp, ExpandDimsOp. *Note*,
-/// upstream already supports range inference for shaped types such as tensors
-/// (here we just implement effectively implement the interfaces for our ops).
-///    * Upstream's semantics for "range of shape type" is union over ranges of
-///    elements.
-///    * We do not use tablegen to implement
-///    DeclareOpInterfaceMethods<InferIntRangeInterface, ["inferResultRanges"]>
-///    in order to keep the entire implementation contained/encapsulated.
-///
-/// 2. Support for inference "through loops". Upstream's analysis conservatively
-/// inferences [min_int, max_int] for loop carried values (and therefore loop
-/// body values). Here we attempt to do better by analysis the loop bounds and
-/// "abstractly interpreting" the loop when loop bounds are statically known.
-/// See visitRegionSuccessors.
-struct TritonIntegerRangeAnalysis : dataflow::IntegerRangeAnalysis {
-  using dataflow::IntegerRangeAnalysis::IntegerRangeAnalysis;
-
-  llvm::SmallDenseMap<LoopLikeOpInterface, int64_t> loopTripCounts;
-  llvm::SmallDenseMap<
-      std::pair<LoopLikeOpInterface, dataflow::IntegerValueRangeLattice *>,
-      int64_t>
-      loopVisits;
-
-  LogicalResult visitOperation(
-      Operation *op,
-      ArrayRef<const dataflow::IntegerValueRangeLattice *> operands,
-      ArrayRef<dataflow::IntegerValueRangeLattice *> results) override {
-    LDBG("  Inferring ranges for " << *op << "\n");
-    // This callback is almost exactly like the callback in
-    // IntegerRangeAnalysis::visitOperation except we do not "short-cicruit" the
-    // analysis by inferring a maximum range for loop results (instead we
-    // perform a check based on visit counts in visitRegionSuccessors).
-    auto joinCallback =
-        [&op, &results, this](Value v, const IntegerValueRange &incomingRange) {
-          auto result = dyn_cast<OpResult>(v);
-          if (!result)
-            return;
-          assert(llvm::is_contained(op->getResults(), result));
-
-          LDBG("  Inferred range " << incomingRange << "\n");
-          dataflow::IntegerValueRangeLattice *lattice =
-              results[result.getResultNumber()];
-          IntegerValueRange oldRange = lattice->getValue();
-          ChangeResult changed = lattice->join(incomingRange);
-          propagateIfChanged(lattice, changed);
-        };
-
-    if (llvm::isa<GetProgramIdOp, MakeRangeOp, SplatOp, ExpandDimsOp>(op)) {
-      SmallVector<ConstantIntRanges> argRanges;
-      for (auto lattice : operands) {
-        if (lattice->getValue().isUninitialized()) {
-          setAllToEntryStates(results);
-          return success();
-        }
-        argRanges.push_back(lattice->getValue().getValue());
-      }
-      if (auto op_ = llvm::dyn_cast<GetProgramIdOp>(op))
-        inferResultRanges(&op_, joinCallback);
-      else if (auto op_ = llvm::dyn_cast<SplatOp>(op))
-        inferResultRanges(&op_, argRanges, joinCallback);
-      else if (auto op_ = llvm::dyn_cast<ExpandDimsOp>(op))
-        inferResultRanges(&op_, argRanges, joinCallback);
-      else if (auto op_ = llvm::dyn_cast<MakeRangeOp>(op))
-        inferResultRanges(&op_, joinCallback);
-      else {
-        llvm_unreachable("Unsupported operation");
-      }
-      return success();
-    }
-
-    auto inferrable = dyn_cast<InferIntRangeInterface>(op);
-    if (!inferrable) {
-      setAllToEntryStates(results);
-      return success();
-    }
-    SmallVector<IntegerValueRange> argRanges = llvm::map_to_vector(
-        operands, [](const dataflow::IntegerValueRangeLattice *lattice) {
-          return lattice->getValue();
-        });
-
-    inferrable.inferResultRangesFromOptional(argRanges, joinCallback);
-    return success();
-  }
-
-  /// This method (which overloads
-  /// AbstractSparseForwardDataFlowAnalysis::visitRegionSuccessors) implements
-  /// "abstract interpretation" of loops with statically known bounds in order
-  /// to infer tight ranges for loop carried values (and therefore loop body
-  /// values). By "abstract interpretation" we mean lattice states are
-  /// propagated to all region successors N times, where N is the total trip
-  /// count of the loop. Recall for scf.for, both the loop itself and the users
-  /// of the loop successors. Thus, after N propagations both loop body values
-  /// and users of loop results will have accurate ranges (assuming we have
-  /// implemented support for range analysis on the ops).
-  /// *Note*, this implementation is majority similar to
-  /// AbstractSparseForwardDataFlowAnalysis::visitRegionSuccessors (so check
-  /// there for more explanation/insight) and basically only does two things
-  /// differently:
-  ///
-  /// 1. If the branch op is a loop (LoopLikeOpInterface) then we attempt to
-  /// compute its total trip count (nested loop trip counts multiply) and
-  /// initialize a visit count to 0. Note, due to how Dataflow analysis works we
-  /// have to actually visit the loop N times for each iter_arg (each argument
-  /// lattice) so we actually track visit count for (loop, arg) not just (loop).
-  ///
-  /// 2. Before propagating, we check if we have propagated for (loop, arg) >= N
-  /// times. If so, we do not propagate (and thus the traversal converges/ends).
-  ///
-  /// Note, for loops where the trip count cannot be inferred *and* loops with a
-  /// total trip count larger than `kDefaultMaxTripCount`, fallback to
-  /// upstream's conservative inference (i.e., we infer [min_int, max_int]) for
-  /// the loop operands and all users and all users of the results of the loop.
-  void visitRegionSuccessors(
-      ProgramPoint *point, RegionBranchOpInterface branch,
-      RegionBranchPoint successor,
-      ArrayRef<dataflow::AbstractSparseLattice *> abstractLattices) override {
-    SmallVector<dataflow::IntegerValueRangeLattice *> lattices;
-    for (auto abstractLat : abstractLattices) {
-      lattices.push_back(
-          static_cast<dataflow::IntegerValueRangeLattice *>(abstractLat));
-    }
-    // Initialize loop trip counts
-    LoopLikeOpInterface loop =
-        llvm::dyn_cast<LoopLikeOpInterface>(branch.getOperation());
-    if (loop) {
-      if (!loopTripCounts.contains(loop)) {
-        SmallVector loops{loop};
-        getEnclosingLoops(*loop, loops);
-        int loopTripCount =
-            std::accumulate(loops.begin(), loops.end(), 1,
-                            [](int accum, LoopLikeOpInterface loop) {
-                              return accum * maybeGetTripCount(loop).value_or(
-                                                 kDefaultMaxTripCount + 1);
-                            });
-        loopTripCounts[loop] = loopTripCount;
-      }
-      for (auto argLat : lattices) {
-        if (!loopVisits.contains({loop, argLat})) {
-          loopVisits[{loop, argLat}] = 0;
-        }
-      }
-    }
-
-    const auto *predecessors =
-        getOrCreateFor<dataflow::PredecessorState>(point, point);
-    assert(predecessors->allPredecessorsKnown() &&
-           "unexpected unresolved region successors");
-    for (Operation *op : predecessors->getKnownPredecessors()) {
-      std::optional<OperandRange> operands;
-      if (op == branch) {
-        operands = branch.getEntrySuccessorOperands(successor);
-      } else if (auto regionTerminator =
-                     dyn_cast<RegionBranchTerminatorOpInterface>(op)) {
-        operands = regionTerminator.getSuccessorOperands(successor);
-      }
-      if (!operands)
-        return setAllToEntryStates(lattices);
-
-      ValueRange inputs = predecessors->getSuccessorInputs(op);
-      assert(inputs.size() == operands->size() &&
-             "expected the same number of successor inputs as operands");
-
-      unsigned firstIndex = 0;
-      if (inputs.size() != lattices.size()) {
-        if (!point->isBlockStart()) {
-          if (!inputs.empty()) {
-            firstIndex = cast<OpResult>(inputs.front()).getResultNumber();
-          }
-          visitNonControlFlowArguments(
-              branch,
-              RegionSuccessor(
-                  branch->getResults().slice(firstIndex, inputs.size())),
-              lattices, firstIndex);
-        } else {
-          if (!inputs.empty()) {
-            firstIndex = cast<BlockArgument>(inputs.front()).getArgNumber();
-          }
-          Region *region = point->getBlock()->getParent();
-          visitNonControlFlowArguments(
-              branch,
-              RegionSuccessor(region, region->getArguments().slice(
-                                          firstIndex, inputs.size())),
-              lattices, firstIndex);
-        }
-      }
-
-      for (auto [oper, argLat] :
-           llvm::zip(*operands, ArrayRef(lattices).drop_front(firstIndex))) {
-        std::pair loopArgLat = {loop, argLat};
-        // If we've "run the loop" #tripcount times, stop propagating.
-        if (loop && loopVisits[loopArgLat] >= loopTripCounts[loop])
-          continue;
-        ChangeResult changed;
-        if (loop && loopTripCounts[loop] > kDefaultMaxTripCount) {
-          // If the loop's tripcount is too large, infer the maximum range for
-          // the arg lattices. This will have the effect that all users will
-          // also be inferred to have maximum range and end the analysis will
-          // end (the maximum range is the "top" of the lattice and thus no
-          // further changes/updates are possible).
-          changed = argLat->join(IntegerValueRange::getMaxRange(oper));
-        } else {
-          // Else, propagate pred operands.
-          changed = argLat->join(*getLatticeElementFor(point, oper));
-        }
-        propagateIfChanged(argLat, changed);
-        // Only increase the loop visitation count if have actually update the
-        // lattice because otherwise we will over count the number of visits
-        // (since not all iter_arg lattices are updated/propagated on each
-        // visit).
-        if (loop && changed == ChangeResult::Change)
-          ++loopVisits[loopArgLat];
-      }
-    }
-  }
-};
-
-void collectRanges(DataFlowSolver &solver, ValueRange values,
-                   SmallVectorImpl<ConstantIntRanges> &ranges) {
-  for (Value val : values) {
-    auto *maybeInferredRange =
-        solver.lookupState<dataflow::IntegerValueRangeLattice>(val);
-    if (!maybeInferredRange || maybeInferredRange->getValue().isUninitialized())
-      return;
-    const ConstantIntRanges &inferredRange =
-        maybeInferredRange->getValue().getValue();
-    ranges.push_back(inferredRange);
-  }
-}
-
-void collectRanges(std::shared_ptr<DataFlowSolver> solver, ModuleOp mod) {
-  mod->walk<WalkOrder::PreOrder>([&solver, &mod](Operation *op) {
-    SmallVector<ConstantIntRanges> outputRange;
-    collectRanges(*solver, op->getResults(), outputRange);
-    if (!outputRange.empty()) {
-      APInt min = outputRange[0].smin();
-      APInt max = outputRange[0].smax();
-      IntegerType i64ty =
-          IntegerType::get(mod.getContext(), 64, IntegerType::Signless);
-      SmallVector<Attribute> range = {
-          IntegerAttr::get(i64ty, min.getSExtValue()),
-          IntegerAttr::get(i64ty, max.getSExtValue()),
-      };
-      op->setAttr(kOutputRange, ArrayAttr::get(mod.getContext(), range));
-    }
-  });
-}
-
 bool verifyNonSmallerByAssumption(
-    Value expr, const DenseSet<Value> &assumptions,
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
     const std::function<bool(Value)> &matchesOther) {
-  for (Value assume : assumptions) {
-    if (auto cmpOp = assume.getDefiningOp<arith::CmpIOp>()) {
-      switch (cmpOp.getPredicate()) {
-      case arith::CmpIPredicate::eq:
-      case arith::CmpIPredicate::sge:
-      case arith::CmpIPredicate::sgt: {
-        if (cmpOp.getLhs() == expr && matchesOther(cmpOp.getRhs())) {
-          LDBG("  " << expr << " non-neg by assumption " << cmpOp);
-          return true;
-        }
-        break;
+  if (!assumptions.contains(expr))
+    return false;
+  for (Operation *assume : assumptions.at(expr)) {
+    auto cmpOp = llvm::dyn_cast<arith::CmpIOp>(assume);
+    if (!cmpOp)
+      continue;
+    switch (cmpOp.getPredicate()) {
+    case arith::CmpIPredicate::eq:
+    case arith::CmpIPredicate::sge:
+    case arith::CmpIPredicate::sgt: {
+      if (cmpOp.getLhs() == expr && matchesOther(cmpOp.getRhs())) {
+        LDBG("  " << expr << " non-neg by assumption " << cmpOp);
+        return true;
       }
-      case arith::CmpIPredicate::sle:
-      case arith::CmpIPredicate::slt: {
-        if (cmpOp.getRhs() == expr && matchesOther(cmpOp.getLhs())) {
-          LDBG("  " << expr << " non-neg by assumption " << cmpOp);
-          return true;
-        }
-        break;
+      break;
+    }
+    case arith::CmpIPredicate::sle:
+    case arith::CmpIPredicate::slt: {
+      if (cmpOp.getRhs() == expr && matchesOther(cmpOp.getLhs())) {
+        LDBG("  " << expr << " non-neg by assumption " << cmpOp);
+        return true;
       }
-      default:
-        break;
-      }
+      break;
+    }
+    default:
+      break;
     }
   }
   return false;
 }
 
-bool verifyNonNegativeByAssumption(Value expr,
-                                   const DenseSet<Value> &assumptions) {
-  return verifyNonSmallerByAssumption(expr, assumptions, [](auto otherExpr) {
-    APInt cst;
-    return matchPattern(otherExpr, m_ConstantInt(&cst)) && cst.isNonNegative();
-  });
-}
-
-bool verifyNonSmallerByAssumption(Value expr,
-                                  const DenseSet<Value> &assumptions,
-                                  Value other) {
+bool verifyNonSmallerByAssumption(
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
+    Value other) {
   return verifyNonSmallerByAssumption(
       expr, assumptions, [&](auto otherAssum) { return otherAssum == other; });
 }
 
-bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
+bool verifyNonNegativeExpr(
+    Value expr, const DenseMap<Value, SetVector<Operation *>> &assumptions,
+    std::shared_ptr<DataFlowSolver> solver) {
   LDBG("Determing if non-negative: " << expr);
 
-  if (!llvm::isa<mlir::BlockArgument>(expr)) {
-    if (auto outputR = llvm::dyn_cast_if_present<mlir::ArrayAttr>(
-            expr.getDefiningOp()->getAttr(kOutputRange))) {
-      assert(outputR.size() == 2 && llvm::isa<mlir::IntegerAttr>(outputR[0]) &&
-             "expected output_range to have 2 integerAttr entries");
-      auto lb = llvm::cast<mlir::IntegerAttr>(outputR[0]);
-      if (lb.getValue().sge(0))
-        return true;
+  auto nonNegativePred = [&solver](Value v) -> bool {
+    if (const auto *r =
+            solver->lookupState<dataflow::IntegerValueRangeLattice>(v)) {
+      if (r->getValue().isUninitialized())
+        return false;
+      if (AMD::isEmptyInitializedRange(r->getValue().getValue()))
+        return false;
     }
-  }
+    return succeeded(dataflow::staticallyNonNegative(*solver, v));
+  };
 
-  // Check if the expression is contained in any assumption
-  if (verifyNonNegativeByAssumption(expr, assumptions)) {
+  if (nonNegativePred(expr))
     return true;
-  }
 
   // Recurse if the operation is defined
   Operation *op = expr.getDefiningOp();
@@ -420,17 +110,20 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
           .Case<triton::TransOp, triton::SplitOp, triton::BroadcastOp,
                 triton::ExpandDimsOp, triton::SplatOp, triton::ReshapeOp,
                 triton::gpu::ConvertLayoutOp>([&](auto unaryOp) {
-            return verifyNonNegativeExpr(unaryOp.getOperand(), assumptions);
+            return verifyNonNegativeExpr(unaryOp.getOperand(), assumptions,
+                                         solver);
           })
           .Case<triton::GatherOp>([&](auto gatherOp) {
-            return verifyNonNegativeExpr(gatherOp.getSrc(), assumptions);
+            return verifyNonNegativeExpr(gatherOp.getSrc(), assumptions,
+                                         solver);
           })
           // Joining two non-negative tensors is still non-negative
           .Case<triton::JoinOp, triton::CatOp>([&](auto joinOp) {
-            return verifyNonNegativeExpr(joinOp.getLhs(), assumptions) &&
-                   verifyNonNegativeExpr(joinOp.getRhs(), assumptions);
+            return verifyNonNegativeExpr(joinOp.getLhs(), assumptions,
+                                         solver) &&
+                   verifyNonNegativeExpr(joinOp.getRhs(), assumptions, solver);
           })
-          // Returns a tensor representing histogram: historgrams only contain
+          // Returns a tensor representing histogram: histograms only contain
           // buckets of non-negative values.
           .Case<triton::HistogramOp>([&](auto) { return true; })
           .Case<triton::MakeRangeOp>([&](auto makeRangeOp) {
@@ -454,16 +147,17 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
           })
           .Case<arith::MaxSIOp>([&](auto maxOp) {
             // max(a,b) >= 0 iff a>=0 || b>=0
-            return verifyNonNegativeExpr(maxOp.getLhs(), assumptions) ||
-                   verifyNonNegativeExpr(maxOp.getRhs(), assumptions);
+            return verifyNonNegativeExpr(maxOp.getLhs(), assumptions, solver) ||
+                   verifyNonNegativeExpr(maxOp.getRhs(), assumptions, solver);
           })
           .Case<arith::RemSIOp>([&](auto remsiOp) {
             // a % b >= 0 iff a>=0
-            return verifyNonNegativeExpr(remsiOp.getLhs(), assumptions);
+            return verifyNonNegativeExpr(remsiOp.getLhs(), assumptions, solver);
           })
           .Case<arith::TruncIOp, arith::ExtSIOp>([&](Operation *unaryOp) {
             // a = OP b >= 0 iff b >= 0
-            return verifyNonNegativeExpr(unaryOp->getOperand(0), assumptions);
+            return verifyNonNegativeExpr(unaryOp->getOperand(0), assumptions,
+                                         solver);
           })
           // Casting from arbitrary data does *not* guarantee the offset is in
           // range (even if pointer, or the data is non-negative when
@@ -482,9 +176,10 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
               // Generally speaking, a OP b >= 0  iff  a >= 0 && b >= 0 when
               // OP != sub
               [&](Operation *binOp) {
-                return verifyNonNegativeExpr(binOp->getOperand(0),
-                                             assumptions) &&
-                       verifyNonNegativeExpr(binOp->getOperand(1), assumptions);
+                return verifyNonNegativeExpr(binOp->getOperand(0), assumptions,
+                                             solver) &&
+                       verifyNonNegativeExpr(binOp->getOperand(1), assumptions,
+                                             solver);
               })
           // TODO: more scf
           .Case<scf::IfOp>([&](auto ifOp) {
@@ -499,16 +194,20 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
             auto thenYield = cast<scf::YieldOp>(ifOp.thenYield());
             auto elseYield = cast<scf::YieldOp>(ifOp.elseYield());
             return verifyNonNegativeExpr(thenYield->getOperand(resultIdx),
-                                         assumptions) &&
+                                         assumptions, solver) &&
                    verifyNonNegativeExpr(elseYield->getOperand(resultIdx),
-                                         assumptions);
+                                         assumptions, solver);
           })
           .Case<arith::SubIOp>([&](auto op) {
             // If a user annotates tl.assume(a >= b) then we know a - b >= 0
             return verifyNonSmallerByAssumption(op.getLhs(), assumptions,
                                                 op.getRhs());
           })
-          .Default([&](Operation *op) {
+          .Case<triton::amdgpu::ExtractSliceOp>([&](auto op) {
+            return verifyNonNegativeExpr(op->getOperand(0), assumptions,
+                                         solver);
+          })
+          .Default([&](Operation *) {
             // Conservatively assume that the expression is negative
             LDBG("  Unhandled op, cannot assume non-negative");
             return false;
@@ -518,7 +217,9 @@ bool verifyNonNegativeExpr(Value expr, const DenseSet<Value> &assumptions) {
 
 // Quick analysis on the Triton IR to decide if we can safely use
 // buffer operations
-bool canUseBufferOps(Value ptr, const DenseSet<Value> &assumptions) {
+bool canUseBufferOps(Value ptr,
+                     const DenseMap<Value, SetVector<Operation *>> &assumptions,
+                     std::shared_ptr<DataFlowSolver> solver) {
   // 1. Check if the pointer is uniform: i.e., if it comes from a uniform
   // pointer(splatted) and non-uniform offset addition
 
@@ -538,7 +239,7 @@ bool canUseBufferOps(Value ptr, const DenseSet<Value> &assumptions) {
     return false;
   LDBG("32 bit offset");
 
-  return verifyNonNegativeExpr(offset, assumptions);
+  return verifyNonNegativeExpr(offset, assumptions, std::move(solver));
 }
 
 // Extract stride of the blocked offset of LD/ST ops.
@@ -558,17 +259,109 @@ Value getBlockStride(Location loc, Value offset, PatternRewriter &rewriter) {
   return nullptr;
 }
 
-} // namespace
+// /*-----------------AtomicCAS-------------------*/
+
+struct ConvertTritonAtomicCASOpToBufferAtomicCAS
+    : public mlir::OpRewritePattern<triton::AtomicCASOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  ConvertTritonAtomicCASOpToBufferAtomicCAS(
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
+      ModuleAxisInfoAnalysis &axisAnalysisPass,
+      std::shared_ptr<DataFlowSolver> solver)
+      : mlir::OpRewritePattern<triton::AtomicCASOp>(context),
+        assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
+        solver(std::move(solver)) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::AtomicCASOp op,
+                  PatternRewriter &rewriter) const override {
+    LDBG("Try to convert: " << op);
+    Value ptr = op.getPtr();
+    auto sem = op.getSem();
+    auto scope = op.getScope();
+
+    if (!canUseBufferOps(ptr, assumptions, solver)) {
+      return rewriter.notifyMatchFailure(op, "canUseBufferOps check failed");
+    }
+
+    switch (scope) {
+    case MemSyncScope::GPU:
+    case MemSyncScope::CTA:
+      break;
+    default:
+      return rewriter.notifyMatchFailure(op, "CAS with unsupported scope");
+    }
+    LDBG("CAS supported scope");
+
+    switch (sem) {
+    case MemSemantic::RELAXED:
+    case MemSemantic::RELEASE:
+    case MemSemantic::ACQUIRE:
+    case MemSemantic::ACQUIRE_RELEASE:
+      break;
+    default:
+      return rewriter.notifyMatchFailure(
+          op, "CAS with unsupported memory ordering");
+    }
+
+    auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
+    Value tensorPtr = addPtrOp.getPtr();
+    Value tensorOffset = addPtrOp.getOffset();
+    auto splatOp = tensorPtr.getDefiningOp<triton::SplatOp>();
+    Value basePtr = splatOp.getSrc();
+
+    // Buffer atomic CAS only supports i32/i64
+    auto checkType = getElementTypeOrSelf(op.getVal());
+    bool isSupportedType = checkType.isInteger(32) || checkType.isInteger(64);
+    if (!isSupportedType) {
+      return rewriter.notifyMatchFailure(op, "AtomicCAS with unsupported type");
+    }
+    LDBG("AtomicCAS supported type");
+
+    // Buffer atomics support 32 and 64-bit operations, so inputs must be at
+    // least 32-bits. Otherwise, fall back to the existing path for atomics
+    auto opValueType = op.getVal().getType();
+    auto opBitWidth = 0;
+    if (auto tensorType = dyn_cast<RankedTensorType>(opValueType)) {
+      auto elemBitWidth = tensorType.getElementTypeBitWidth();
+      opBitWidth =
+          getVectorSize(basePtr, tensorOffset, axisAnalysisPass) * elemBitWidth;
+    } else {
+      opBitWidth = opValueType.getIntOrFloatBitWidth();
+    }
+
+    if (opBitWidth < 32) {
+      return rewriter.notifyMatchFailure(
+          op, "BufferAtomicCAS requires opBitWidth >= 32");
+    }
+    Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
+    rewriter.replaceOpWithNewOp<triton::amdgpu::BufferAtomicCASOp>(
+        op, op.getVal().getType(), basePtr, tensorOffset, op.getCmp(),
+        op.getVal(), blockStride, sem, scope);
+    return success();
+  }
+
+private:
+  // Assumptions collected through the function
+  const DenseMap<Value, SetVector<Operation *>> &assumptions;
+  ModuleAxisInfoAnalysis &axisAnalysisPass;
+  std::shared_ptr<DataFlowSolver> solver;
+};
 
 struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     : public mlir::OpRewritePattern<triton::AtomicRMWOp> {
   using OpRewritePattern::OpRewritePattern;
 
   ConvertTritonAtomicRMWOpToBufferAtomicRMW(
-      mlir::MLIRContext *context, DenseSet<Value> &assumptions,
-      ModuleAxisInfoAnalysis &axisAnalysisPass)
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
+      ModuleAxisInfoAnalysis &axisAnalysisPass,
+      std::shared_ptr<DataFlowSolver> solver, ISAFamily isaFamily)
       : mlir::OpRewritePattern<triton::AtomicRMWOp>(context),
-        assumptions(assumptions), axisAnalysisPass(axisAnalysisPass) {}
+        assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
+        solver(std::move(solver)), isaFamily(isaFamily) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::AtomicRMWOp op,
@@ -581,7 +374,7 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
 
     // In addition to the `canUserBufferOps` check, we should ensure that
     // 1. Perform the canUserBufferOps check
-    if (!canUseBufferOps(ptr, assumptions)) {
+    if (!canUseBufferOps(ptr, assumptions, solver)) {
       return rewriter.notifyMatchFailure(op, "canUseBufferOps check failed");
     }
 
@@ -626,6 +419,23 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     }
     LDBG("RMW supported type");
 
+    // float16 is the only 16-bit dtype supported by buffer atomic fadd on
+    // gfx942
+    if (isaFamily == ISAFamily::CDNA3 && checkType.isBF16() &&
+        atomicRmwOp == RMWOp::FADD) {
+      return rewriter.notifyMatchFailure(op, "RMW FADD does not support bf16");
+    }
+    LDBG("RMW FADD supported 16-bit type");
+
+    auto vecSize = getVectorSize(ptr, axisAnalysisPass);
+    // f16/bf16 dtypes could only be efficiently calculated using instructions
+    // that pack 2 elements (e.g. @llvm.amdgcn.raw.buffer.atomic.fadd.v2f16)
+    if (vecSize % 2 != 0 && (checkType.isF16() || checkType.isBF16())) {
+      return rewriter.notifyMatchFailure(
+          op, "RMW float 16 dtypes must be aligned by 2");
+    }
+    LDBG("RMW passed alignment check");
+
     // 5. Check if the RMWOp is supported
     switch (atomicRmwOp) {
     case RMWOp::AND:
@@ -656,8 +466,7 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
       // are contiguous we can emit the buffer op. Otherwise, the buffer ops
       // lowering will try to emit individual (unsupported) f16/bf16 ops.
       auto elemBitWidth = tensorType.getElementTypeBitWidth();
-      opBitWidth =
-          getVectorSize(basePtr, tensorOffset, axisAnalysisPass) * elemBitWidth;
+      opBitWidth = vecSize * elemBitWidth;
     } else {
       opBitWidth = opValueType.getIntOrFloatBitWidth();
     }
@@ -679,25 +488,34 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
 
 private:
   // Assumptions collected through the function
-  DenseSet<Value> assumptions;
+  DenseMap<Value, SetVector<Operation *>> assumptions;
   ModuleAxisInfoAnalysis &axisAnalysisPass;
+  std::shared_ptr<DataFlowSolver> solver;
+  ISAFamily isaFamily;
 };
 
-struct ConvertTritonLoadToBufferLoad
-    : public mlir::OpRewritePattern<triton::LoadOp> {
-  using OpRewritePattern::OpRewritePattern;
+// Workaround to allow static_assert(false) on older compilers as it was
+// ill-formed before defect report CWG2518
+// (https://cplusplus.github.io/CWG/issues/2518.html)
+template <typename T> struct always_false : std::false_type {};
 
-  ConvertTritonLoadToBufferLoad(mlir::MLIRContext *context,
-                                DenseSet<Value> &assumptions)
-      : mlir::OpRewritePattern<triton::LoadOp>(context),
-        assumptions(assumptions) {}
+template <typename SourceOp>
+struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
+  using OpRewritePattern<SourceOp>::OpRewritePattern;
+
+  ConvertTritonLoadToBufferLoad(
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
+      std::shared_ptr<DataFlowSolver> solver)
+      : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
+        solver(std::move(solver)) {}
 
   mlir::LogicalResult
-  matchAndRewrite(triton::LoadOp op, PatternRewriter &rewriter) const override {
+  matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
     LDBG("Try to convert: " << op);
-    Value ptr = op.getPtr();
+    Value ptr = op.getOperand(0);
 
-    if (canUseBufferOps(ptr, assumptions)) {
+    if (canUseBufferOps(ptr, assumptions, solver)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
       Value tensorPtr = addPtrOp.getPtr();
       Value tensorOffset = addPtrOp.getOffset();
@@ -710,18 +528,26 @@ struct ConvertTritonLoadToBufferLoad
       if (op.getMask() && !isZeroConst(op.getMask()))
         maybeMask = op.getMask();
       Value blockStride = getBlockStride(op->getLoc(), tensorOffset, rewriter);
-      auto bufferLoadOp = rewriter.create<triton::amdgpu::BufferLoadOp>(
-          op->getLoc(), op.getType(), basePtr, tensorOffset, blockStride,
-          op.getCache(), maybeMask, maybeOther);
 
-      // Propagate `OpIdxAttr` if the currently processed `tt.LoadOp` was
-      // labeled it. The attribute needs to be preserved for custom instruction
-      // scheduling.
-      if (auto opIdxAttr = op->getAttrOfType<triton::amdgpu::OpIdxAttr>(
-              triton::amdgpu::OpIdxAttr::getMnemonic())) {
-        bufferLoadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(),
-                              opIdxAttr);
-      }
+      auto bufferLoadOp = [&]() {
+        if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
+          return rewriter.create<triton::amdgpu::BufferLoadOp>(
+              op->getLoc(), op.getType(), basePtr, tensorOffset, blockStride,
+              op.getCache(), maybeMask, maybeOther);
+        } else if constexpr (std::is_same_v<
+                                 SourceOp,
+                                 triton::gpu::AsyncCopyGlobalToLocalOp>) {
+          return rewriter.create<triton::amdgpu::BufferLoadToLocalOp>(
+              op->getLoc(), op.getType(), op.getResult(), basePtr, tensorOffset,
+              maybeMask, maybeOther, blockStride, op.getCache());
+        } else {
+          static_assert(always_false<SourceOp>::value,
+                        "Unsupported type in ConvertTritonLoadToBufferLoad");
+        }
+      }();
+
+      assert(bufferLoadOp);
+
       rewriter.replaceOp(op, bufferLoadOp);
       return success();
     }
@@ -732,17 +558,20 @@ struct ConvertTritonLoadToBufferLoad
 
 private:
   // Assumptions collected through the function
-  DenseSet<Value> assumptions;
+  DenseMap<Value, SetVector<Operation *>> assumptions;
+  std::shared_ptr<DataFlowSolver> solver;
 };
 
 struct ConvertTritonStoreToBufferStore
     : public mlir::OpRewritePattern<triton::StoreOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  ConvertTritonStoreToBufferStore(mlir::MLIRContext *context,
-                                  DenseSet<Value> &assumptions)
+  ConvertTritonStoreToBufferStore(
+      mlir::MLIRContext *context,
+      DenseMap<Value, SetVector<Operation *>> &assumptions,
+      std::shared_ptr<DataFlowSolver> solver)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
-        assumptions(assumptions) {}
+        assumptions(assumptions), solver(std::move(solver)) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::StoreOp op,
@@ -750,7 +579,7 @@ struct ConvertTritonStoreToBufferStore
     LDBG("Try to convert: " << op);
     Value ptr = op.getPtr();
 
-    if (canUseBufferOps(ptr, assumptions)) {
+    if (canUseBufferOps(ptr, assumptions, solver)) {
       auto addPtrOp = ptr.getDefiningOp<triton::AddPtrOp>();
       Value tensorPtr = addPtrOp.getPtr();
       Value tensorOffset = addPtrOp.getOffset();
@@ -771,59 +600,51 @@ struct ConvertTritonStoreToBufferStore
 
 private:
   // Assumptions collected through the function
-  DenseSet<Value> assumptions;
+  DenseMap<Value, SetVector<Operation *>> assumptions;
+  std::shared_ptr<DataFlowSolver> solver;
 };
 
-class TritonAMDGPUConvertToBufferOpsPass
-    : public TritonAMDGPUConvertToBufferOpsBase<
-          TritonAMDGPUConvertToBufferOpsPass> {
+} // anonymous namespace
 
-public:
-  TritonAMDGPUConvertToBufferOpsPass() = default;
-  TritonAMDGPUConvertToBufferOpsPass(StringRef archGen) {
-    this->archGenerationName = archGen.data();
-  };
+struct TritonAMDGPUConvertToBufferOpsPass
+    : impl::TritonAMDGPUConvertToBufferOpsBase<
+          TritonAMDGPUConvertToBufferOpsPass> {
+  using Base::Base;
+
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
     ModuleOp mod = getOperation();
 
     // Collect assumptions in the function
-    DenseSet<Value> assumptions;
-    mod.walk([&](LLVM::AssumeOp op) {
-      if (op->getOperand(0).getDefiningOp<arith::CmpIOp>())
-        assumptions.insert(op->getOperand(0));
-    });
-    LLVM_DEBUG({
-      DBGS() << "Number of assumptions found: " << assumptions.size() << "\n";
-      for (Value assume : assumptions) {
-        DBGS() << "Assumption:" << assume << "\n";
-      }
-    });
-
+    DenseMap<Value, SetVector<Operation *>> assumptions =
+        AMD::TritonIntegerRangeAnalysis::collectAssumptions(getOperation());
     std::shared_ptr<DataFlowSolver> solver = createDataFlowSolver();
-    solver->load<TritonIntegerRangeAnalysis>();
+    AMD::TritonIntegerRangeAnalysis *rangeAnalysis =
+        solver->load<AMD::TritonIntegerRangeAnalysis>(assumptions);
+    AMD::initializeFuncOps(mod, rangeAnalysis);
     if (failed(solver->initializeAndRun(getOperation())))
       return signalPassFailure();
-    collectRanges(solver, mod);
 
-    ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
-    patterns.add<ConvertTritonLoadToBufferLoad>(context, assumptions);
-    patterns.add<ConvertTritonStoreToBufferStore>(context, assumptions);
+    AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
+    patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
+                 ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>,
+                 ConvertTritonStoreToBufferStore>(context, assumptions, solver);
 
-    // Gate buffer atomics behind CDNA3 (i.e., MI300 series) for now
+    // Gate buffer atomics behind CDNA3 for now
     // GFX942-specific assumptions regarding cache coherence are made when
     // lowering to LLVM
-    if (ISAFamily::CDNA3 == triton::AMD::deduceISAFamily(archGenerationName))
+    triton::AMD::ISAFamily isaFamily =
+        triton::AMD::deduceISAFamily(archGenerationName);
+    if (this->allowBufferAtomics && ISAFamily::CDNA3 == isaFamily)
       patterns.add<ConvertTritonAtomicRMWOpToBufferAtomicRMW>(
-          context, assumptions, axisInfoAnalysis);
+          context, assumptions, axisInfoAnalysis, solver, isaFamily);
+    patterns.add<ConvertTritonAtomicCASOpToBufferAtomicCAS>(
+        context, assumptions, axisInfoAnalysis, solver);
 
     if (applyPatternsGreedily(mod, std::move(patterns)).failed())
       signalPassFailure();
   }
 };
 
-std::unique_ptr<Pass>
-mlir::createTritonAMDGPUConvertToBufferOpsPass(std::string archGen) {
-  return std::make_unique<TritonAMDGPUConvertToBufferOpsPass>(archGen);
-}
+} // namespace mlir

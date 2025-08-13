@@ -1,13 +1,8 @@
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
-
-namespace mlir {
-FailureOr<LLVM::LLVMFuncOp>
-convertFuncOpToLLVMFuncOp(FunctionOpInterface funcOp,
-                          ConversionPatternRewriter &rewriter,
-                          const LLVMTypeConverter &converter);
-}
 
 namespace {
 
@@ -15,11 +10,13 @@ using namespace mlir;
 using namespace mlir::triton;
 
 // NOTE: [Additional Function Arguments]
+// Triton patches additional arguments to the function signature to support
+// (1) shared memory, (2) global scratch memory, and (3) profile scratch memory.
 // To support use of shared memory and global scratch memory inside of a
 // function, the caller allocates a single large block of the relevant memory
 // and calls the function with these extra arguments at the end.
-// Specifically, the last argument is the global scratch memory allocation and
-// the second to last is the shared memory allocation.
+// Profile scratch memory is only used when the function is instrumented for
+// profiling.
 //
 // For the kernel function itself, the shared memory base is a global symbol
 // so no additional function argument is required but global scratch memory
@@ -27,9 +24,6 @@ using namespace mlir::triton;
 // memory is shared between all programs, so a linear offset based on the
 // program id is required to get the local scratch base.
 
-/// FuncOp legalization pattern that converts MemRef arguments to pointers to
-/// MemRef descriptors (LLVM struct data types) containing all the MemRef type
-/// information.
 struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
   FuncOpConversion(LLVMTypeConverter &converter,
                    const TargetInfoBase &targetInfo, PatternBenefit benefit)
@@ -61,15 +55,25 @@ struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
     auto sharedPtrTy =
         LLVM::LLVMPointerType::get(ctx, targetInfo.getSharedAddressSpace());
     auto globalPtrTy = LLVM::LLVMPointerType::get(ctx, 1);
+    auto profilePtrTy = LLVM::LLVMPointerType::get(ctx, 1);
 
     // 1. Modify the function type to add the new arguments.
     auto funcTy = funcOp.getFunctionType();
     auto amendedInputTy = llvm::to_vector<4>(funcTy.getInputs());
-    bool isKernel = LLVM::isKernel(funcOp);
+    bool isKernel = triton::isKernel(funcOp);
+    if (isKernel) {
+      for (auto i : llvm::seq(amendedInputTy.size())) {
+        if (isa<TensorDescType>(amendedInputTy[i])) {
+          funcOp.setArgAttr(i, "tt.nv_tma_desc",
+                            mlir::IntegerAttr::get(i32_ty, 1));
+        }
+      }
+    }
     if (!isKernel) {
       amendedInputTy.push_back(sharedPtrTy);
     }
     amendedInputTy.push_back(globalPtrTy);
+    amendedInputTy.push_back(profilePtrTy);
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
     // 2. Modify the argument attributes to add the new argument.
@@ -94,6 +98,7 @@ struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
       region.addArgument(sharedPtrTy, loc);
     }
     region.addArgument(globalPtrTy, loc);
+    region.addArgument(profilePtrTy, loc);
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());
     return amendedFuncOp;
@@ -102,7 +107,7 @@ struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
   // Map the MLIR attribute `tt.nv_tma_desc` to the appropriate LLVM and NVVM
   // attributes.
   static void handleByvalTmaDescArgs(LLVM::LLVMFuncOp &llvmFuncOp) {
-    const bool isKernel = LLVM::isKernel(llvmFuncOp);
+    const bool isKernel = triton::isKernel(llvmFuncOp);
     for (unsigned i = 0; i < llvmFuncOp.getNumArguments(); ++i) {
       const auto attrs = llvmFuncOp.getArgAttrDict(i);
       if (!attrs) {
@@ -124,11 +129,11 @@ struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
               mlir::IntegerType::get(llvmFuncOp.getContext(), 8);
           const auto arrayType = mlir::LLVM::LLVMArrayType::get(
               llvmFuncOp.getContext(), byteType, 128);
-          llvmFuncOp.setArgAttr(i, "llvm.byval",
+          llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getByValAttrName(),
                                 mlir::TypeAttr::get(arrayType));
-          llvmFuncOp.setArgAttr(i, "nvvm.grid_constant",
+          llvmFuncOp.setArgAttr(i, NVVM::NVVMDialect::getGridConstantAttrName(),
                                 mlir::UnitAttr::get(llvmFuncOp.getContext()));
-          llvmFuncOp.setArgAttr(i, "llvm.align",
+          llvmFuncOp.setArgAttr(i, LLVM::LLVMDialect::getAlignAttrName(),
                                 mlir::IntegerAttr::get(i32_type, 64));
         }
       }
@@ -152,9 +157,9 @@ struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
 
     auto ctx = funcOp->getContext();
 
-    if (LLVM::isKernel(funcOp)) {
+    if (triton::isKernel(funcOp)) {
       // Set an attribute to indicate this function is a kernel entry.
-      newFuncOp->setAttr("nvvm.kernel",
+      newFuncOp->setAttr(NVVM::NVVMDialect::getKernelFuncAttrName(),
                          rewriter.getIntegerAttr(type::u1Ty(ctx), 1));
       newFuncOp.setLinkage(LLVM::Linkage::External);
     } else {
@@ -165,10 +170,21 @@ struct FuncOpConversion : public ConvertOpToLLVMPattern<triton::FuncOp> {
           ArrayAttr::get(ctx, rewriter.getStringAttr("noinline")));
       newFuncOp.setLinkage(LLVM::Linkage::Internal);
     }
+
+    // Determine the actual number of required warps.
+    int numWarps = triton::gpu::lookupNumWarps(funcOp);
+    if (auto totalNumWarps = funcOp.getParentOp()->getAttrOfType<IntegerAttr>(
+            "ttg.total-num-warps"))
+      numWarps = totalNumWarps.getInt();
+
+    // Set `nvvm.maxnreg` if it was specified on the module.
+    if (Attribute maxnregAttr =
+            funcOp.getParentOp()->getAttr(triton::gpu::AttrMaxRegistersName))
+      newFuncOp->setAttr(NVVM::NVVMDialect::getMaxnregAttrName(), maxnregAttr);
+
     // Set an attribute for reqntidx, it could be used in latter LLVM codegen
     // for `nvvm.annotation` metadata.
-    int numWarps = triton::gpu::lookupNumWarps(funcOp);
-    newFuncOp->setAttr("nvvm.reqntid",
+    newFuncOp->setAttr(NVVM::NVVMDialect::getReqntidAttrName(),
                        rewriter.getDenseI32ArrayAttr(32 * numWarps));
 
     rewriter.eraseOp(funcOp);

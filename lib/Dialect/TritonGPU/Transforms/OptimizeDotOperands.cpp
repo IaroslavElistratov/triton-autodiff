@@ -1,4 +1,3 @@
-#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
@@ -8,9 +7,12 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LayoutUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "triton/Tools/LayoutUtils.h"
+#include "triton/Tools/LinearLayout.h"
 #include <memory>
 
 namespace mlir::triton::gpu {
@@ -46,21 +48,20 @@ public:
     if (!cvtEncoding)
       return failure();
 
-    // TODO(Qingyi): need to check whether the CTALayout of innerCvtEnc should
-    // be used here. For tests where numCTAs = 1, this is not a problem since
-    // all CTALayouts are the same.
-    //
     // Set needTrans to true here. newInnerCvtEnc is computed based on
     // argEncoding which is before the transpose. Without needTrans we will
     // compute vec and maxPhase based on incorrect m, n and k size of mma. The
     // type inference of MemDescTransOp simply swap the order but doesn't fix
     // the vec and maxPhase for the YType, hence it would causing incorrect
     // swizzling code.
-    auto newInnerCvtEnc = SwizzledSharedEncodingAttr::get(
-        getContext(), cvtEncoding, srcTy.getShape(),
-        /*order=*/getOrder(srcTy.getEncoding()),
-        triton::gpu::getCTALayout(srcTy.getEncoding()), srcTy.getElementType(),
-        /*needTrans=*/true);
+    auto ctx = getContext();
+    auto oldCTALayout = triton::gpu::getCTALayout(srcTy.getEncoding());
+    auto newCTALayout = permuteCTALayout(ctx, oldCTALayout, trans.getOrder());
+    auto newInnerCvtEnc =
+        SwizzledSharedEncodingAttr::get(ctx, cvtEncoding, srcTy.getShape(),
+                                        /*order=*/getOrderForMemory(srcTy),
+                                        newCTALayout, srcTy.getElementType(),
+                                        /*needTrans=*/true);
     if (newInnerCvtEnc == cvtEncoding)
       return failure();
     rewriter.setInsertionPoint(trans);
@@ -72,7 +73,11 @@ public:
         trans.getSrc());
     auto newTrans = rewriter.create<MemDescTransOp>(trans.getLoc(), alloc,
                                                     ArrayRef<int32_t>({1, 0}));
-    rewriter.replaceOpWithNewOp<LocalLoadOp>(trans, sharedLoadTy, newTrans);
+    auto localLoadOp =
+        rewriter.create<LocalLoadOp>(trans.getLoc(), sharedLoadTy, newTrans);
+    rewriter.modifyOpInPlace(cvtOp, [&]() {
+      cvtOp.getSrcMutable().assign(localLoadOp.getResult());
+    });
     return success();
   }
 };
@@ -107,9 +112,9 @@ public:
 
     // MMAv3 with transpose only supports f16 and bf16.  Fall back to MMAv3
     // without transpose for other data types.)
-    auto newInnerCvtOrder = getOrder(srcTy.getEncoding());
+    auto newInnerCvtOrder = getOrderForMemory(srcTy);
     if (auto cvt = trans.getSrc().getDefiningOp<ConvertLayoutOp>()) {
-      newInnerCvtOrder = getOrder(cvt.getSrc().getType().getEncoding());
+      newInnerCvtOrder = getOrderForMemory(cvt.getSrc().getType());
     }
     auto srcElemTy = allocType.getElementType();
     if (!srcElemTy.isF16() && !srcElemTy.isBF16()) {
@@ -120,13 +125,12 @@ public:
       }
     }
 
-    // TODO(Qingyi): need to check whether the CTALayout of innerCvtEnc should
-    // be used here. For tests where numCTAs = 1, this is not a problem since
-    // all CTALayouts are the same.
+    auto ctx = getContext();
+    auto newCTALayout =
+        permuteCTALayout(ctx, allocEncoding.getCTALayout(), {1, 0});
     auto newInnerEnc = NVMMASharedEncodingAttr::get(
-        getContext(), srcTy.getShape(), newInnerCvtOrder,
-        allocEncoding.getCTALayout(), srcTy.getElementType(),
-        allocEncoding.getFp4Padded());
+        getContext(), srcTy.getShape(), newInnerCvtOrder, newCTALayout,
+        srcTy.getElementType(), allocEncoding.getFp4Padded());
 
     MemDescType innerTy =
         MemDescType::get(srcTy.getShape(), srcTy.getElementType(), newInnerEnc,
@@ -139,22 +143,83 @@ public:
   }
 };
 
+// Rewrite
+//
+//   alloc(reshape(), #shared1) ->
+//   memdesc_reshape(alloc() #shared2))
+//
+// if dot is an MMAv3/v5 (because MMAv3/v5 allows us to fold transposes).
+class ReshapeMemDesc : public OpRewritePattern<LocalAllocOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(LocalAllocOp allocOp,
+                                PatternRewriter &rewriter) const override {
+    if (!allocOp.getSrc())
+      return failure();
+
+    auto reshapeOp = allocOp.getSrc().getDefiningOp<ReshapeOp>();
+    if (!reshapeOp)
+      return failure();
+
+    MemDescType allocType = allocOp.getType();
+    auto allocEncoding = allocType.getEncoding();
+
+    RankedTensorType srcTy = reshapeOp.getSrc().getType();
+    auto srcShape = srcTy.getShape();
+    auto dstShape = allocType.getShape();
+
+    // We use the fact that forward and backward inference are the same for
+    // MemDescReshapeOp to infer the source MemDescType that would produce
+    // `allocType` after a reshape.
+    MemDescType innerTy;
+    if (failed(MemDescReshapeOp::inferReturnTypes(
+            getContext(), allocOp.getLoc(), allocType, srcShape, innerTy)))
+      return failure();
+
+    auto newAlloc = rewriter.create<LocalAllocOp>(allocOp.getLoc(), innerTy,
+                                                  reshapeOp.getSrc());
+    rewriter.replaceOpWithNewOp<MemDescReshapeOp>(allocOp, allocOp.getType(),
+                                                  newAlloc);
+    return success();
+  }
+};
+
 // Inject TMEM copy instructions into IR to efficiently load blocked scales for
 // scaled dot
-class InjectTMemCopy
-    : public OpRewritePattern<triton::nvidia_gpu::TMEMAllocOp> {
+class UseShmemForScales
+    : public OpRewritePattern<triton::nvidia_gpu::TCGen5MMAScaledOp> {
 public:
-  using OpRewritePattern<triton::nvidia_gpu::TMEMAllocOp>::OpRewritePattern;
+  using OpRewritePattern<
+      triton::nvidia_gpu::TCGen5MMAScaledOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(triton::nvidia_gpu::TMEMAllocOp tmemAlloc,
+  LogicalResult matchAndRewrite(triton::nvidia_gpu::TCGen5MMAScaledOp mmaOp,
                                 PatternRewriter &rewriter) const override {
-    auto dstType = tmemAlloc.getResult().getType();
+    auto aScale = mmaOp.getAScale();
+    auto bScale = mmaOp.getBScale();
+    LogicalResult ret = failure();
+    if (aScale && isa<triton::nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+                      aScale.getType().getEncoding())) {
+      if (rewriteOperand(mmaOp.getAScaleMutable(), rewriter).succeeded())
+        ret = success();
+    }
+    if (bScale && isa<triton::nvidia_gpu::TensorMemoryScalesEncodingAttr>(
+                      bScale.getType().getEncoding())) {
+      if (rewriteOperand(mmaOp.getBScaleMutable(), rewriter).succeeded())
+        ret = success();
+    }
+    return ret;
+  }
 
-    // Only applies to TMEMAlloc with scales encoding
-    if (!isa<triton::nvidia_gpu::TensorMemoryScalesEncodingAttr>(
-            dstType.getEncoding())) {
+private:
+  LogicalResult rewriteOperand(OpOperand &opOperand,
+                               PatternRewriter &rewriter) const {
+    auto src = cast<TypedValue<MemDescType>>(opOperand.get());
+    auto tmemAlloc = src.getDefiningOp<triton::nvidia_gpu::TMEMAllocOp>();
+    if (!tmemAlloc) {
       return failure();
     }
+    auto dstType = tmemAlloc.getResult().getType();
 
     if (!tmemAlloc.getSrc()) {
       return failure();
@@ -162,11 +227,13 @@ public:
 
     // Look for a sequence
     //    local_load
-    // -> reshape(..., (BLOCK_MN / 128, BLOCK_K / scale_vec_size / 4, 32, 4, 4)
+    // -> reshape(..., (BLOCK_MN / 128, BLOCK_K / scale_vec_size / 4, 32, 4,
+    // 4)
     // -> transpose(..., (0, 3, 2, 1, 4))
     // -> reshape(..., (BLOCK_MN, BLOCK_K / scale_vec_size)
     // -> tmem_alloc
-    // and replace it with tmem_alloc -> tmem_copy
+    // -> tc_gen_mma_scaled
+    // and replace it with local_alloc -> tc_gen_mma_scaled
     auto scale2DShape = dstType.getShape();
     auto blockMN = scale2DShape[0];
     auto numScales = scale2DShape[1];
@@ -192,27 +259,20 @@ public:
     }
 
     auto localLoad = getNextOp<triton::gpu::LocalLoadOp>(reshapeOp5D.getSrc());
-    if (!localLoad || !isTmemCopyCompatible(localLoad.getSrc().getType())) {
+    if (!localLoad) {
       return failure();
     }
-    MemDescType newType = MemDescType::get(
-        dstType.getShape(), dstType.getElementType(), dstType.getEncoding(),
-        dstType.getMemorySpace(), /*mutableMemory=*/true);
-    Value newTmemAlloc = rewriter.create<triton::nvidia_gpu::TMEMAllocOp>(
-        tmemAlloc.getLoc(), newType, Value());
+    auto localAlloc = getNextOp<LocalAllocOp>(localLoad.getSrc());
+    bool usesTMAload =
+        (localAlloc && localAlloc.getSrc() &&
+         (getNextOp<DescriptorLoadOp>(localAlloc.getSrc()) != nullptr));
+    if (!isTmemCopyCompatible(localLoad.getSrc().getType(), usesTMAload))
+      return failure();
 
-    // Since tcgen05.cp followed by tcgen05.mma is guaranteed to execute in that
-    // order, we do not need to wait for the completion of the copy before MMA.
-    rewriter.create<triton::nvidia_gpu::TMEMCopyOp>(
-        newTmemAlloc.getLoc(), localLoad.getSrc(), newTmemAlloc,
-        Value() /* barrier */);
-
-    rewriter.replaceOp(tmemAlloc, newTmemAlloc);
-
+    opOperand.assign(localLoad.getSrc());
     return success();
   }
 
-private:
   template <typename Op> Op getNextOp(Value op) const {
     while (auto cvtOp = op.getDefiningOp<ConvertLayoutOp>()) {
       op = cvtOp.getSrc();
@@ -220,35 +280,19 @@ private:
     return op.getDefiningOp<Op>();
   }
 
-  bool isDescendingOrder(triton::gpu::MemDescType scale) const {
-    auto order = triton::gpu::getOrder(scale.getEncoding());
-    auto rank = scale.getRank();
-    for (int i = 0; i < rank; ++i) {
-      if (order[i] != rank - 1 - i)
-        return false;
-    }
-    return true;
-  }
-
-  bool isTmemCopyCompatible(triton::gpu::MemDescType scaleType) const {
+  bool isTmemCopyCompatible(triton::gpu::MemDescType scaleType,
+                            bool usesTMAload) const {
     // TMEM copy expects that blocked scale "chunks" in SMEM are stored in
     // innermost axes contiguously.
-    if (!isDescendingOrder(scaleType))
+    if (!isInnermostContiguous(scaleType, 512))
       return false;
 
-    auto sharedEnc =
-        cast<triton::gpu::SwizzledSharedEncodingAttr>(scaleType.getEncoding());
-    if (sharedEnc.getMaxPhase() != 1 || sharedEnc.getPerPhase() != 1 ||
-        sharedEnc.getVec() != 1) {
-      // For now, we do not expect swizzling to be applied to the scale SMEM.
-      // This is currently true for non-matmul operand SMEM allocated during
-      // pipelining.
-      return false;
+    if (usesTMAload) {
+      return true;
     }
 
     if (scaleType.getRank() != 2) {
       // TODO: Add support for higher rank when 5D coalesced load is fixed
-      // or 4D TMA is supported.
       return false;
     }
 
@@ -277,14 +321,15 @@ public:
     MLIRContext *context = &getContext();
     ModuleOp m = getOperation();
 
-    mlir::PassManager pm(m.getContext());
+    OpPassManager pm;
     pm.addPass(mlir::createCanonicalizerPass());
-    auto ret = pm.run(m);
+    if (failed(runPipeline(pm, m)))
+      return signalPassFailure();
 
     mlir::RewritePatternSet patterns(context);
     patterns.add<SwizzleShmemConvert>(context);
-    patterns.add<FuseTransMMAV3Plus>(context);
-    patterns.add<InjectTMemCopy>(context);
+    patterns.add<FuseTransMMAV3Plus, ReshapeMemDesc>(context);
+    patterns.add<UseShmemForScales>(context);
     ConvertLayoutOp::getCanonicalizationPatterns(patterns, context);
     if (failed(applyPatternsGreedily(m, std::move(patterns))))
       signalPassFailure();

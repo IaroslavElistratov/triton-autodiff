@@ -20,15 +20,19 @@
  * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
+#include "Analysis/AMDGPUAllocation.h"
 #include "OptimizeLDSUtility.h"
 #include "TargetInfo.h"
 #include "TritonAMDGPUToLLVM/Passes.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Pass/Pass.h"
 #include "triton/Analysis/Allocation.h"
-#include "triton/Conversion/TritonGPUToLLVM/Patterns.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+
+#define DEBUG_TYPE "optimize-amd-lds-usage"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
 using namespace mlir;
 
@@ -63,7 +67,7 @@ class OptimizeAMDLDSUsage
   // minimal mfma tile is: [1*32, 4*32] = [32, 128]
   // minimal blocked tile is: [1*32*4, 4*2*1] = [128, 8]
   //
-  // Roughtly scratch buffer shape for conversion is:
+  // Roughly scratch buffer shape for conversion is:
   // [max(32, 128), max(128, 16)] = [128, 128].
   //
   // This shape could be reduces by introducing intermediate
@@ -87,19 +91,33 @@ class OptimizeAMDLDSUsage
   // times do not intersect, therefore this transformation lowers LDS
   // consumption.
   void tryFitCvtIntoLDS(triton::gpu::ConvertLayoutOp cvtOp, int targetLDSSize) {
+    LDBG("Trying fit " << cvtOp << " into " << targetLDSSize << " bytes");
     OpBuilder builder(cvtOp);
 
+    auto ctx = builder.getContext();
     auto srcType = cvtOp.getSrc().getType();
     auto dstType = cvtOp.getType();
 
-    auto srcEnc = srcType.getEncoding();
-    auto dstEnc = dstType.getEncoding();
+    if (!cvtOp->hasAttr(triton::AMD::AttrSharedMemPadded)) {
+      auto emptyAttribute = UnitAttr::get(ctx);
+      // Padded conversion seems more friendly with this optimization
+      // use it instead of general swizzling.
+      cvtOp->setAttr(triton::AMD::AttrSharedMemPadded, emptyAttribute);
+      // if padded layout drops LDS usage on itself, we are done, return
+      if (triton::AMD::getConvertLayoutScratchInBytes(
+              srcType, dstType, /*usePadding*/ true) <= targetLDSSize)
+        return;
+    }
 
-    auto ctx = srcEnc.getContext();
+    auto srcEnc =
+        cast<triton::gpu::DistributedEncodingTrait>(srcType.getEncoding());
+    auto dstEnc =
+        cast<triton::gpu::DistributedEncodingTrait>(dstType.getEncoding());
+
     auto rank = srcType.getRank();
 
-    unsigned numWarps = triton::gpu::getNumWarpsPerCTA(srcEnc);
-    auto warpSize = triton::gpu::getWarpSize(srcEnc);
+    unsigned numWarps = triton::gpu::lookupNumWarps(cvtOp);
+    auto warpSize = triton::gpu::lookupThreadsPerWarp(builder);
 
     // Find all possible shapes of WarpsPerCTA by finding all possible
     // factorizations of numWarps. Pick shape for which both conversions in
@@ -121,7 +139,7 @@ class OptimizeAMDLDSUsage
     }
 
     auto layoutCTA = triton::gpu::getCTALayout(srcEnc);
-    auto order = triton::gpu::getOrder(srcEnc);
+    auto order = triton::gpu::getOrder(srcType);
     SmallVector<unsigned> dummyWarpsPerCTA(rank, 1);
 
     auto baseFallbackLayout = triton::gpu::BlockedEncodingAttr::get(
@@ -130,11 +148,15 @@ class OptimizeAMDLDSUsage
     SmallVector<Attribute> tmpLayouts;
     for (int i = 0; i < factorizedNumWarps.size(); i++) {
       auto warpsPerCTA = factorizedNumWarps[i];
-      tmpLayouts.push_back(
-          mlir::triton::AMD::createTmpLayout(srcEnc, warpsPerCTA));
-      tmpLayouts.push_back(
-          mlir::triton::AMD::createTmpLayout(dstEnc, warpsPerCTA));
-      tmpLayouts.push_back(
+
+      auto pushNotNull = [&](Attribute enc) {
+        if (enc)
+          tmpLayouts.push_back(enc);
+      };
+
+      pushNotNull(mlir::triton::AMD::createTmpLayout(srcEnc, warpsPerCTA));
+      pushNotNull(mlir::triton::AMD::createTmpLayout(dstEnc, warpsPerCTA));
+      pushNotNull(
           mlir::triton::AMD::createTmpLayout(baseFallbackLayout, warpsPerCTA));
     }
 
@@ -143,6 +165,8 @@ class OptimizeAMDLDSUsage
     for (int i = 0; i < tmpLayouts.size(); i++) {
       auto resources = mlir::triton::AMD::estimateResourcesForReplacement(
           builder, cvtOp, tmpLayouts[i]);
+      LDBG("layout " << tmpLayouts[i] << " requires " << resources.LDS
+                     << " bytes");
       // TODO analyze performance along with LDS consumption
       if (resources.LDS < minLDSUsage) {
         minLDSUsage = resources.LDS;
@@ -231,7 +255,8 @@ public:
       LDSLimit = targetInfo.getSharedMemorySize();
     }
 
-    ModuleAllocation allocAnalysis(mod);
+    ModuleAllocation allocAnalysis(
+        mod, mlir::triton::AMD::AMDAllocationAnalysisScratchSizeFn);
     if (allocAnalysis.getSharedMemorySize() <= LDSLimit)
       return;
 

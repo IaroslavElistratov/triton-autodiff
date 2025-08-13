@@ -1,6 +1,9 @@
 import json
 import triton.profiler as proton
 import pathlib
+from triton.profiler.hooks.hook import HookManager
+from triton.profiler.hooks.launch import LaunchHook
+from triton.profiler.hooks.instrumentation import InstrumentationHook
 
 
 def test_profile_single_session(tmp_path: pathlib.Path):
@@ -91,6 +94,10 @@ def test_scope(tmp_path: pathlib.Path):
 
     proton.enter_scope("test")
     proton.exit_scope()
+
+    proton.enter_scope("test0")
+    proton.exit_scope("test0")
+
     proton.finalize()
     assert temp_file.exists()
 
@@ -99,9 +106,45 @@ def test_hook(tmp_path: pathlib.Path):
     temp_file = tmp_path / "test_hook.hatchet"
     session_id0 = proton.start(str(temp_file.with_suffix("")), hook="triton")
     proton.activate(session_id0)
+    proton.activate(session_id0)
+    assert len(
+        HookManager.active_hooks) == 1, ("Activate a session multiple times should maintain a single instance of hook")
+    assert list(HookManager.session_hooks[session_id0].values())[0] is True
+    proton.deactivate(session_id0)
+    assert list(HookManager.session_hooks[session_id0].values())[0] is False
+    assert len(HookManager.active_hooks) == 0
+    # Deactivate a session multiple times should not raise an error
     proton.deactivate(session_id0)
     proton.finalize(None)
     assert temp_file.exists()
+
+
+def test_hook_manager(tmp_path: pathlib.Path):
+    # Launch hook is a singleton
+    HookManager.register(LaunchHook(), 0)
+    HookManager.register(LaunchHook(), 0)
+    assert len(HookManager.active_hooks) == 1
+    assert isinstance(HookManager.active_hooks[0], LaunchHook)
+    assert HookManager.session_hooks[0][HookManager.active_hooks[0]] is True
+
+    # Only unregister one session
+    HookManager.register(LaunchHook(), 1)
+    HookManager.unregister(0)
+    assert len(HookManager.active_hooks) == 1
+    HookManager.unregister(1)
+    assert len(HookManager.active_hooks) == 0
+
+    # Heterogenous hooks
+    HookManager.register(InstrumentationHook(""), 2)
+    HookManager.register(LaunchHook(), 2)
+    assert len(HookManager.active_hooks) == 2
+    # Launch hook has a higher priority
+    assert isinstance(HookManager.active_hooks[0], LaunchHook)
+    assert isinstance(HookManager.active_hooks[1], InstrumentationHook)
+    assert HookManager.session_hooks[2][HookManager.active_hooks[0]] is True
+    assert HookManager.session_hooks[2][HookManager.active_hooks[1]] is True
+    HookManager.unregister()
+    assert len(HookManager.active_hooks) == 0
 
 
 def test_scope_metrics(tmp_path: pathlib.Path):
@@ -228,6 +271,21 @@ def test_state(tmp_path: pathlib.Path):
     child = child["children"][0]
     assert child["frame"]["name"] == "state"
     assert child["metrics"]["a"] == 1.0
+
+
+def test_context_depth(tmp_path: pathlib.Path):
+    temp_file = tmp_path / "test_context_depth.hatchet"
+    session_id = proton.start(str(temp_file.with_suffix("")))
+    assert proton.context.depth(session_id) == 0
+    proton.enter_scope("test0")
+    assert proton.context.depth(session_id) == 1
+    proton.enter_scope("test1")
+    assert proton.context.depth(session_id) == 2
+    proton.exit_scope()
+    assert proton.context.depth(session_id) == 1
+    proton.exit_scope()
+    assert proton.context.depth(session_id) == 0
+    proton.finalize()
 
 
 def test_throw(tmp_path: pathlib.Path):

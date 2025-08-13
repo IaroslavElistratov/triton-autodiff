@@ -3,7 +3,6 @@
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
@@ -31,9 +30,16 @@ public:
 
   LogicalResult matchAndRewrite(DotScaledOp scaledDotOp,
                                 PatternRewriter &rewriter) const override {
+    if (isa_and_nonnull<MmaEncodingTrait>(
+            scaledDotOp.getResult().getType().getEncoding()))
+      return failure();
+
+    // TODO: add support for m/n packed formats.
+    if (!scaledDotOp.getLhsKPack() || !scaledDotOp.getRhsKPack())
+      return failure();
     // Types
-    auto computeType = getComputeType(scaledDotOp.getLhsType(),
-                                      scaledDotOp.getRhsType(), rewriter);
+    auto computeType = getComputeType(scaledDotOp.getAElemType(),
+                                      scaledDotOp.getBElemType(), rewriter);
     auto loc = scaledDotOp.getLoc();
 
     auto cvtDotOperand = [&](TypedValue<RankedTensorType> v,
@@ -43,8 +49,7 @@ public:
       auto vType = v.getType();
       auto encoding = DotOperandEncodingAttr::get(ctx, opIdx, retEnc,
                                                   vType.getElementType());
-      auto retTy = RankedTensorType::get(vType.getShape(),
-                                         vType.getElementType(), encoding);
+      auto retTy = vType.cloneWithEncoding(encoding);
       return rewriter.create<ConvertLayoutOp>(loc, retTy, v);
     };
 
@@ -122,8 +127,7 @@ private:
                                                   threadsPerWarp, numCTAs);
       // 2.1.2) Cast scale16 to SliceEncoding
       auto sliceEnc = SliceEncodingAttr::get(ctx, rank, blockedEnc);
-      auto sliceType = RankedTensorType::get(
-          scaleTy.getShape(), scaleTy.getElementType(), sliceEnc);
+      auto sliceType = scaleTy.cloneWithEncoding(sliceEnc);
       scale = rewriter.create<ConvertLayoutOp>(loc, sliceType, scale);
     }
     auto expandScale = rewriter.create<ExpandDimsOp>(loc, scale, rank);
@@ -167,8 +171,7 @@ private:
     auto cond = broadcastScale(rewriter, scaledDotOp, mod, scaleIsNan, dim);
     // Make scale is NaN compatible with mxfp
     auto condTy = cond.getType();
-    condTy = RankedTensorType::get(condTy.getShape(), condTy.getElementType(),
-                                   mxfp.getType().getEncoding());
+    condTy = condTy.cloneWithEncoding(mxfp.getType().getEncoding());
     cond = rewriter.create<ConvertLayoutOp>(loc, condTy, cond);
 
     // Create NaN
@@ -185,12 +188,11 @@ private:
   TypedValue<RankedTensorType> scaleArg(PatternRewriter &rewriter,
                                         DotScaledOp scaledDotOp, int opIdx,
                                         FloatType computeType) const {
-    auto v = opIdx == 0 ? scaledDotOp.getLhs() : scaledDotOp.getRhs();
-    auto scale =
-        opIdx == 0 ? scaledDotOp.getLhsScale() : scaledDotOp.getRhsScale();
+    auto v = opIdx == 0 ? scaledDotOp.getA() : scaledDotOp.getB();
+    auto scale = opIdx == 0 ? scaledDotOp.getAScale() : scaledDotOp.getBScale();
     auto isFp4 =
-        (opIdx == 0 ? scaledDotOp.getLhsType() : scaledDotOp.getRhsType()) ==
-        ScaleDotElemType::E2M1;
+        ScaleDotElemType::E2M1 ==
+        (opIdx == 0 ? scaledDotOp.getAElemType() : scaledDotOp.getBElemType());
     auto fastMath = scaledDotOp.getFastMath();
 
     auto *ctx = rewriter.getContext();

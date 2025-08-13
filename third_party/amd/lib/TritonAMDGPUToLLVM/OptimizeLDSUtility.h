@@ -5,10 +5,6 @@
 
 namespace mlir::triton::AMD {
 
-int getCvtOpLDSUsage(RankedTensorType srcTy, RankedTensorType dstTy);
-
-int getCvtOpLDSUsage(triton::gpu::ConvertLayoutOp op);
-
 std::vector<SmallVector<unsigned>> factorizePowerOf2(int n, int rank);
 
 /// Copy given layout with different warpsPerCTA parameter
@@ -16,7 +12,9 @@ std::vector<SmallVector<unsigned>> factorizePowerOf2(int n, int rank);
 /// \param layout original layout
 /// \param warpsPerCTA new warpsPerCTA
 /// \returns create layout
-Attribute createTmpLayout(Attribute layout, ArrayRef<unsigned> warpsPerCTA);
+triton::gpu::DistributedEncodingTrait
+createTmpLayout(triton::gpu::DistributedEncodingTrait layout,
+                ArrayRef<unsigned> warpsPerCTA);
 
 /// Creates two chained convert layout operations
 ///

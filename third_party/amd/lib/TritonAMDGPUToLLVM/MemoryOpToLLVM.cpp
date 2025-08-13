@@ -1,126 +1,42 @@
+#include "AsyncUtility.h"
+#include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
-#include "Utility.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
-using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::MemDescType;
 
-namespace SharedToDotOperandMFMA {
-Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
-                    Location loc, Value tensor,
-                    DotOperandEncodingAttr bEncoding,
-                    const SharedMemoryObject &smemObj,
-                    const LLVMTypeConverter *typeConverter, Value thread);
-} // namespace SharedToDotOperandMFMA
-
-namespace SharedToDotOperandWMMA {
-Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
-                    Location loc, Value tensor,
-                    DotOperandEncodingAttr bEncoding,
-                    const SharedMemoryObject &smemObj,
-                    const LLVMTypeConverter *typeConverter, Value thread);
-} // namespace SharedToDotOperandWMMA
-
 namespace {
-struct LocalLoadOpConversion
-    : public ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp> {
-public:
-  using ConvertOpToLLVMPattern<
-      triton::gpu::LocalLoadOp>::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    MemDescType srcTy = op.getSrc().getType();
-    RankedTensorType dstTy = op.getType();
-    Attribute srcLayout = srcTy.getEncoding();
-    Attribute dstLayout = dstTy.getEncoding();
-    if (isa<DotOperandEncodingAttr>(dstLayout) &&
-        isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(
-            cast<DotOperandEncodingAttr>(dstLayout).getParent())) {
-      return lowerSharedToDotOperand(op, adaptor, getTypeConverter(), rewriter);
-    }
-    return failure();
-  }
-
-private:
-  /// Lower ttg.local_load in dot operand layout if the operand parent layout is
-  /// MFMA or WMMA.
-  ///
-  /// \returns value with packed loaded values or empty value if this local_load
-  /// is not supproted.
-  Value lowerSharedToDotOperandMMA(
-      triton::gpu::LocalLoadOp op, triton::gpu::LocalLoadOpAdaptor adaptor,
-      const LLVMTypeConverter *typeConverter,
-      ConversionPatternRewriter &rewriter,
-      const DotOperandEncodingAttr &dotOperandLayout) const {
-    auto loc = op.getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    Value src = op.getSrc();
-    Value dst = op.getResult();
-    auto llvmElemTy = typeConverter->convertType(
-        cast<MemDescType>(src.getType()).getElementType());
-
-    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
-                                                         llvmElemTy, rewriter);
-    Value res;
-    auto dopOpParent = dotOperandLayout.getParent();
-    if (isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(dopOpParent)) {
-      auto sharedToDotConvert = isa<AMDMfmaEncodingAttr>(dopOpParent)
-                                    ? SharedToDotOperandMFMA::convertLayout
-                                    : SharedToDotOperandWMMA::convertLayout;
-      res = sharedToDotConvert(dotOperandLayout.getOpIdx(), rewriter, loc, src,
-                               dotOperandLayout, smemObj, typeConverter,
-                               getThreadId(rewriter, loc));
-    } else {
-      assert(false && "unsupported layout found");
-    }
-    return res;
-  }
-
-  // shared -> matrix_core_dot_operand
-  LogicalResult
-  lowerSharedToDotOperand(triton::gpu::LocalLoadOp op,
-                          triton::gpu::LocalLoadOpAdaptor adaptor,
-                          const LLVMTypeConverter *typeConverter,
-                          ConversionPatternRewriter &rewriter) const {
-    Value dst = op.getResult();
-    auto dstTensorTy = cast<RankedTensorType>(dst.getType());
-    auto dotOperandLayout =
-        cast<DotOperandEncodingAttr>(dstTensorTy.getEncoding());
-
-    Value res = lowerSharedToDotOperandMMA(op, adaptor, typeConverter, rewriter,
-                                           dotOperandLayout);
-    if (!res)
-      return failure();
-    rewriter.replaceOp(op, res);
-    return success();
-  }
-};
-
-struct TransLocalLoadOpConversion
-    : public ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp> {
+template <typename LocalLoadOpType>
+class TransLocalLoadOpConversion
+    : public ConvertOpToLLVMPattern<LocalLoadOpType> {
 public:
   TransLocalLoadOpConversion(const LLVMTypeConverter &converter,
                              const AMD::TargetInfo &targetInfo,
                              PatternBenefit benefit = 2)
-      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
+      : ConvertOpToLLVMPattern<LocalLoadOpType>(converter, benefit),
+        targetInfo(targetInfo) {}
+  using OpAdaptor = typename LocalLoadOpType::Adaptor;
+
+  static constexpr bool isPackedLoad =
+      std::is_same_v<triton::amdgpu::LocalLoadPackedTransposedOp,
+                     LocalLoadOpType>;
 
   LogicalResult
-  matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
+  matchAndRewrite(LocalLoadOpType op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     MemDescType srcTy = op.getSrc().getType();
     RankedTensorType dstTy = op.getType();
     Attribute srcLayout = srcTy.getEncoding();
     Attribute dstLayout = dstTy.getEncoding();
 
-    if (canUseTransLoad(srcTy, dstTy)) {
-      return lowerSharedToDotOperandTransLL(op, adaptor, getTypeConverter(),
-                                            rewriter);
+    if (isPackedLoad || canUseTransLoad(op, srcTy, dstTy)) {
+      return lowerSharedToDotOperandTransLL(op, adaptor,
+                                            this->getTypeConverter(), rewriter);
     }
     return failure();
   }
@@ -140,6 +56,11 @@ private:
       return false;
     }
 
+    auto tilesPerWarp = mfmaEnc.getTilesPerWarp();
+    if (!mfmaEnc.hasUnitTilesPerWarp()) {
+      return false;
+    }
+
     auto sharedEnc =
         dyn_cast<triton::gpu::SwizzledSharedEncodingAttr>(srcTy.getEncoding());
     if (!sharedEnc)
@@ -150,42 +71,75 @@ private:
     return kDim != sharedEnc.getOrder()[0];
   }
 
-  bool checkPerformanceProperties(MemDescType srcTy,
-                                  RankedTensorType dstTy) const {
-    // The transposed load lowering logic assumes that double-rate MFMA (
-    // mfma32x32x16 and mfma16x16x32) instructions are used whenever possible.
-    // This code verifies whether double-rate MFMA instructions are being used
-    // and falls back to the default path if they are not. (Note: The lowering
-    // logic for double-rate MFMA is the same as for single-rate (mfma32x32x8
-    // and mfma16x16x16) with kpack=2). This check should be removed once
-    // double-rate MFMA support is fully implemented in the compiler, leaving
-    // only an assertion. Currently, single-rate configurations with kpack=1 are
-    // still in use, so in such cases, we revert to the default lowering logic
-    // without LDS transpose read instructions.
+  bool checkKWidth(MemDescType srcTy, RankedTensorType dstTy) const {
+    // Single rate MFMA insts:
+    // fp16, bf16: mfma32x32x8, mfma16x16x16
+    // fp8, bf8: mfma32x32x16, mfma16x16x32
+    // int8: mfma32x32x16, mfma16x16x32
+    //
+    // Double rate MFMA insts:
+    // fp16, bf16: mfma32x32x16, mfma16x16x32
+    // fp8, bf8: mfma32x32x64, mfma16x16x128
+    // int8: mfma32x32x32, mfma16x16x64
+    //
+    // Check that kWidth of the dst dotOp layout is large enough to
+    // work with the transposed lds load instructions.
     auto dotEnc = llvm::cast<DotOperandEncodingAttr>(dstTy.getEncoding());
     auto mfmaEnc = llvm::cast<AMDMfmaEncodingAttr>(dotEnc.getParent());
 
     int rank = dstTy.getRank();
+    auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
+                        .getIntOrFloatBitWidth();
     int32_t kWidth = dotEnc.getKWidth();
     const int32_t mDim = mfmaEnc.getMDim();
-    assert((mDim == 32 || mDim == 16) && "Invalid MFMA instruction dimension");
+    if (mDim != 32 && mDim != 16)
+      return false;
 
-    // Single rate MFMA insts: mfma32x32x8, mfma16x16x16
-    const int kSize16bSingleRateMfma32 = 8;
-    const int kSize16bSingleRateMfma16 = 16;
-    const int largeTileThreshold16b =
-        (mDim == 32) ? kSize16bSingleRateMfma32 : kSize16bSingleRateMfma16;
+    const int kFactor = 16 / bitwidth;
+    const int kSizeDoubleRateMfma32 = 16 * kFactor;
+    const int kSizeDoubleRateMfma16 = 32 * kFactor;
+    int largeTileThreshold =
+        (mDim == 32) ? kSizeDoubleRateMfma32 : kSizeDoubleRateMfma16;
+
+    // For FP8, wider MFMA instructions (scaled MFMA) have a k-dimension
+    // that is four times of regular MFMA instructions.
+    if (dstTy.getElementType().isFloat() && bitwidth == 8) {
+      largeTileThreshold *= 2;
+    }
+
     const auto shape = dstTy.getShape();
     const int kDim = dotEnc.getOpIdx() == 0 ? rank - 1 : rank - 2;
+    const bool isLargeTile = shape[kDim] >= largeTileThreshold;
 
-    const bool isLargeTile16b = shape[kDim] > largeTileThreshold16b;
-    const int expectedKWidth16b = isLargeTile16b ? 8 : 4;
-
-    return kWidth == expectedKWidth16b;
+    const int kWidthLargeTile = 8 * kFactor;
+    const int kWidthSmallTile = 4 * kFactor;
+    // For largeTile, i.e. double rated mfma is an option, it's accepted to
+    // have kWidth set for both double and single rated mfma
+    // For smallTile, it's only accepted to have kWidth set to single rate
+    // mfma. Smaller kWidth is not allowed to use transposed lds load.
+    return (isLargeTile &&
+            llvm::is_contained({kWidthLargeTile, kWidthSmallTile}, kWidth)) ||
+           (kWidth == kWidthSmallTile);
   }
 
-  bool canUseTransLoad(MemDescType srcTy, RankedTensorType dstTy) const {
-    auto bitwidth = typeConverter->convertType(dstTy.getElementType())
+  bool checkCurrentLimitation(Operation *localLoad,
+                              RankedTensorType dstTy) const {
+
+    auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
+                        .getIntOrFloatBitWidth();
+
+    // FP4 is represented as i8 and, when packed along K, can be
+    // transposed using ds_read_tr8 which doesn't change packing.
+    if (bitwidth != 16 && bitwidth != 8) {
+      return false;
+    }
+
+    return true;
+  }
+
+  bool canUseTransLoad(Operation *localLoad, MemDescType srcTy,
+                       RankedTensorType dstTy) const {
+    auto bitwidth = this->typeConverter->convertType(dstTy.getElementType())
                         .getIntOrFloatBitWidth();
 
     // 1. Check GPU arch properties.
@@ -198,13 +152,13 @@ private:
       return false;
     }
 
-    // 3. Check performance properties.
-    if (!checkPerformanceProperties(srcTy, dstTy)) {
+    // 3. Check current limitations.
+    if (!checkCurrentLimitation(localLoad, dstTy)) {
       return false;
     }
 
-    // 4. Check current limitations.
-    if (bitwidth != 16) {
+    // 4. Check kWidth
+    if (!checkKWidth(srcTy, dstTy)) {
       return false;
     }
 
@@ -212,8 +166,7 @@ private:
   }
 
   LogicalResult
-  lowerSharedToDotOperandTransLL(triton::gpu::LocalLoadOp op,
-                                 triton::gpu::LocalLoadOpAdaptor adaptor,
+  lowerSharedToDotOperandTransLL(LocalLoadOpType op, OpAdaptor adaptor,
                                  const LLVMTypeConverter *typeConverter,
                                  ConversionPatternRewriter &rewriter) const {
     auto ctx = rewriter.getContext();
@@ -222,29 +175,79 @@ private:
     auto dstTy = cast<RankedTensorType>(op.getType());
     auto srcTy = cast<MemDescType>(op.getSrc().getType());
     auto dotEnc = cast<DotOperandEncodingAttr>(dstTy.getEncoding());
-    auto shape = dstTy.getShape();
-
+    auto shape = isPackedLoad ? srcTy.getShape() : dstTy.getShape();
     auto llvmElemTy = typeConverter->convertType(dstTy.getElementType());
+    auto llBitwidth = isPackedLoad ? 4 : llvmElemTy.getIntOrFloatBitWidth();
     auto bitwidth = llvmElemTy.getIntOrFloatBitWidth();
-    auto dsReadTransLayout = chooseDsReadB64Tr16Layout(dotEnc, shape, bitwidth);
+    auto ldsTransLayout = chooseDsReadB64TrLayout(dotEnc, shape, llBitwidth);
     auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                          llvmElemTy, rewriter);
     SmallVector<Value> outVals;
+    SmallVector<Value> elemsI32;
+    mlir::Type retTy = dstTy;
+    auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
     bool valid = emitTransferBetweenRegistersAndShared(
-        dsReadTransLayout, srcTy, llvmElemTy,
+        ldsTransLayout, srcTy, llvmElemTy,
         /*maxVecElems=*/std::nullopt, smemObj, loc, rewriter, targetInfo,
-        [&](VectorType vecTy, Value vecAddr) {
-          auto dsReadOp =
-              rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
-          Value vecVal = dsReadOp.getResult();
-          for (int v = 0; v < vecTy.getNumElements(); v++) {
-            outVals.push_back(
-                b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+        laneId, warpId, [&](VectorType vecTy, Value vecAddr) {
+          if constexpr (isPackedLoad) {
+            assert(bitwidth == 8);
+            auto numElems = vecTy.getNumElements();
+            auto numElemsI32 = (numElems * bitwidth / 32);
+            auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
+            auto dsReadOp =
+                rewriter.create<ROCDL::ds_read_tr4_b64>(loc, i32VecTy, vecAddr);
+            auto res = b.bitcast(dsReadOp.getResult(), vecTy);
+            Value vecVal = res.getResult();
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              outVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+            }
+          } else if (bitwidth == 16) {
+            auto dsReadOp =
+                rewriter.create<ROCDL::ds_read_tr16_b64>(loc, vecTy, vecAddr);
+            if constexpr (!isPackedLoad) {
+              AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+            }
+            Value vecVal = dsReadOp.getResult();
+            for (int v = 0; v < vecTy.getNumElements(); v++) {
+              outVals.push_back(
+                  b.extract_element(llvmElemTy, vecVal, b.i32_val(v)));
+            }
+          } else {
+            // pack elements in i32 vectors
+            auto numElems = vecTy.getNumElements();
+            auto numElemsI32 = (numElems * bitwidth / 32);
+            auto i32VecTy = VectorType::get(numElemsI32, i32_ty);
+
+            auto dsReadOp =
+                rewriter.create<ROCDL::ds_read_tr8_b64>(loc, i32VecTy, vecAddr);
+            if constexpr (!isPackedLoad) {
+              AMD::addLocalLoadNoAliasScope(op, dsReadOp);
+            }
+            Value vecVal = dsReadOp.getResult();
+            for (auto i = 0; i < numElemsI32; ++i) {
+              elemsI32.push_back(
+                  b.extract_element(i32_ty, vecVal, b.i32_val(i)));
+            }
           }
         });
 
+    // unpack i32 vectors and cast to native type
+    if (bitwidth != 16) {
+      auto numElemsPerVec = 32 / bitwidth;
+      auto vecTy = vec_ty(llvmElemTy, numElemsPerVec);
+      for (int v = 0; v < static_cast<int>(elemsI32.size()); ++v) {
+        auto vec = b.bitcast(elemsI32[v], vecTy);
+        for (int i = 0; i < numElemsPerVec; ++i)
+          outVals.push_back(b.extract_element(llvmElemTy, vec, b.i32_val(i)));
+      }
+
+      retTy = LLVM::LLVMStructType::getLiteral(
+          ctx, SmallVector<Type>(outVals.size(), llvmElemTy));
+    }
     assert(valid && "Failed to emit LDS transpose load operations");
-    Value result = packLLElements(loc, typeConverter, outVals, rewriter, dstTy);
+    Value result = packLLElements(loc, typeConverter, outVals, rewriter, retTy);
     rewriter.replaceOp(op, result);
     return success();
   }
@@ -259,7 +262,9 @@ void mlir::triton::AMD::populateMemoryOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfo &targetInfo, PatternBenefit benefit) {
   PatternBenefit transBenefit = PatternBenefit(benefit.getBenefit() + 1);
-  patterns.add<LocalLoadOpConversion>(typeConverter, benefit);
-  patterns.add<TransLocalLoadOpConversion>(typeConverter, targetInfo,
-                                           transBenefit);
+  patterns.add<TransLocalLoadOpConversion<triton::gpu::LocalLoadOp>>(
+      typeConverter, targetInfo, transBenefit);
+  patterns.add<
+      TransLocalLoadOpConversion<triton::amdgpu::LocalLoadPackedTransposedOp>>(
+      typeConverter, targetInfo, benefit);
 }

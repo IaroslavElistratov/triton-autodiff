@@ -306,10 +306,10 @@ static ConverterT makeConverterFromPtx(const std::string &ptxAsm, Type inType,
     int outNums = numElements / outVecWidth;
     PTXBuilder builder;
     SmallVector<PTXBuilder::Operand *> operands;
-    auto outConstriant = outVecWidthBits == 16 ? "=h" : "=r";
+    auto outConstraint = outVecWidthBits == 16 ? "=h" : "=r";
     auto inConstraint = inVecWidthBits == 16 ? "h" : "r";
     for (int i = 0; i < outNums; i++) {
-      operands.push_back(builder.newOperand(outConstriant));
+      operands.push_back(builder.newOperand(outConstraint));
     }
 
     for (Value inVal : inPacked) {
@@ -422,19 +422,21 @@ struct FpToFpOpConversion
             // F8 -> F16
             {{F8E4M3TyID, F16TyID, undefRounding}, Fp8E4M3Nv_to_Fp16},
             {{F8E5M2TyID, F16TyID, undefRounding},
-             Fp8E5M2_to_Fp16(computeCapability >= 90)},
+             Fp8E5M2_to_Fp16(computeCapability >= 89)},
             {{F16TyID, F8E4M3TyID, RoundingMode::RTNE}, Fp16_to_Fp8E4M3Nv},
             {{F16TyID, F8E5M2TyID, RoundingMode::RTNE},
-             Fp16_to_Fp8E5M2_RTNE(computeCapability >= 90)},
+             Fp16_to_Fp8E5M2_RTNE(computeCapability >= 89)},
             {{F16TyID, F8E5M2TyID, RoundingMode::RTZ}, Fp16_to_Fp8E5M2_RTZ},
             // F8 -> BF16
+            // mul{.rnd}.bf16 and mul{.rnd}.bf16x2 requires sm_90 or higher.
             {{F8E5M2TyID, BF16TyID, undefRounding},
              Fp8E5M2_to_Bf16(computeCapability >= 90)},
+            // cvt with .bf16.f16' requires .target sm_90 or higher
             {{F8E4M3TyID, BF16TyID, undefRounding},
              Fp8E4M3Nv_to_Bf16(computeCapability >= 90)},
             // BF16 -> F8
             {{BF16TyID, F8E5M2TyID, RoundingMode::RTNE},
-             Bf16_to_Fp8E5M2(computeCapability >= 90)},
+             Bf16_to_Fp8E5M2(computeCapability >= 89)},
             {{BF16TyID, F8E4M3TyID, RoundingMode::RTNE}, Bf16_to_Fp8E4M3Nv},
             // F32 -> F8
             {{F32TyID, F8E4M3TyID, RoundingMode::RTNE}, Fp32_to_Fp8E4M3Nv},
@@ -485,6 +487,12 @@ struct FpToFpOpConversion
             "Unsupported rounding mode for conversion to fp8: " +
             stringifyRoundingMode(roundingMode.value()) + "\n");
       }
+    }
+
+    if (srcElementType.isF16() && dstElementType.isF32()) {
+      return llvm::to_vector(llvm::map_range(operands[0], [&](Value v) {
+        return convertFp16ToFp32(loc, rewriter, v);
+      }));
     }
 
     if (srcElementType.isF32() && dstElementType.isF16()) {

@@ -3,16 +3,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-def DecomposeUnsupportedAMDConversions : Pass<"decompose-unsupported-amd-conversions", "mlir::ModuleOp"> {
-    let summary = "Decompose conversions that are not supported by TritonGPU -> LLVM";
-    let constructor = "mlir::triton::AMD::createDecomposeUnsupportedConversionsPass(\"\")";
-
-    let options = [
-        Option<"arch", "arch", "std::string", /*default*/"\"\"",
-               "gfx target device architecture, e.g., gfx942">,
-    ];
-}
-
 def OptimizeAMDLDSUsage : Pass<"optimize-amd-lds-usage", "mlir::ModuleOp"> {
     let summary = "Minimize LDS usage";
     let constructor = "mlir::triton::AMD::createOptimizeLDSUsagePass(\"\")";
@@ -23,6 +13,17 @@ def OptimizeAMDLDSUsage : Pass<"optimize-amd-lds-usage", "mlir::ModuleOp"> {
         Option<"customLDSLimit", "lds-limit", "int", /*default*/"0",
                "custom limit of LDS consumption, if not provided, maximum LDS size is used">,
     ];
+}
+
+def AllocateAMDGPUSharedMemory : Pass<"allocate-amdgpu-shared-memory", "mlir::ModuleOp"> {
+  let summary = "Add metadata for shared memory allocation";
+
+  let description = [{
+    This pass uses the `ModuleAllocation` analysis to:
+      - Annotate modules with an attribute with the amount of shared/local
+        memory used.
+      - Annotate operations with an offset into the total shared/local memory.
+  }];
 }
 
 def ConvertTritonAMDGPUToLLVM : Pass<"convert-triton-amdgpu-to-llvm", "mlir::ModuleOp"> {

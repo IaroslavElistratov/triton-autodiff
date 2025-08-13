@@ -1,4 +1,4 @@
-﻿#include "mlir/IR/BuiltinOps.h" // mlir::ModuleOp
+#include "mlir/IR/BuiltinOps.h" // mlir::ModuleOp
 #include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
@@ -27,6 +27,7 @@
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
 #include <csignal>
 #include <memory>
+#include <pybind11/gil.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <stdexcept>
@@ -46,8 +47,8 @@ std::unique_ptr<TargetMachine>
 createTargetMachine(llvm::Module *module, std::string proc,
                     bool enable_fp_fusion, const std::string &features) {
   std::string error;
-  auto target =
-      llvm::TargetRegistry::lookupTarget(module->getTargetTriple(), error);
+  auto target = llvm::TargetRegistry::lookupTarget(
+      module->getTargetTriple().str(), error);
   llvm::TargetOptions opt;
   bool disableLLVMOpt = mlir::triton::tools::getBoolEnv("DISABLE_LLVM_OPT");
   if (enable_fp_fusion)
@@ -132,7 +133,7 @@ std::string translateLLVMIRToASM(llvm::Module &module,
   // module->print(llvm::outs(), nullptr);
 
   // create machine
-  module.setTargetTriple(triple);
+  module.setTargetTriple(Triple(triple));
   auto machine = createTargetMachine(&module, proc, enable_fp_fusion, features);
   // set data layout
   module.setDataLayout(machine->createDataLayout());
@@ -219,6 +220,8 @@ void init_triton_llvm(py::module &&m) {
       .def("set_calling_conv", &llvm::Function::setCallingConv)
       .def("add_fn_attr", [](llvm::Function *fn, std::string &name,
                              std::string &val) { fn->addFnAttr(name, val); })
+      .def("remove_fn_attr", [](llvm::Function *fn,
+                                std::string &name) { fn->removeFnAttr(name); })
       .def("add_fn_asan_attr",
            [](llvm::Function *fn) {
              fn->addFnAttr(llvm::Attribute::SanitizeAddress);
@@ -262,9 +265,14 @@ void init_triton_llvm(py::module &&m) {
   m.def(
       "to_module",
       [](mlir::ModuleOp &mod, llvm::LLVMContext &ctx) {
-        return mlir::translateModuleToLLVMIR(mod, ctx);
+        std::unique_ptr<llvm::Module> llvmMod =
+            mlir::translateModuleToLLVMIR(mod, ctx);
+        if (!llvmMod) {
+          throw std::runtime_error("failed to translate module to LLVM IR");
+        }
+        return llvmMod;
       },
-      py::keep_alive<0, 2>());
+      py::keep_alive<0, 2>(), py::call_guard<py::gil_scoped_release>());
 
   m.def("attach_datalayout", [](llvm::Module *mod, const std::string triple,
                                 const std::string proc,
@@ -277,8 +285,8 @@ void init_triton_llvm(py::module &&m) {
     llvm::TargetOptions opt;
     // Target machine is only used to create the data layout.
     std::unique_ptr<llvm::TargetMachine> machine{target->createTargetMachine(
-        triple, proc, features, opt, llvm::Reloc::PIC_, std::nullopt,
-        llvm::CodeGenOptLevel::None)};
+        llvm::Triple(triple), proc, features, opt, llvm::Reloc::PIC_,
+        std::nullopt, llvm::CodeGenOptLevel::None)};
     // set data layout
     mod->setDataLayout(machine->createDataLayout());
   });
@@ -310,6 +318,14 @@ void init_triton_llvm(py::module &&m) {
         FunctionAnalysisManager fam;
         CGSCCAnalysisManager cgam;
         ModuleAnalysisManager mam;
+
+        if (arch.empty()) {
+          llvm::TargetLibraryInfoImpl TLII;
+          TLII.disableAllFunctions();
+          fam.registerPass([TLII = std::move(TLII)] {
+            return llvm::TargetLibraryAnalysis(TLII);
+          });
+        }
 
         PassInstrumentationCallbacks *instrCbPtr = nullptr;
         PassInstrumentationCallbacks passInstrCb;
@@ -401,7 +417,8 @@ void init_triton_llvm(py::module &&m) {
       // (optional) parameters
       py::arg("arch") = "", py::arg("features") = "",
       py::arg("flags") = std::vector<std::string>{},
-      py::arg("enable_fp_fusion") = false);
+      py::arg("enable_fp_fusion") = false,
+      py::call_guard<py::gil_scoped_release>());
 
   m.def(
       "translate_to_asm",
@@ -459,7 +476,7 @@ void init_triton_llvm(py::module &&m) {
         std::string message = "Failed to parse library at " + path;
         throw std::invalid_argument(message);
       }
-      libMod->setTargetTriple(dstMod->getTargetTriple());
+      libMod->setTargetTriple(Triple(dstMod->getTargetTriple()));
       libMod->setDataLayout(dstMod->getDataLayout());
 
       std::unordered_set<std::string> externalFns;

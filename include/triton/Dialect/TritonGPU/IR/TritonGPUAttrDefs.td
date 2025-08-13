@@ -6,19 +6,61 @@ include "triton/Dialect/Triton/IR/TritonInterfaces.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUDialect.td"
 
 //===----------------------------------------------------------------------===//
-// TritonGPU Attribute Definitions
+// Traits and Interfaces
 //===----------------------------------------------------------------------===//
-def TritonGPU_AttrTrait : AttrInterface<"TritonGPU_AttrTrait"> {
-  let cppNamespace = "::mlir::triton::gpu";
 
+def MemDescViewTrait : NativeOpTrait<"MemDescViewTrait">;
+def LocalLoadTrait : NativeOpTrait<"LocalLoadTrait">;
+
+def LayoutEncodingTrait : AttrInterface<"LayoutEncodingTrait"> {
+  let cppNamespace = "::mlir::triton::gpu";
+  let description = [{
+    Common trait for all TTGIR layouts.
+  }];
   let methods = [
+    InterfaceMethod<"Get the shape of the CTAs per CGA.",
+                    "SmallVector<unsigned>",
+                    "getCTAsPerCGA", (ins), [{}], [{
+      return llvm::to_vector($_attr.getCTALayout().getCTAsPerCGA());
+    }]>,
+    InterfaceMethod<"Get the order of the CTAs per CGA. The fastest-changing axis first",
+                    "SmallVector<unsigned>",
+                    "getCTAOrder", (ins), [{}], [{
+      return llvm::to_vector($_attr.getCTALayout().getCTAOrder());
+    }]>,
+    InterfaceMethod<"Each CTA processes 1/CTASplitNum of the tensor.",
+                    "SmallVector<unsigned>",
+                    "getCTASplitNum", (ins), [{}], [{
+      return llvm::to_vector($_attr.getCTALayout().getCTASplitNum());
+    }]>,
+    InterfaceMethod<"Get the rank of the layout.", "unsigned", "getRank", (ins), [{}], [{
+      return $_attr.getCTAOrder().size();
+    }]>
   ];
 }
+def DeclareLayoutEncodingMethods : DeclareAttrInterfaceMethods<
+  LayoutEncodingTrait, ["getCTAsPerCGA", "getCTAOrder", "getCTASplitNum"]>;
 
-class TritonGPU_Attr<string name, string attrMnemonic, list<Trait> traits = [],
-                     Dialect dialect = TritonGPU_Dialect,
-                     string baseCppClass = "::mlir::Attribute">
-  : AttrDef<dialect, name, !listconcat([TritonGPU_AttrTrait], traits), baseCppClass> {
+def SharedEncodingTrait : AttrInterface<"SharedEncodingTrait"> {
+  let cppNamespace = "::mlir::triton::gpu";
+
+  let description = [{
+    Common trait describing shared memory.
+  }];
+  let methods = [
+    InterfaceMethod<"Return the default alignment for the layout.",
+                    "int32_t", "getAlignment", (ins), [{}], [{ return 16; }]>,
+  ];
+}
+def DeclareSharedEncodingMethods : DeclareAttrInterfaceMethods<
+  SharedEncodingTrait, ["getAlignment"]>;
+
+//===----------------------------------------------------------------------===//
+// Base Attribute
+//===----------------------------------------------------------------------===//
+
+class TritonGPU_Attr<string name, string attrMnemonic, list<Trait> traits = []>
+  : AttrDef<TritonGPU_Dialect, name, traits> {
 
   let description = [{
 TritonGPU tensors differ from usual tensors in that they contain a _layout_ attribute which determines
@@ -119,55 +161,25 @@ addition, if there's only one CTA per CGA, then Triton canonicalizes CTAOrder to
         CTAOrder.push_back(i);
       return get(context, CTAsPerCGA, CTASplitNum, CTAOrder);
     }
+    unsigned getRank() const { return getCTAOrder().size(); }
   }];
 
   let genVerifyDecl = 1;
   let skipDefaultBuilders = 1;
 }
 
-
-def LayoutEncodingTrait : AttrInterface<"LayoutEncodingTrait"> {
-  let cppNamespace = "::mlir::triton::gpu";
-  let description = [{
-    Common trait for all TTGIR layouts.
-  }];
-  let methods = [
-    InterfaceMethod<"Get the shape of the CTAs per CGA.",
-                    "SmallVector<unsigned>",
-                    "getCTAsPerCGA">,
-    InterfaceMethod<"Get the order of the CTAs per CGA. The fastest-changing axis first",
-                    "SmallVector<unsigned>",
-                    "getCTAOrder">,
-    InterfaceMethod<"Each CTA processes 1/CTASplitNum of the tensor.",
-                    "SmallVector<unsigned>",
-                    "getCTASplitNum">,
-  ];
-}
-
 //===----------------------------------------------------------------------===//
 // Shared Layout Encoding
 //===----------------------------------------------------------------------===//
 
-def SharedEncodingTrait : AttrInterface<"SharedEncodingTrait"> {
-  let cppNamespace = "::mlir::triton::gpu";
-
-  let description = [{
-    Common trait describing shared memory.
-  }];
-  let methods = [
-    InterfaceMethod<"Return the default alignment for the layout.",
-                    "int32_t",
-                    "getAlignment">,
-  ];
-}
-
-def SwizzledSharedEncodingAttr :
-  TritonGPU_Attr<"SwizzledSharedEncoding", "swizzled_shared_encoding", [SharedEncodingTrait, LayoutEncodingTrait]> {
+def SwizzledSharedEncodingAttr
+    : TritonGPU_Attr<"SwizzledSharedEncoding", "swizzled_shared_encoding",
+                     [SharedEncodingTrait, LayoutEncodingTrait]> {
   let mnemonic = "swizzled_shared";
 
   let description = [{
 An encoding for tensors whose elements may be simultaneously accessed by
-different cuda threads in the programs, via shared memory. In other words,
+different GPU threads in the programs, via shared memory. In other words,
 for all indices i \in Z^d, \mathcal{L}(i) = {0, 1, ..., 32*num_warps - 1}.
 
 In order to avoid shared memory bank conflicts, elements may be swizzled.
@@ -175,7 +187,7 @@ Here are some examples.  In all cases, the input tensor is [0, 1, ..., n-1].
 
 1. Basic swizzling
 
-  #shared<{vec=1, perPhase=1, maxPhase=4, order=[1,0]}>
+  #ttg.swizzled_shared<{vec=1, perPhase=1, maxPhase=4, order=[1,0]}>
   [ 0,  1,  2,  3],  // xor with 0
   [ 5,  4,  7,  6],  // xor with 1
   [10, 11,  8,  9],  // xor with 2
@@ -186,7 +198,7 @@ out[r][c^r]).
 
 2. Multiple rows per phase
 
-  #shared<{vec=1, perPhase=2, maxPhase=4, order=[1,0]}>
+  #ttg.swizzled_shared<{vec=1, perPhase=2, maxPhase=4, order=[1,0]}>
   [ 0,  1,  2,  3],  // phase 0 (xor with 0)
   [ 4,  5,  6,  7],
   [ 9,  8, 11, 10],  // phase 1 (xor with 1)
@@ -197,7 +209,7 @@ means that pairs of 2 rows get the same swizzling.
 
 3. Max-phase applied
 
-  $shared<{vec=1, perPhase=1, maxPhase=2, order=[1,0]}>
+  #ttg.swizzled_shared<{vec=1, perPhase=1, maxPhase=2, order=[1,0]}>
   [ 0,  1,  2,  3],  // phase 0 (xor with 0)
   [ 5,  4,  7,  6],  // phase 1 (xor with 1)
   [ 8,  9, 10, 11],  // phase 0
@@ -212,7 +224,7 @@ effect of limiting the maximum value of the xor to m-1.
 
 4. Max-phase and per-phase
 
-  #shared<{vec=1, perPhase=2, maxPhase=2, order=[1,0]}>
+  #ttg.swizzled_shared<{vec=1, perPhase=2, maxPhase=2, order=[1,0]}>
   [ 0,  1,  2,  3],  // phase 0 (xor with 0)
   [ 4,  5,  6,  7],  // phase 0
   [ 9,  8, 11, 10],  // phase 1 (xor with 1)
@@ -228,7 +240,7 @@ maximum value of maxPhase-1.  In other words, elements of row r are xor'ed with
 
 5. Adding vec
 
-  #shared<{vec=2, perPhase=1, maxPhase=4, order=[1,0]}>
+  #ttg.swizzled_shared<{vec=2, perPhase=1, maxPhase=4, order=[1,0]}>
   [ 0,  1,  2,  3,  4,  5,  6,  7],
   [10, 11,  8,  9, 14, 15, 12, 13],
   [20, 21, 22, 23, 16, 17, 18, 19],
@@ -271,58 +283,18 @@ When vec=2, elements are swizzled in pairs of 2.  In other words, the element at
                      "unsigned":$typeWidthInBit,
                      "bool":$needTrans), [{
 
-        // ---- begin GFX908/GFX90A ----
+        // ---- begin MFMA ----
         if (auto mfmaEnc = mlir::dyn_cast<AMDMfmaEncodingAttr>(dotOpEnc.getParent())) {
-          int kDimNum = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
-          if (needTrans)
-            kDimNum = 1 - kDimNum;
-          bool isKDimInner = (order[0] == kDimNum);
-          if (isKDimInner) {
-            const int numBanks = 32;
-            const int bankBitWidth = 32;
-            const int SIMDWidth = 16;
-
-            // number of inner dimension rows per one pattern repeat
-            int innerDimLength = shape[order[0]];
-            int elemsPerOneBanksRow = (numBanks * bankBitWidth) / typeWidthInBit;
-
-            int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
-            // vecSize is set to kWidth of the dotop layout
-            int vecSize = dotOpEnc.getKWidth();
-            int maxPhase = std::max(std::min(SIMDWidth / perPhase, innerDimLength / vecSize), 1);
-
-            // TODO (zhanglx): figure out better parameters for mfma4
-            if (mfmaEnc.getMDim() == 4)
-              maxPhase = 4;
-
-            return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
-          } else {
-            // Do not swizzle in case k dimension is not innermost.
-            // In this case accesses will go in different banks even without swizzling.
-            return get(context, 1, 1, 1, order, CTALayout);
-          }
+          return mfmaEnc.composeSharedLayoutForOperand(
+              CTALayout, dotOpEnc.getOpIdx(), shape, order, dotOpEnc.getKWidth(),
+              typeWidthInBit, needTrans);
         }
 
-        // ---- begin GFX11 ----
-        if (mlir::isa<AMDWmmaEncodingAttr>(dotOpEnc.getParent())) {
-          if (dotOpEnc.getOpIdx() == 0) {
-            const int numBanks = 32;
-            const int bankBitWidth = 32;
-
-            // number of inner dimension rows per one pattern repeat
-            int innerDimLength = shape[order[0]];
-            int elemsPerOneBanksRow = (numBanks * bankBitWidth) / typeWidthInBit;
-
-            int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
-            int vecSize = ((typeWidthInBit == 16) ? 64 : 32 ) / typeWidthInBit;
-            int maxPhase = 16 / perPhase;
-
-            return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
-          } else {
-            // Do not swizzle in case k dimension is not innermost.
-            // In this case accesses will go in different banks even without swizzling.
-            return get(context, 1, 1, 1, order, CTALayout);
-          }
+        // ---- begin WMMA ----
+        if (auto wmmaEnc = mlir::dyn_cast<AMDWmmaEncodingAttr>(dotOpEnc.getParent())) {
+          return wmmaEnc.composeSharedLayoutForOperand(
+              CTALayout, dotOpEnc.getOpIdx(), shape, order, dotOpEnc.getKWidth(),
+              typeWidthInBit, needTrans);
         }
 
 
@@ -331,52 +303,44 @@ When vec=2, elements are swizzled in pairs of 2.  In other words, the element at
         if(!mmaEnc)
           return get(context, 1, 1, 1, order, CTALayout);
 
-        int opIdx = dotOpEnc.getOpIdx();
-        auto shapePerCTA = getShapePerCTA(CTALayout.getCTASplitNum(), shape);
-
-        // number of rows per phase
-
-        // index of the inner dimension in `order`
-        unsigned inner = (opIdx == 0) ? 0 : 1;
-
         // ---- begin Ampere & Hopper ----
         if (mmaEnc.isAmpere() || mmaEnc.isHopper()) {
-          int perPhase = 128 / (shapePerCTA[order[0]] * 4 / dotOpEnc.getKWidth());
-          perPhase = std::max<int>(perPhase, 1);
-          std::vector<size_t> matShape = {8, 8, 4 * dotOpEnc.getKWidth()};
-          int vecWidth = 32 / typeWidthInBit;
-          if (vecWidth != dotOpEnc.getKWidth() && order[0] == inner) {
-              perPhase = std::max<int>(perPhase, 2 * vecWidth);
-          }
-          int rank = order.size();
-          // --- handle A operand ---
-          if (opIdx == 0) { // compute swizzling for A operand
-              int m = (needTrans) ? matShape[2] : matShape[0];
-              int k = (needTrans) ? matShape[0] : matShape[2];
-              int vec = (order[0] == rank-1) ? k : m;
-              int mmaStride = (order[0] == rank-1) ? m : k;
-              int maxPhase = std::max(mmaStride / perPhase, 1);
-              return get(context, vec, perPhase, maxPhase, order, CTALayout);
-          }
-
-          // --- handle B operand ---
-          if (opIdx == 1) {
-              // we compute vec and maxPhase m, n and k size of the mma
-              // instruction. when matmul operands is transposed, we should
-              // consider that to get m, n and k.
-              int n = needTrans ? matShape[2] : matShape[1];
-              int k = needTrans ? matShape[1] : matShape[2];
-              int vec = (order[0] == rank-1) ? n : k;
-              int mmaStride = (order[0] == rank-1) ? k : n;
-              int maxPhase = std::max(mmaStride / perPhase, 1);
-              return get(context, vec, perPhase, maxPhase, order, CTALayout);
-          }
-
-          llvm_unreachable("invalid operand index");
+          return get(context, dotOpEnc.getOpIdx(), dotOpEnc.getKWidth(), shape, order, CTALayout, typeWidthInBit, needTrans);
         }
 
         // ---- not implemented ----
         llvm_unreachable("unsupported swizzling for provided MMA version");
+    }]>,
+
+    // NVIDIA constructor!
+    // TODO(lezcano): We should totally get rid of all these constructors...
+    AttrBuilder<(ins "int":$opIdx,
+                     "unsigned":$kWidth,
+                     "ArrayRef<int64_t>":$shape,
+                     "ArrayRef<unsigned>":$order,
+                     "CTALayoutAttr":$CTALayout,
+                     "unsigned":$bitwidth,
+                     "bool":$needTrans), [{
+        int K =  getShapePerCTA(CTALayout.getCTASplitNum(), shape)[order[0]];
+        // Elems necessary to cover all the banks divided by the inner dimension
+        // This packs a few rows together for small K
+        int perPhase = std::max<int>(1024 / (bitwidth * K), 1);
+
+        int mmaStride = 8;
+        int vec = 4 * kWidth;
+        // needsTrans is equiv. to flipping the opIdx
+        if (needTrans)
+          std::swap(vec, mmaStride);
+        assert(opIdx == 0 || opIdx == 1);
+        int rank = order.size();
+        int kDim = opIdx == 0 ? rank-1 : rank-2;
+        if (order[0] != kDim)
+          std::swap(vec, mmaStride);
+        // Count how many vec elements are needed to cover all the banks
+        int maxPhase = std::max(std::min<int>(mmaStride, 1024 / (vec * bitwidth)), 1);
+        // Account for the row packing from perPhase: mmaStride / perPhase
+        maxPhase = std::max(maxPhase / perPhase, 1);
+        return get(context, vec, perPhase, maxPhase, order, CTALayout);
     }]>,
 
     AttrBuilder<(ins "DotOperandEncodingAttr":$dotOpEnc,
@@ -399,17 +363,86 @@ When vec=2, elements are swizzled in pairs of 2.  In other words, the element at
     }]>,
   ];
 
-  let extraClassDeclaration = extraBaseClassDeclaration # [{
-    int32_t getAlignment() const;
-    SmallVector<unsigned> getCTAsPerCGA() const;
-    SmallVector<unsigned> getCTAOrder() const;
-    SmallVector<unsigned> getCTASplitNum() const;
-  }];
   let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
 }
 
-def NVMMASharedEncodingAttr :
-  TritonGPU_Attr<"NVMMASharedEncoding", "nvmma_shared_encoding", [SharedEncodingTrait, LayoutEncodingTrait]> {
+def PaddedSharedEncodingAttr
+    : TritonGPU_Attr<"PaddedSharedEncoding", "padded_shared_encoding",
+                     [SharedEncodingTrait, LayoutEncodingTrait]> {
+  let mnemonic = "padded_shared";
+
+  let description = [{
+An encoding for tensors whose elements may be simultaneously accessed by
+different GPU threads in the programs, via shared memory. In other words,
+for all indices i \in Z^d, \mathcal{L}(i) = {0, 1, ..., 32*num_warps - 1}.
+Compared to SwizzledSharedEncodingAttr, this encoding uses padding to avoid
+shared memory bank conflicts.
+
+Formally, given a layout:
+    padded_shared<[<interval_0>:+<pad_0>, <interval_1>:+<pad_1>, ...]>
+We insert a padding of `<pad_i>` elements after every `<interval_i>` elements.
+Multi interval-padding pairs are supported for flexibility of multi tiered
+padding schemes; they compose in an additive manner. So for a 1-D tensor element
+at index i, the corresponding shared memory location index is
+    i + \sum_{k} (i / interval_k) * pad_k = 1
+`<interval_i>` and `<pad_i>` all need to be power of two.
+
+Some concrete examples, using `eM` to mean tensor elements and `pN` to mean
+padding:
+
+1. Single interval-padding pair:
+
+   #ttg.padded_shared<[2:+2]>
+   [e0, e1, p0, p1,
+    e2, e3, p2, p3,
+    ...]
+
+2. Double interval-padding pairs:
+
+   #ttg.padded_shared<[2:+1, 4:+2]>
+   [e0, e1, p0,
+    e2, e3, p1, p2, p3,
+    e4, e5, p4,
+    e6, e7, p5, p6, p7,
+    ...]
+
+In addition to interval-padding pairs, this encoding requires an `order` to
+specify the logical tensor dimenions from the fastest-to slowest-varying.
+It may optionally support CGA level organization like other encoding
+attributes too, for example,
+    #ttg.padded_shared<[2:+1, 4:+2] {
+        order = [1, 0], CTAsPerCGA = [1, 1], CTASplitNum = [1, 1],
+        CTAOrder = [0, 1]}>
+  }];
+
+  let parameters = (ins
+      ArrayRefParameter<"unsigned">:$intervals,
+      ArrayRefParameter<"unsigned">:$paddings,
+      // Order of logical tensor dimensions; fastest-varying first.
+      ArrayRefParameter<"unsigned">:$order,
+      "CTALayoutAttr":$CTALayout
+  );
+
+  let builders = [
+      AttrBuilder<(ins "ArrayRef<std::pair<unsigned, unsigned>>":$intervalPads,
+                       "ArrayRef<unsigned>":$order, "CTALayoutAttr":$ctaLayout)>,
+  ];
+
+  let extraClassDeclaration = extraBaseClassDeclaration # [{
+    unsigned getMinInterval() const {
+      return *llvm::min_element(getIntervals());
+    }
+
+    // Returns the total number of elements including padding given the input
+    // tensor shape.
+    int64_t getPaddedSize(ArrayRef<int64_t> shape) const;
+  }];
+  let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
+}
+
+def NVMMASharedEncodingAttr : TritonGPU_Attr<"NVMMASharedEncoding", "nvmma_shared_encoding", [DeclareSharedEncodingMethods, LayoutEncodingTrait]> {
   let mnemonic = "nvmma_shared";
 
   let description = [{
@@ -417,6 +450,8 @@ def NVMMASharedEncodingAttr :
     This is meant to represent 2d tiled blocked layout.
     The full layout representation is described here:
     https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-matrix-shared-memory-layout
+    When the memdesc has more than 2 dimensions the tiling is applied to 8 rows even if the first outer dimension is smaller than 8.
+    In this case `transposed` means that the contiguous dimension is the most outer dimension of the memdesc.
   }];
 
 
@@ -452,7 +487,14 @@ def NVMMASharedEncodingAttr :
         } else if (contigDimSizeInByte >= 32 && contigDimSizeInByte % 32 == 0) {
           swizzlingByteWidth = 32;
         } else {
-          llvm_unreachable("unsupported shared memory layout for MMAv3");
+          swizzlingByteWidth = 0;
+        }
+        int flattenOutterDim = 1;
+        for (int i = 1; i < shapePerCTA.size(); i++) {
+          flattenOutterDim *= shapePerCTA[order[i]];
+        }
+        if (shapePerCTA.size() < 2 || flattenOutterDim < 8) {
+          swizzlingByteWidth = 0;
         }
         bool transposed = order[0] == 0;
         return $_get(context, swizzlingByteWidth, transposed, eleBitWidth, fp4Padded, CTALayout);
@@ -460,17 +502,115 @@ def NVMMASharedEncodingAttr :
   ];
 
   let extraClassDeclaration = extraBaseClassDeclaration # [{
-    int32_t getAlignment() const;
-    SmallVector<unsigned> getCTAsPerCGA() const;
-    SmallVector<unsigned> getCTAOrder() const;
-    SmallVector<unsigned> getCTASplitNum() const;
+    int getPerPhase() const;
+    int getMaxPhase() const;
+    int getVec() const;
   }];
   let hasCustomAssemblyFormat = 1;
 }
 
+def AMDRotatingSharedEncodingAttr :
+  TritonGPU_Attr<"AMDRotatingSharedEncoding", "amd_rotating_shared_encoding",
+                 [SharedEncodingTrait, LayoutEncodingTrait]> {
+  let mnemonic = "amd_rotating_shared";
+
+  let description = [{
+This shared encoding is similar to SwizzledSharedEncodingAttr, but instead of
+repeating swizzling pattern every `maxPhase*perPhase` rows of the memory object,
+called a block, this layout changes swizzling pattern `maxPhase` times, then
+repeats the pattern. The name "rotating" comes from the fact that first tensor
+element of each block is swizzled with different phase, which is equal to
+current block number: 0, 1, 2.. maxPhase-1, 0, 1, 2 ...
+
+This layout is used to reduce bank conflicts in cases where shared memory writes
+and reads are performed on layouts with different order. It's meant for hardware
+without native shared memory tranpose support.
+
+Swizzling pattern affects only 2 fastest dimensions of a tensor.
+In the following text these two dimensions are called row and column:
+- row is a fastest dimension
+- column is a second fastest dimension
+
+Elements in a row dimension are stored in memory contiguously.
+
+If a matrix of size [128x64] is stored in this shared layout with order [1, 0],
+dim 1 (64) will be stored contiguously and called row, dim 0 (128) is will be
+called column. If order of shared layout is [0, 1], dim 0 (128) is stored
+contiguously becomes a row, dim 1 (64) becomes a column.
+
+Swizzling pattern is following:
+
+Let's consider an element with logical coordinates = (inRowId, inColId).
+For simplicity, we do not vectorize memory in examples,
+i.e. vec == 1 and layout swizzles inidividual elements.
+For vec != 1 example, take a look at SwizzledSharedEncodingAttr documentation.
+
+Swizzled coordinates within memory object are (outRowId, outColId):
+
+  outRowId = inRowId
+  phase   = (inRowId / perPhase) % maxPhase
+  blockNo = (inRowId / (perPhase * maxPhase)) % maxPhase
+  combinedPhase = phase ^ blockNo
+  outColId   = inColId ^ combinedPhase
+
+Actual offset in memory could be computed with following function:
+
+memmory_offset = (outColId + outRowId * num_of_element_in_row) * sizeof(element)
+
+
+Swizzling examples (matrix is filled with numbers 0, 1, 2, .. columns*rows-1):
+
+  #shared<{vec=1, perPhase=1, maxPhase=2, order=[1,0]}>
+  row      elements
+    0  [ 0,  1,  2,  3],  // phase = 0 blockNo = 0 (xor with 0)
+    1  [ 5,  4,  7,  6],  // phase = 1 blockNo = 0 (xor with 1)
+    2  [ 9,  8, 11, 10],  // phase = 0 blockNo = 1 (xor with 1)
+    3  [12, 13, 14, 15]   // phase = 1 blockNo = 1 (xor with 0)
+    4  [16, 17, 18, 19],  // phase = 0 blockNo = 0 (xor with 0)
+    5  [21, 20, 23, 22],  // phase = 1 blockNo = 0 (xor with 1)
+    6  [25, 24, 27, 26],  // phase = 0 blockNo = 1 (xor with 1)
+    7  [28, 29, 30, 31]   // phase = 1 blockNo = 1 (xor with 0)
+
+  #shared<{vec=1, perPhase=2, maxPhase=2, order=[1,0]}>
+  row      elements
+    0  [ 0,  1,  2,  3],  // phase = 0 blockNo = 0 (xor with 0)
+    1  [ 4,  5,  6,  7],  // phase = 0 blockNo = 0 (xor with 0)
+    2  [ 9,  8, 11, 10],  // phase = 1 blockNo = 0 (xor with 1)
+    3  [13, 12, 15, 14]   // phase = 1 blockNo = 0 (xor with 1)
+    4  [17, 16, 19, 18],  // phase = 0 blockNo = 1 (xor with 1)
+    5  [21, 20, 23, 22],  // phase = 0 blockNo = 1 (xor with 1)
+    6  [24, 25, 26, 27],  // phase = 1 blockNo = 1 (xor with 0)
+    7  [28, 29, 30, 31]   // phase = 1 blockNo = 1 (xor with 0)
+
+  #shared<{vec=1, perPhase=1, maxPhase=4, order=[1,0]}>
+  row      elements
+    0  [ 0,  1,  2,  3],  // phase = 0 blockNo = 0 (xor with 0)
+    1  [ 5,  4,  7,  6],  // phase = 1 blockNo = 0 (xor with 1)
+    2  [10, 11,  8,  9],  // phase = 2 blockNo = 0 (xor with 2)
+    3  [15, 14, 13, 12]   // phase = 3 blockNo = 0 (xor with 3)
+    4  [17, 16, 19, 18],  // phase = 0 blockNo = 1 (xor with 1)
+    5  [20, 21, 22, 23],  // phase = 1 blockNo = 1 (xor with 0)
+    6  [27, 26, 25, 24],  // phase = 2 blockNo = 1 (xor with 3)
+    7  [30, 31, 28, 29]   // phase = 3 blockNo = 1 (xor with 2)
+  }];
+
+  let parameters = (
+    ins
+    "unsigned":$vec,
+    "unsigned":$perPhase,
+    "unsigned":$maxPhase,
+    ArrayRefParameter<"unsigned">:$order,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let hasCustomAssemblyFormat = 1;
+}
+
+
 //===----------------------------------------------------------------------===//
 // Distributed Layout Encoding
 //===----------------------------------------------------------------------===//
+
 def DistributedEncodingTrait : AttrInterface<"DistributedEncodingTrait"> {
   let cppNamespace = "::mlir::triton::gpu";
 
@@ -512,40 +652,15 @@ We call each individual tile "rep".
                      /*defaultImplementation=*/[{
                          return toLinearEncoding($_self, shape).getElemsPerThread(shape);
                      }]>,
-    // Interface for the meta information about the multiple thread hierarchy.
-    InterfaceMethod<"Get the shape of the warps per CTA.",
-                    "SmallVector<unsigned>",
-                    "getWarpsPerCTA">,
-
-    InterfaceMethod<"Get the order of the warps per CTA. The fastest-changing axis first",
-                    "SmallVector<unsigned>",
-                    "getWarpOrder">,
-
-    InterfaceMethod<"Get the shape of the threads per warp",
-                    "SmallVector<unsigned>",
-                    "getThreadsPerWarp">,
-
-    InterfaceMethod<"Get the order of the threads per warp. The fastest-changing axis first",
-                    "SmallVector<unsigned>",
-                    "getThreadOrder">,
-
-    InterfaceMethod<"Get the shape of the values per thread.",
-                    "SmallVector<unsigned>",
-                    "getSizePerThread">,
-
-    InterfaceMethod<"Gets the number of contiguous elements per thread.",
-                    "SmallVector<unsigned>",
-                    "getContigPerThread">,
     InterfaceMethod<"Convert to LinearLayout.",
                     "LinearLayout",
                     "toLinearLayout",
-                    (ins "ArrayRef<int64_t>":$shape)>
+                    (ins "ArrayRef<int64_t>":$shape)>,
   ];
 }
 
-class DistributedEncoding<string name, string attrMnemonic, list<Trait> traits = [],
-                     Dialect dialect = TritonGPU_Dialect>
-  : TritonGPU_Attr<name, attrMnemonic, !listconcat([DistributedEncodingTrait, LayoutEncodingTrait], traits), dialect> {
+class DistributedEncoding<string name, string attrMnemonic, list<Trait> traits = []>
+  : TritonGPU_Attr<name, attrMnemonic, !listconcat([DistributedEncodingTrait, LayoutEncodingTrait], traits)> {
 
   let description = [{
 Distributed encodings have a layout function L that is entirely characterized
@@ -583,15 +698,6 @@ L(T) = [ {0,8} , {1,9} , {2,10}, {3,11}, {0,8} , {1, 9} , {2, 10}, {3, 11},
   code extraDistributedDeclaration  = extraBaseClassDeclaration # [{
     // Implemented in subclasses
     SmallVector<unsigned> getRepOrder() const;
-    SmallVector<unsigned> getCTAsPerCGA() const;
-    SmallVector<unsigned> getCTAOrder() const;
-    SmallVector<unsigned> getCTASplitNum() const;
-    SmallVector<unsigned> getWarpsPerCTA() const;
-    SmallVector<unsigned> getWarpOrder() const;
-    SmallVector<unsigned> getThreadsPerWarp() const;
-    SmallVector<unsigned> getThreadOrder() const;
-
-    SmallVector<unsigned> getSizePerThread() const;
 
     LinearLayout toLinearLayout(ArrayRef<int64_t> shape) const;
   }];
@@ -606,7 +712,7 @@ def LinearLayoutParam : AttrOrTypeParameter<"LinearLayout",
   let cppAccessorType = "const LinearLayout &";
 }
 
-def LinearEncodingAttr : DistributedEncoding<"LinearEncoding", "linear_encoding"> {
+def LinearEncodingAttr : DistributedEncoding<"LinearEncoding", "linear_encoding", [DeclareLayoutEncodingMethods]> {
   let mnemonic = "linear";
 
   let description = [{
@@ -624,6 +730,9 @@ def LinearEncodingAttr : DistributedEncoding<"LinearEncoding", "linear_encoding"
     SmallVector<unsigned> getContigPerThread() const;
     SmallVector<unsigned> getContigPerWarp() const;
     SmallVector<unsigned> getOrder() const;
+    SmallVector<unsigned> getWarpOrder() const;
+    SmallVector<unsigned> getThreadOrder() const;
+
 
     // Generalizes get{Warp,Thread,CTA}Order to linear layouts.
     // Returns the order of the dimensions `dimName` of the layout.
@@ -637,6 +746,11 @@ def LinearEncodingAttr : DistributedEncoding<"LinearEncoding", "linear_encoding"
     // If skipBroadcast is false, we count a base zero
     SmallVector<unsigned> basesPerDim(StringAttr dimName,
                                       bool skipBroadcast = true) const;
+    SmallVector<unsigned> getThreadsPerWarp() const;
+    SmallVector<unsigned> getWarpsPerCTA() const;
+
+    // [FIXME LL] Supports legacy behaviour. We should remove these functions
+    SmallVector<unsigned> getSizePerThread() const;
   }];
 
   let genVerifyDecl = 1;
@@ -741,9 +855,9 @@ for
 
   let parameters = (
     ins
-    ArrayRefParameter<"unsigned">:$sizePerThread__,
-    ArrayRefParameter<"unsigned">:$threadsPerWarp__,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    ArrayRefParameter<"unsigned">:$sizePerThread,
+    ArrayRefParameter<"unsigned">:$threadsPerWarp,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
     ArrayRefParameter<"unsigned">:$order, // the fastest-changing axis first
 
     // CTALayout is optional in the textual IR.  If omitted, we infer it to be a
@@ -819,12 +933,7 @@ for
     }]>
   ];
 
-  let extraClassDeclaration = extraDistributedDeclaration # [{
-    SmallVector<unsigned> getContigPerThread() {
-      // Block encoding is dense stride layout. The elements per thread are contiguous.
-      return getSizePerThread();
-    };
-  }];
+  let extraClassDeclaration = extraDistributedDeclaration;
 
   let hasCustomAssemblyFormat = 1;
 }
@@ -836,22 +945,6 @@ for
 def MmaEncodingTrait : AttrInterface<"MmaEncodingTrait"> {
   let cppNamespace = "::mlir::triton::gpu";
   let methods = [
-
-    InterfaceMethod<"Return whether the layout support reduction op.",
-                    "bool",
-                    "supportReduction">,
-
-    InterfaceMethod<"Return size per thread for dot operands.",
-                    "SmallVector<unsigned>",
-                    "getSizePerThreadForOperand",
-                    (ins "int":$opIdx,
-                         "int":$kWidth)>,
-
-    InterfaceMethod<"Return the number of threads per warp for dot operands.",
-                    "SmallVector<unsigned>",
-                    "getThreadsPerWarpForOperand",
-                    (ins "int":$opIdx)>,
-
     InterfaceMethod<"Get the order of reps (tiles of this layout that tile the whole tensor). The fastest-changing axis first",
                     "SmallVector<unsigned>",
                     "getRepOrderForOperand",
@@ -867,11 +960,11 @@ An encoding for tensors that have been produced by MFMA matrix core instructions
 available on AMD Instinct GPUs of CDNA architectures.
 
 It is characterized by the following parameters:
-- `versionMajor` and `versionMinor` indicates the GPU architecture:
-  - 1.0: gfx908, i.e. MI100
-  - 2.0: gfx90a: i.e. MI200, MI210, MI250
-  - 3.0: gfx940, gfx941, gfx942: MI300
-  - 4.0: gfx950: MI350
+- `version` indicates the GPU architecture:
+  - 1: gfx908: CDNA1
+  - 2: gfx90a: CDNA2
+  - 3: gfx942: CDNA3
+  - 4: gfx950: CDNA4
 - `warpsPerCTA` indicates the warp layout in the block.
 - `MDim` and `NDim` indicate the dimension of the output of the mfma instruction.
 - `isTransposed` indicates the result tensor is transposed so that it can be converted to dotOperand layout
@@ -957,39 +1050,70 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
   [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
   [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
   [ 64,68...124  65,69...125  66,70...126  67,71...127 ]   [ 192,196...252  193,197...253  194,198...254  195,199...255 ]
+
+Example 4:
+This example demonstrates semantics of tilesPerWarp parameter. The MFMA layout (with tilesPerWarp=[1,1])
+assumes that each warp within a CTA tile computes a single MFMA tile. When the tensor is larger than
+a single CTA tile, these tiles are repeated across the tensor. In this setup, the output tiles computed
+by each wave were strided by the number of warps per CTA tile in both row and column dimensions.
+
+For instance, with 16 MFMA tiles and warpsPerCTA = [2, 2], the distribution of warps across the MFMA
+tiles looked like:
+
+w0 w1 w0 w1
+w2 w3 w2 w3
+w0 w1 w0 w1
+w2 w3 w2 w3
+
+tilesPerWarp parameter allows each warp to compute contiguous MFMA tiles in the row and/or column dimensions.
+Using the same example with tilesPerWarp = [2, 2], the layout becomes:
+
+w0 w0 w1 w1
+w0 w0 w1 w1
+w2 w2 w3 w3
+w2 w2 w3 w3
 }];
 
   let parameters = (
     ins
-    "unsigned": $versionMajor,
-    "unsigned": $versionMinor,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    "unsigned": $version,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
+    ArrayRefParameter<"unsigned">:$tilesPerWarp,
     "unsigned":$MDim,
     "unsigned":$NDim,
     "bool":$isTransposed,
-    "CTALayoutAttr":$CTALayout
+    "CTALayoutAttr":$CTALayout,
+    DefaultValuedParameter<"std::optional<Type>", "FloatType::get($_ctxt, 32)">:$elementType
   );
 
+  let builders = [
+    AttrBuilder<(ins "unsigned":$version,
+                     "ArrayRef<unsigned>":$warpsPerCTA,
+                     "unsigned":$MDim,
+                     "unsigned":$NDim,
+                     "bool":$isTransposed,
+                     "CTALayoutAttr":$CTALayout,
+                     "std::optional<Type>":$elementType), [{
+      SmallVector<unsigned> tilesPerWarp(warpsPerCTA.size(), 1);
+
+      return $_get(context, version, warpsPerCTA, tilesPerWarp, MDim, NDim, isTransposed, CTALayout, elementType);
+    }]>
+  ];
+
   let extraClassDeclaration = extraDistributedDeclaration # [{
-    bool supportReduction() const {
-      return true;
-    }
-    SmallVector<unsigned> getSizePerThreadForOperand(int kWidth, int opIdx) const;
     SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
     SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
-    SmallVector<unsigned> getThreadsPerWarpForOperand(int opIdx) const;
 
-    SmallVector<unsigned> getContigPerThread() {
-      auto rank = getWarpsPerCTA().size();
-      SmallVector<unsigned> contigPerThread(rank, 1);
-      if (getIsTransposed())
-        contigPerThread[rank - 1] = 4;
-      else
-        contigPerThread[rank - 2] = 4;
-      return contigPerThread;
-    };
+    // Check if tilesPerWarp is 1 in every dimension.
+    bool hasUnitTilesPerWarp() const;
 
+    // Returns a swizzled shared layout matching this MFMA layout for the
+    // dot operand at the given |operandIdx| with |operandShape|.
+    SwizzledSharedEncodingAttr composeSharedLayoutForOperand(
+        CTALayoutAttr ctaLayout, int operandIdx, ArrayRef<int64_t> operandShape,
+        ArrayRef<unsigned> sharedOrder, unsigned vectorSize,
+        unsigned elemBitWidth, bool needTrans) const;
   }];
 
   let genVerifyDecl = 1;
@@ -1092,7 +1216,7 @@ Row |
     ins
     "unsigned": $version,
     "bool":$isTransposed,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
     "CTALayoutAttr":$CTALayout
   );
 
@@ -1100,26 +1224,18 @@ Row |
   let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
-    bool supportReduction() const {
-      return true;
-    }
-    SmallVector<unsigned> getSizePerThreadForOperand(int kWidth, int opIdx) const;
-    SmallVector<int64_t> getElemsPerInstrForOperands() const;
+    SmallVector<int64_t> getElemsPerInstrForOperands(int kDim, int opIdx) const;
     SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape,
-                                          Type elemType, int kWidth, int opIdx) const;
+                                          Type elemType, int kWidth, int kDim, int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
-    SmallVector<unsigned> getThreadsPerWarpForOperand(int opIdx) const;
     static SmallVector<unsigned> getMNKDimPerInstr();
 
-    SmallVector<unsigned> getContigPerThread() {
-      auto rank = getWarpsPerCTA().size();
-      assert(rank == 2 || rank == 3);
-      SmallVector<unsigned> contigPerThread(rank, 1);
-      if (getVersion() == 2) {
-        contigPerThread[rank - 2] = 8;
-      }
-      return contigPerThread;
-    };
+    // Returns a swizzled shared layout matching this WMMA layout for the
+    // dot operand at the given |operandIdx| with |operandShape|.
+    SwizzledSharedEncodingAttr composeSharedLayoutForOperand(
+        CTALayoutAttr ctaLayout, int operandIdx, ArrayRef<int64_t> operandShape,
+        ArrayRef<unsigned> sharedOrder, unsigned kWidth,
+        unsigned elemBitWidth, bool needTrans) const;
   }];
 }
 
@@ -1211,7 +1327,7 @@ For example, the matrix L corresponding to blockTileSize=[32,16] is:
     ins
     "unsigned":$versionMajor,
     "unsigned":$versionMinor,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
     "CTALayoutAttr":$CTALayout,
     ArrayRefParameter<"unsigned">:$instrShape
   );
@@ -1227,30 +1343,12 @@ For example, the matrix L corresponding to blockTileSize=[32,16] is:
                                           int bitwidth, int kWidth,
                                           int opIdx) const;
     SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
-    SmallVector<unsigned> getThreadsPerWarpForOperand(int opIdx) const;
-
-    bool supportReduction() const {
-      if (isAmpere() || isHopper()) {
-        return true;
-      }
-      return false;
-    };
-    SmallVector<unsigned> getSizePerThreadForOperand(int kWidth, int opIdx) const;
-
-    SmallVector<unsigned> getContigPerThread() {
-      assert(isAmpere() || isHopper());
-      auto rank = getWarpsPerCTA().size();
-      SmallVector<unsigned> contigPerThread(rank, 1);
-      contigPerThread[rank - 1] = 2;
-      return contigPerThread;
-    };
-
   }];
 
   let hasCustomAssemblyFormat = 1;
 }
 
-def SliceEncodingAttr : DistributedEncoding<"SliceEncoding", "slice_encoding"> {
+def SliceEncodingAttr : DistributedEncoding<"SliceEncoding", "slice_encoding", [DeclareLayoutEncodingMethods]> {
   let mnemonic = "slice";
 
   let description = [{
@@ -1284,26 +1382,19 @@ def SliceEncodingAttr : DistributedEncoding<"SliceEncoding", "slice_encoding"> {
   let parameters = (
     ins
     "unsigned":$dim,
-    // TODO: constraint here to only take distributed encodings
-    "Attribute":$parent
+    "DistributedEncodingTrait":$parent
   );
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
     template<class T>
     SmallVector<T> paddedShape(ArrayRef<T> shape) const;
-
-    SmallVector<unsigned> getContigPerThread() {
-      auto parentLayout = mlir::cast<DistributedEncodingTrait>(getParent());
-      auto parentContigPerThread = parentLayout.getContigPerThread();
-      parentContigPerThread.erase(parentContigPerThread.begin() + getDim());
-      return parentContigPerThread;
-    };
   }];
 
   let hasCustomAssemblyFormat = 1;
+  let genVerifyDecl = 1;
 }
 
-def DotOperandEncodingAttr : DistributedEncoding<"DotOperandEncoding", "dot_operand_encoding"> {
+def DotOperandEncodingAttr : DistributedEncoding<"DotOperandEncoding", "dot_operand_encoding", [DeclareLayoutEncodingMethods]> {
   let mnemonic = "dot_op";
 
   let description = [{
@@ -1358,27 +1449,14 @@ vecIdx (index of the element in the quad; this is always along the k-dim)
         return $_get(context, opIdx, parent, 0);
       // For MMAV2 and V3
       unsigned bitwidth = eltTy.getIntOrFloatBitWidth();
-      unsigned kWidth = 32 / bitwidth;
+      unsigned kWidth = std::max(32 / bitwidth, 1u);
       return $_get(context, opIdx, parent, kWidth);
     }]>
   ];
 
   let assemblyFormat = "`<` `{` struct(params) `}` `>`";
   let genVerifyDecl = 1;
-  let extraClassDeclaration = extraDistributedDeclaration # [{
-    SmallVector<unsigned> getContigPerThread() {
-      auto rank = getWarpsPerCTA().size();
-      assert(rank == 2 || rank == 3);
-      SmallVector<unsigned> contigPerThread(rank, 1);
-      auto kWidth = getKWidth();
-      assert(kWidth != 0 && "Do not support kWidth=0");
-      if (getOpIdx() == 0)
-        contigPerThread[rank - 1] = kWidth;
-      else
-        contigPerThread[rank - 2] = kWidth;
-      return contigPerThread;
-    };
-  }];
+  let extraClassDeclaration = extraDistributedDeclaration;
 }
 
 def TTG_SharedMemorySpace : AttrDef<TritonGPU_Dialect, "SharedMemorySpace"> {
@@ -1387,4 +1465,5 @@ def TTG_SharedMemorySpace : AttrDef<TritonGPU_Dialect, "SharedMemorySpace"> {
     Attribute to indicate that the memory descriptor points to shared memory.
   }];
 }
+
 #endif

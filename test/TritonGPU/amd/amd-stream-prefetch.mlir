@@ -1,7 +1,7 @@
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-stream-pipeline="num_stages=3 global_prefetch=1" -canonicalize | FileCheck %s --check-prefixes=GLOBAL_1
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-stream-pipeline="num_stages=4 global_prefetch=2" -canonicalize | FileCheck %s --check-prefixes=GLOBAL_2
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-stream-pipeline="num_stages=3 global_prefetch=1 local_prefetch=1" -canonicalize | FileCheck %s --check-prefixes=GLOBAL_LOCAL_1
-// RUN: triton-opt %s -split-input-file -tritonamdgpu-stream-pipeline="num_stages=2 local_prefetch=1" -canonicalize | FileCheck %s --check-prefixes=LOCAL_1
+// RUN: triton-opt %s -tritonamdgpu-stream-pipeline="num_stages=3 global_prefetch=1" -canonicalize | FileCheck %s --check-prefixes=GLOBAL_1
+// RUN: triton-opt %s -tritonamdgpu-stream-pipeline="num_stages=4 global_prefetch=2" -canonicalize | FileCheck %s --check-prefixes=GLOBAL_2
+// RUN: triton-opt %s -tritonamdgpu-stream-pipeline="num_stages=3 global_prefetch=1 local_prefetch=1" -canonicalize | FileCheck %s --check-prefixes=GLOBAL_LOCAL_1
+// RUN: triton-opt %s -tritonamdgpu-stream-pipeline="num_stages=2 local_prefetch=1" -canonicalize | FileCheck %s --check-prefixes=LOCAL_1
 
 // matmul: 128x32 @ 32x128 -> 128x128
 #AL = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
@@ -9,7 +9,7 @@
 #ALs0 = #ttg.slice<{parent=#AL, dim=0}>
 #BLs0 = #ttg.slice<{parent=#BL, dim=0}>
 #BLs1 = #ttg.slice<{parent=#BL, dim=1}>
-#C = #ttg.nvidia_mma<{versionMajor = 2, warpsPerCTA = [4, 1]}>
+#C = #ttg.nvidia_mma<{versionMajor = 2, warpsPerCTA = [4, 1], instrShape = [16, 8]}>
 #A = #ttg.dot_op<{opIdx = 0, parent = #C, kWidth=2}>
 #B = #ttg.dot_op<{opIdx = 1, parent = #C, kWidth=2}>
 

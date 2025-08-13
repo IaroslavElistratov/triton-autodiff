@@ -58,7 +58,28 @@ module attributes {"ttg.target" = "cuda:0", "ttg.num-ctas" = 1 : i32, "ttg.num-w
   tt.func @memdesc(%d : !ttg.memdesc<1x64x16xf16, #shared0, #smem>) {
     tt.return
   }
+
+  // CHECK-LABEL: memdesc_with_alloc_shape
+  // CHECK-SAME: !ttg.memdesc<64x16xf16, #{{.+}}, mutable, 2x64x16>
+  tt.func @memdesc_with_alloc_shape(%d : !ttg.memdesc<64x16xf16, #shared0, #smem, mutable, 2x64x16>){
+    tt.return
+  }
 }
+
+// -----
+
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 64, transposed = false, elementBitWidth = 16,  CTAsPerCGA = [1,1,1,1], CTASplitNum = [1,1,1,1], CTAOrder = [3, 2, 1, 0]}>
+#shared1 = #ttg.nvmma_shared<{swizzlingByteWidth = 64, transposed = false, elementBitWidth = 16}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.target" = "cuda:0", "ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: memdesc_reshape
+  // CHECK: !ttg.memdesc<128x64xf16, #{{.+}}, mutable>
+  tt.func @memdesc_reshape(%d : !ttg.memdesc<32x1x4x64xf16, #shared, #smem, mutable>){
+    %1 = ttg.memdesc_reshape %d : !ttg.memdesc<32x1x4x64xf16, #shared, #smem, mutable> -> !ttg.memdesc<128x64xf16, #shared1, #smem, mutable>
+    tt.return
+  }
+}
+
 
 // -----
 
@@ -102,16 +123,22 @@ tt.func @warp_specialize_partitions(%arg0: i32, %arg1: i64) -> i64 {
   partition0(%arg2: i32) num_warps(4) {
     // CHECK-NEXT: arith.addi %arg2, %arg2 : i32
     %1 = arith.addi %arg2, %arg2 : i32
+    // CHECK-NEXT: ttg.warp_return
+    ttg.warp_return
   // CHECK-NEXT: }
   }
   // CHECK-NEXT: partition1(%arg2: i32) num_warps(1) {
   partition1(%arg2: i32) num_warps(1) {
+    // CHECK-NEXT: ttg.warp_return
+    ttg.warp_return
   // CHECK-NEXT: }
   }
   // CHECK-NEXT: partition2(%arg2: i32) num_warps(8) {
   partition2(%arg2: i32) num_warps(8) {
     // CHECK-NEXT: arith.muli
     %1 = arith.muli %arg2, %arg2 : i32
+    // CHECK-NEXT: ttg.warp_return
+    ttg.warp_return
   // CHECK-NEXT: } : (i32) -> i64
   } : (i32) -> i64
   tt.return %0 : i64
@@ -131,6 +158,8 @@ tt.func @warp_specialize_multiple_args_res(%arg0: i32, %arg1: i32) -> (i32, i32)
   partition0(%arg2: i32, %arg3: i32) num_warps(4) {
     // CHECK-NEXT: arith.addi %arg2, %arg3 : i32
     %1 = arith.addi %arg2, %arg3 : i32
+    // CHECK-NEXT: ttg.warp_return
+    ttg.warp_return
   // CHECK-NEXT: } : (i32, i32) -> (i32, i32)
   } : (i32, i32) -> (i32, i32)
   tt.return %0#0, %0#1 : i32, i32
@@ -169,13 +198,46 @@ tt.func @function_no_scope() {
   partition0() num_warps(2) {
     // CHECK-NEXT: tt.make_range {{.*}} tensor<128xi32, [[BLOCKED_2_WARPS]]>
     tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked_2_warps>
+    ttg.warp_return
   }
   // CHECK: partition1() num_warps(1)
   partition1() num_warps(1) {
     // CHECK-NEXT: tt.make_range {{.*}} tensor<128xi32, [[BLOCKED_1_WARPS]]>
     tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked_1_warps>
+    ttg.warp_return
   } : () -> ()
   tt.return
 }
 
+}
+
+// -----
+
+// CHECK-DAG: [[$BLOCKED:#.*]] = #ttg.blocked
+#blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+// CHECK-DAG: [[$LINEAR:#.*]] = #ttg.linear
+#linear = #ttg.linear<{register = [[0, 1], [16, 0], [32, 0], [64, 0]], lane = [[0, 0], [0, 0], [0, 0], [1, 0], [2, 0]], warp = [[4, 0], [8, 0]], block = []}>
+
+module attributes {"ttg.num-warps" = 4 : i32} {
+// CHECK-LABEL: @split_join_linear_mix
+tt.func @split_join_linear_mix(%arg: tensor<128x2xf32, #linear>) attributes {"ttg.num-warps" = 4 : i32} {
+  // CHECK-NEXT: tt.split %{{.*}} : tensor<128x2xf32, [[$LINEAR]]> -> tensor<128xf32, #ttg.slice<{dim = 1, parent = [[$BLOCKED]]}>>
+  %lhs, %rhs = tt.split %arg : tensor<128x2xf32, #linear> -> tensor<128xf32, #ttg.slice<{dim = 1, parent = #blocked}>>
+  // CHECK-NEXT: tt.join %{{.*}}, %{{.*}} : tensor<128xf32, #ttg.slice<{dim = 1, parent = [[$BLOCKED]]}>> -> tensor<128x2xf32, [[$LINEAR]]>
+  %j = tt.join %lhs, %rhs : tensor<128xf32, #ttg.slice<{dim = 1, parent = #blocked}>> -> tensor<128x2xf32, #linear>
+  tt.return
+}
+}
+
+// -----
+
+// CHECK-LABEL: @async_commit_group
+tt.func @async_commit_group(%arg0: !ttg.async.token) {
+  // CHECK-NEXT: ttg.async_commit_group
+  ttg.async_commit_group
+  // CHECK-NEXT: ttg.async_commit_group tokens %arg0
+  %0 = ttg.async_commit_group tokens %arg0
+  // CHECK-NEXT: ttg.async_commit_group
+  %1 = ttg.async_commit_group
+  tt.return
 }

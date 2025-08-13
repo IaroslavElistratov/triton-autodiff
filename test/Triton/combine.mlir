@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file -canonicalize -triton-combine | FileCheck %s
+// RUN: triton-opt %s -canonicalize -triton-combine | FileCheck %s
 
 // We don't combine if the dot result is used by more than one op.
 // CHECK-LABEL: @test_combine_dot_add_invalid_pattern
@@ -84,6 +84,29 @@ tt.func @test_combine_addptr_pattern(%base: !tt.ptr<f32>) -> tensor<8x!tt.ptr<f3
     tt.return %ptr1 : tensor<8x!tt.ptr<f32>>
 }
 
+// CHECK-LABEL: @test_combine_addptr_pattern_discardableattrs
+tt.func @test_combine_addptr_pattern_discardableattrs(%base: !tt.ptr<f32>) -> !tt.ptr<f32> {
+    %off0 = arith.constant 8 : i32
+    %off1 = arith.constant 4 : i32
+    // CHECK-NEXT: %[[cst:.*]] = arith.constant 12 : i32
+    // CHECK-NEXT: %0 = tt.addptr %{{.*}}, %[[cst]] {tt.constancy = 8 : i32, tt.contiguity = 512 : i32, tt.divisibility = 16 : i32} : !tt.ptr<f32>, i32
+    %ptr0 = tt.addptr %base, %off0 : !tt.ptr<f32>, i32
+    %ptr1 = tt.addptr %ptr0, %off1 {tt.divisibility = 16 : i32, tt.constancy = 8 : i32, tt.contiguity = 512 : i32} : !tt.ptr<f32>, i32
+
+    tt.return %ptr1 : !tt.ptr<f32>
+}
+
+// CHECK-LABEL: @test_combine_addptr_pattern_discardableattrs_disallowed
+tt.func @test_combine_addptr_pattern_discardableattrs_disallowed(%base: !tt.ptr<f32>) -> !tt.ptr<f32> {
+    %off0 = arith.constant 8 : i32
+    %off1 = arith.constant 4 : i32
+    // CHECK-NEXT: %[[cst:.*]] = arith.constant 12 : i32
+    // CHECK-NEXT: %0 = tt.addptr %{{.*}}, %[[cst]] {tt.divisibility = 16 : i32} : !tt.ptr<f32>, i32
+    %ptr0 = tt.addptr %base, %off0 : !tt.ptr<f32>, i32
+    %ptr1 = tt.addptr %ptr0, %off1 {tt.divisibility = 16 : i32, tt.disallowed = 8 : i32} : !tt.ptr<f32>, i32
+
+    tt.return %ptr1 : !tt.ptr<f32>
+}
 // CHECK-LABEL: @test_combine_addptr_pattern_i64
 tt.func @test_combine_addptr_pattern_i64(%base: !tt.ptr<f32>) -> tensor<8x!tt.ptr<f32>> {
     %off0 = arith.constant 10 : i64
@@ -384,9 +407,9 @@ tt.func @test_reshape_reduce(%0: tensor<32x4x2xi32>) -> (i32, tensor<16xi32>) {
 // CHECK-LABEL: test_rank_reduce_desc_load
 tt.func @test_rank_reduce_desc_load(%0: !tt.tensordesc<tensor<1x128x64xf16>>) -> (tensor<128x64xf16>) {
   %c0 = arith.constant 0 : i32
-  // CHECK: %[[R:.+]] = tt.experimental_descriptor_load {{.*}} : !tt.tensordesc<tensor<1x128x64xf16>> -> tensor<128x64xf16>
+  // CHECK: %[[R:.+]] = tt.descriptor_load {{.*}} : !tt.tensordesc<tensor<1x128x64xf16>> -> tensor<128x64xf16>
   // CHECK: tt.return %[[R]]
-  %l = tt.experimental_descriptor_load %0[%c0, %c0, %c0] : !tt.tensordesc<tensor<1x128x64xf16>> -> tensor<1x128x64xf16>
+  %l = tt.descriptor_load %0[%c0, %c0, %c0] : !tt.tensordesc<tensor<1x128x64xf16>> -> tensor<1x128x64xf16>
   %r = tt.reshape %l : tensor<1x128x64xf16> -> tensor<128x64xf16>
   tt.return %r :  tensor<128x64xf16>
 }

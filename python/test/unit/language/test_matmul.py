@@ -3,10 +3,9 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-import triton.tools.experimental_descriptor
 from test_mxfp import MXFP4Tensor, MXScaleTensor
 import re
-from triton._internal_testing import is_cuda, is_hip, is_hip_mi300, is_hip_mi350, is_hip_cdna
+from triton._internal_testing import is_cuda, is_hip, is_hip_cdna3, is_hip_cdna4, is_hip_cdna
 
 
 def f8_to_f16(x, dtype):
@@ -34,7 +33,8 @@ def matmul_kernel(  #
         stride_bk, stride_bn,  #
         stride_cm, stride_cn,  #
         BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,  #
-        NUM_STAGES: tl.constexpr, SCALE_A: tl.constexpr = None, PRECISION: tl.constexpr = "ieee"):
+        NUM_STAGES: tl.constexpr, SCALE_A: tl.constexpr = None, PRECISION: tl.constexpr = "ieee",
+        A_TRANS: tl.constexpr = False, EPILOGUE_SUBTILE: tl.constexpr = False, dummy: tl.constexpr = 0):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
@@ -42,22 +42,37 @@ def matmul_kernel(  #
     offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
     offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
     offs_k = tl.arange(0, BLOCK_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    if not A_TRANS:
+        a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    else:
+        a_ptrs = a_ptr + (offs_k[:, None] * stride_ak + offs_am[None, :] * stride_am)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=output_ptr.dtype.element_ty)
     for k in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=NUM_STAGES):
         a = tl.load(a_ptrs)
         if SCALE_A is not None:
             a = a * SCALE_A
+        if A_TRANS:
+            a = a.T
         b = tl.load(b_ptrs)
         accumulator = tl.dot(a, b, acc=accumulator, out_dtype=output_ptr.dtype.element_ty, input_precision=PRECISION)
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
-    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    mask_c = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    output_ptrs = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    tl.store(output_ptrs, accumulator, mask=mask_c)
+    if EPILOGUE_SUBTILE:
+        acc = tl.reshape(accumulator, (BLOCK_M, 2, BLOCK_N // 2))
+        acc = tl.permute(acc, (0, 2, 1))
+        acc0, acc1 = tl.split(acc)
+        offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N // 2)
+        output_ptrs0 = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+        output_ptrs1 = output_ptrs0 + stride_cn * (BLOCK_N // 2)
+        tl.store(output_ptrs0, acc0)
+        tl.store(output_ptrs1, acc1)
+    else:
+        offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        output_ptrs = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+        tl.store(output_ptrs, accumulator)
 
 
 def get_src_element_ty_size(dtype_str):
@@ -67,35 +82,46 @@ def get_src_element_ty_size(dtype_str):
         return 2
     if dtype_str == "float32" or dtype_str == "tensorfloat32":
         return 4
+    if dtype_str == "float64":
+        return 8
     raise ValueError(f"Unknown dtype {dtype_str}")
 
 
-@pytest.mark.parametrize("dtype_src_str", ["float32", "tensorfloat32", "float16", "float8e5"])
-@pytest.mark.parametrize("dtype_dst_str", ["float32", "float16"])
+@pytest.mark.parametrize("dtype_src_str", ["float32", "tensorfloat32", "float16", "float8e5", "float64"])
+@pytest.mark.parametrize("dtype_dst_str", ["float32", "float16", "float64"])
 @pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES", [(128, 128, 16, 4), (64, 128, 32, 4), (32, 32, 32, 4),
                                                                    (256, 128, 32, 4), (64, 512, 32, 2),
                                                                    (512, 64, 32, 2), (64, 16, 16, 4)])
 @pytest.mark.parametrize("NUM_CTAS", [1, 2])
 @pytest.mark.parametrize("NUM_WARPS", [4, 8])
-def test_simple_matmul(dtype_src_str, dtype_dst_str, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, NUM_WARPS, NUM_CTAS,
-                       device):
+@pytest.mark.parametrize("EPILOGUE_SUBTILE", [True, False])
+@pytest.mark.parametrize("LAYOUT_16x256", [True, False])
+def test_simple_matmul(dtype_src_str, dtype_dst_str, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, NUM_WARPS, NUM_CTAS, device,
+                       EPILOGUE_SUBTILE, LAYOUT_16x256, monkeypatch):
     if NUM_CTAS > 1 and (not is_cuda() or torch.cuda.get_device_capability()[0] < 9):
         pytest.skip("Clusters requires nvidia compute capability >= 9")
-    if is_hip() and ((BLOCK_K * BLOCK_M + BLOCK_K * BLOCK_N) * NUM_STAGES * get_src_element_ty_size(dtype_src_str)
-                     > 65536):
-        pytest.skip("HIP path requires less than 64KB of shared memory")
-    if is_hip() and (not is_hip_mi300()) and dtype_src_str == "tensorfloat32":
-        pytest.skip("tensorfloat32 is only supported on HIP MI300")
+    shared_mem_accum = (BLOCK_K * BLOCK_M + BLOCK_K * BLOCK_N) * NUM_STAGES * get_src_element_ty_size(dtype_src_str)
+    shared_mem_avail = triton.runtime.driver.active.utils.get_device_properties(0)["max_shared_mem"]
+    if shared_mem_accum > shared_mem_avail:
+        pytest.skip("Skipped due to insufficient shared memory on this GPU.")
+    if is_hip() and (not is_hip_cdna3()) and dtype_src_str == "tensorfloat32":
+        pytest.skip("tensorfloat32 is only supported on HIP CDNA3")
     if dtype_src_str == "float8e5" and BLOCK_K == 16:
         pytest.skip("Skipping cases small K for float8")
     if dtype_src_str == "float8e5" and device == "cuda" and torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("Float8 requires compute capability >= 9")
+    if (dtype_src_str == "float64") != (dtype_dst_str == "float64"):
+        pytest.skip("Skipping unsupported case")
     if "float32" in dtype_src_str and dtype_dst_str == "float16":
         pytest.skip("Skipping unsupported case")
     if "float32" == dtype_src_str and NUM_CTAS > 1:
         pytest.skip("FMA matmul not supported for multiple CTAs")
     if (BLOCK_M < 64 or (BLOCK_M == 64 and BLOCK_N == 16)) and NUM_CTAS > 1:
         pytest.skip("multi-CTAs is broken for mmav2")
+    if EPILOGUE_SUBTILE and (is_hip() or NUM_CTAS > 1 or BLOCK_N >= 512):
+        pytest.skip("creates convert layout too big to fit in smem")
+    if LAYOUT_16x256 and (not is_cuda() or torch.cuda.get_device_capability()[0] < 10):
+        pytest.skip("skip forcing tmem layout on non blackwell targets.")
     M, N, K = 1024, 512, 256
     torch.manual_seed(42)
     precision = "tf32" if dtype_src_str == "tensorfloat32" else "ieee"
@@ -111,12 +137,16 @@ def test_simple_matmul(dtype_src_str, dtype_dst_str, BLOCK_M, BLOCK_N, BLOCK_K, 
         b = torch.randn(K, N, dtype=dtype_src, device=device)
         A = a
         B = b
+    # pass a dummy constexpr argument to force recompilation.
+    if LAYOUT_16x256:
+        monkeypatch.setenv("TRITON_PREFER_TMEM_16x256_LAYOUT", "1")
     dtype_dst = getattr(torch, dtype_dst_str)
     output = torch.empty((M, N), dtype=dtype_dst, device=device)
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
     k = matmul_kernel[grid](a, b, output, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0),
                             output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES=NUM_STAGES, PRECISION=precision,
-                            num_warps=NUM_WARPS, num_ctas=NUM_CTAS)
+                            num_warps=NUM_WARPS, num_ctas=NUM_CTAS, EPILOGUE_SUBTILE=EPILOGUE_SUBTILE,
+                            dummy=LAYOUT_16x256)
     ref_out = torch.matmul(A, B).to(torch.float32)
     output = output.to(torch.float32)
     if dtype_src_str == "float32":
@@ -130,15 +160,23 @@ def test_simple_matmul(dtype_src_str, dtype_dst_str, BLOCK_M, BLOCK_N, BLOCK_K, 
         atol = 0.01
         rtol = 0.01
     torch.testing.assert_close(ref_out, output, atol=atol, rtol=rtol)
-    # Make sure the mma is pipelined by checking if in the TTGIR we are waiting for the
-    # barrier coming from the loop args (previous iteration).
+    # Make sure the mma is pipelined by checking if in the TTGIR we see two mmav5
+    # operations. (Pipeliner will add additional mma operation by peeling the prologue.)
     # This applies only if TCv5 MMA is used (M % 64 == 0 and N % 8 == 0) and
     # when MMA arguments loads are pipelined (N > 16)
     if (device == "cuda" and torch.cuda.get_device_capability()[0] == 10 and NUM_STAGES > 1 and BLOCK_M % 64 == 0
-            and BLOCK_N % 8 == 0 and BLOCK_N > 16 and not (precision == "ieee" and dtype_src_str == "float32")):
+            and BLOCK_N % 8 == 0 and BLOCK_N > 16
+            and not (precision == "ieee" and (dtype_src_str == "float32" or dtype_src_str == "float64"))):
         ttgir = k.asm["ttgir"]
-        pattern = (r"ttng.wait_barrier %arg")
-        assert re.search(pattern, str(ttgir)), "The TTGIR does not match the expected pattern."
+        count = ttgir.count("ttng.tc_gen5_mma")
+        assert count == 2, "The TTGIR does not match the expected pattern."
+        ptx = k.asm["ptx"]
+        if LAYOUT_16x256:
+            assert "16x256b" in ptx, "PTX does not contain 16x256b"
+        else:
+            if "32x32b" not in ptx and "16x32b" not in ptx:
+                print(ptx)
+            assert ("32x32b" in ptx) or ("16x32b" in ptx), "PTX does not contain 32x32b or 16x32b"
 
 
 # persistent matmul with fused loops
@@ -246,15 +284,14 @@ def test_simple_persistent_matmul(BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, DISALLOW
 
     torch.testing.assert_close(ref_out, output, atol=0.01, rtol=0.01)
 
-    # Make sure the mma is pipelined by checking if in the TTGIR we are waiting for the
-    # barrier coming from the loop args (previous iteration).
+    # Make sure the mma is pipelined by checking if in the TTGIR we have peeled mmav5 ops.
     # This applies only if TCv5 MMA is used (M % 64 == 0 and N % 8 == 0) and
     # when MMA arguments loads are pipelined (N > 16)
     if (device == "cuda" and torch.cuda.get_device_capability()[0] == 10 and BLOCK_M % 64 == 0 and BLOCK_N % 8 == 0
             and BLOCK_N > 16):
         ttgir = k.asm["ttgir"]
-        pattern = "ttng.wait_barrier %arg"
-        assert ttgir.count(pattern) > 0, "Expect barrier coming from the previous iteration."
+        pattern = "ttng.tc_gen5_mma"
+        assert ttgir.count(pattern) > 0, "Expect peeled mmav5 operations."
 
 
 @triton.jit
@@ -282,10 +319,8 @@ def mxfp_matmul(  #
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=output_ptr.dtype.element_ty)
     for k in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=NUM_STAGES):
-        k_remaining = K - k * BLOCK_K
-        valid_k = offs_k < k_remaining
-        a = tl.load(a_ptrs, mask=valid_k[None, :], other=0.)
-        b = tl.load(b_ptrs, mask=valid_k[:, None], other=0.)
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
         scale_a = tl.load(a_scale_ptr)
         scale_b = tl.load(b_scale_ptr)
         accumulator = tl.dot_scaled(a, scale_a, "e5m2", b, scale_b, "e5m2", accumulator)
@@ -308,13 +343,23 @@ def fp8e8m0_to_float32(scale):
     return scale
 
 
-@pytest.mark.parametrize("M, N, K", [(1024, 512, 256), (128, 256, 256), (128, 128, 128), (2, 4, 32), (2, 4, 64),
-                                     (256, 16, 32)])
+@pytest.mark.parametrize("M, N, K", [(1024, 512, 256), (128, 256, 256), (128, 128, 128), (2, 4, 64)])
 @pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (256, 128, 128), (128, 256, 128),
                                                        (128, 256, 256), (128, 128, 64), (128, 64, 128)])
 @pytest.mark.parametrize("NUM_STAGES", [1, 3])
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 10, reason="Requires compute capability >= 10")
-def test_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
+@pytest.mark.parametrize("NUM_WARPS", [4, 8])
+@pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else [0]))
+def test_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, nonKDim, NUM_WARPS, device):
+    if K % BLOCK_K != 0:
+        pytest.skip("Kernel requires shapes aligned by K dimension")
+    if is_cuda() and torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("Requires compute capability >= 10")
+    elif is_hip():
+        if not is_hip_cdna4():
+            pytest.skip("Scaled mxfp8 matmul is only natively supported on CDNA4")
+        if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
+            pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
+
     if BLOCK_N == 256 and BLOCK_K == 256:
         NUM_STAGES = min(NUM_STAGES, 2)
     torch.manual_seed(42)
@@ -330,9 +375,12 @@ def test_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
     dtype_dst = getattr(torch, dtype_dst_str)
     output = torch.empty((M, N), dtype=dtype_dst, device=device)
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-    out = mxfp_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, a_scale.stride(0), a.stride(0), a.stride(1),
-                            b.stride(0), b.stride(1), output.stride(0), output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K,
-                            NUM_STAGES=NUM_STAGES)
+    kernel_kwargs = {}
+    if is_hip():
+        kernel_kwargs["matrix_instr_nonkdim"] = nonKDim
+    mxfp_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, a_scale.stride(0), a.stride(0), a.stride(1), b.stride(0),
+                      b.stride(1), output.stride(0), output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES=NUM_STAGES,
+                      **kernel_kwargs, num_warps=NUM_WARPS)
     a_scale_f32 = fp8e8m0_to_float32(a_scale)
     b_scale_f32 = fp8e8m0_to_float32(b_scale)
     a_scale_f32 = a_scale_f32.repeat_interleave(32, dim=1)
@@ -348,10 +396,6 @@ def test_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, device):
     atol = 0.0001
     rtol = 0.0001
     torch.testing.assert_close(ref_out, output, atol=atol, rtol=rtol)
-
-    # Pipelining of dot_scaled requires tmem_copy to be used, which in turn
-    # requires the scales to be in the blocked layout in global memory.
-    assert "ttng.wait_barrier" not in out.asm["ttgir"]
 
 
 def _knob_promote_lhs_to_tmem(monkeypatch):
@@ -413,7 +457,7 @@ def block_scale_mxfp_matmul(  #
             scale_a = scale_a.reshape(BLOCK_M // 128, BLOCK_K // 128, 32, 4, 4)
             scale_b = scale_b.reshape(BLOCK_N // 128, BLOCK_K // 128, 32, 4, 4)
 
-        # Scales are comming in for optimial peformance, but we reshape here for
+        # Scales are coming in for optimial performance, but we reshape here for
         # the canonical inputs to dot_scaled
         # These reshapes and transposes will be optimized away during lowering
         scale_a = scale_a.trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K // 32)
@@ -431,8 +475,246 @@ def block_scale_mxfp_matmul(  #
     tl.store(output_ptrs, accumulator, mask=c_mask)
 
 
-def _knob_disable_ptxas_opt(monkeypatch):
-    monkeypatch.setenv("DISABLE_PTXAS_OPT", "1")
+@triton.jit
+def _gemm_afp4_wfp4_kernel_preshuffled_scales_cdna4(a_ptr, b_ptr, c_ptr, a_scales_ptr, b_scales_ptr, M, N, K, stride_am,
+                                                    stride_ak, stride_bk, stride_bn, stride_ck, stride_cm, stride_cn,
+                                                    stride_asm, stride_ask, stride_bsn, stride_bsk,
+                                                    # Meta-parameters
+                                                    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                                                    mfma_nonkdim: tl.constexpr, preshuffle: tl.constexpr):
+    """Kernel for computing the matmul C = A x B.
+    A and B inputs are in the microscale fp4 (mxfp4) format.
+    A_scales and B_scales are in e8m0 format.
+    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    """
+
+    pid = tl.program_id(axis=0)
+
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    # We assume 32 elements along K share the same scale.
+    SCALE_GROUP_SIZE: tl.constexpr = 32
+
+    if preshuffle:
+        NON_K_PRESHUFFLE_BLOCK_SIZE: tl.constexpr = 32
+    else:
+        NON_K_PRESHUFFLE_BLOCK_SIZE: tl.constexpr = 1
+
+    num_k_iter = tl.cdiv(K, BLOCK_K // 2)
+    # Create pointers for first block of A and B input matrices
+    # The BLOCK sizes are of the elements and in fp4 we pack 2 per uint8 container.
+    offs_k = tl.arange(0, BLOCK_K // 2)
+    offs_k_split = offs_k
+    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k_split[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k_split[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    # Create pointers for the first block of A and B scales
+    offs_asn = (pid_n *
+                (BLOCK_N // NON_K_PRESHUFFLE_BLOCK_SIZE) + tl.arange(0, (BLOCK_N // NON_K_PRESHUFFLE_BLOCK_SIZE))) % N
+    offs_ks = tl.arange(0, BLOCK_K // SCALE_GROUP_SIZE * NON_K_PRESHUFFLE_BLOCK_SIZE)
+
+    # B scales are N x K even though B operand is K x N.
+    b_scale_ptrs = (b_scales_ptr + offs_asn[:, None] * stride_bsn + offs_ks[None, :] * stride_bsk)
+    offs_asm = (pid_m *
+                (BLOCK_M // NON_K_PRESHUFFLE_BLOCK_SIZE) + tl.arange(0, (BLOCK_M // NON_K_PRESHUFFLE_BLOCK_SIZE))) % M
+    a_scale_ptrs = (a_scales_ptr + offs_asm[:, None] * stride_asm + offs_ks[None, :] * stride_ask)
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k in range(0, num_k_iter):
+        if preshuffle:
+            # Here we "undo" the shuffle done in global memory (shuffle_scales_cdna4 function).
+            if mfma_nonkdim == 32:
+                a_scales = tl.load(a_scale_ptrs).reshape(BLOCK_M // NON_K_PRESHUFFLE_BLOCK_SIZE,
+                                                         BLOCK_K // SCALE_GROUP_SIZE // 8, 2, 32, 4,
+                                                         1).permute(0, 3, 1, 4, 2,
+                                                                    5).reshape(BLOCK_M, BLOCK_K // SCALE_GROUP_SIZE)
+                b_scales = tl.load(b_scale_ptrs).reshape(BLOCK_N // NON_K_PRESHUFFLE_BLOCK_SIZE,
+                                                         BLOCK_K // SCALE_GROUP_SIZE // 8, 2, 32, 4,
+                                                         1).permute(0, 3, 1, 4, 2,
+                                                                    5).reshape(BLOCK_N, BLOCK_K // SCALE_GROUP_SIZE)
+            elif mfma_nonkdim == 16:
+                a_scales = tl.load(a_scale_ptrs).reshape(BLOCK_M // NON_K_PRESHUFFLE_BLOCK_SIZE,
+                                                         BLOCK_K // SCALE_GROUP_SIZE // 8, 4, 16, 2, 2,
+                                                         1).permute(0, 5, 3, 1, 4, 2,
+                                                                    6).reshape(BLOCK_M, BLOCK_K // SCALE_GROUP_SIZE)
+                b_scales = tl.load(b_scale_ptrs).reshape(BLOCK_N // NON_K_PRESHUFFLE_BLOCK_SIZE,
+                                                         BLOCK_K // SCALE_GROUP_SIZE // 8, 4, 16, 2, 2,
+                                                         1).permute(0, 5, 3, 1, 4, 2,
+                                                                    6).reshape(BLOCK_N, BLOCK_K // SCALE_GROUP_SIZE)
+        else:
+            a_scales = tl.load(a_scale_ptrs)
+            b_scales = tl.load(b_scale_ptrs)
+
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs, cache_modifier=None)
+
+        accumulator += tl.dot_scaled(a, a_scales, "e2m1", b, b_scales, "e2m1")
+
+        # Advance the ptrs to the next K block.
+        a_ptrs += (BLOCK_K // 2) * stride_ak
+        b_ptrs += (BLOCK_K // 2) * stride_bk
+        if preshuffle:
+            a_scale_ptrs += BLOCK_K * stride_ask
+            b_scale_ptrs += BLOCK_K * stride_bsk
+        else:
+            a_scale_ptrs += (BLOCK_K // SCALE_GROUP_SIZE) * stride_ask
+            b_scale_ptrs += (BLOCK_K // SCALE_GROUP_SIZE) * stride_bsk
+
+    c = accumulator.to(c_ptr.type.element_ty)
+
+    # Write back the block of the output matrix C with masks.
+    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
+    c_ptrs = (c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :])
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    tl.store(c_ptrs, c, mask=c_mask, cache_modifier=".wt")
+
+
+@pytest.mark.parametrize("M, N, K", [(1024, 1024, 1024)])
+@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 256), (64, 64, 512), [32, 32, 64]])
+@pytest.mark.parametrize("mfma_nonkdim", [16, 32])
+@pytest.mark.parametrize("preshuffle", [True, False])
+@pytest.mark.skipif(is_cuda() and torch.cuda.get_device_capability()[0] == 10, reason="Compilation bug for GB200.")
+@pytest.mark.skipif(is_hip() and not is_hip_cdna4(), reason="Scaled dot is not emulated on other archs yet.")
+def test_preshuffle_scale_mxfp_cdna4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, mfma_nonkdim, preshuffle, device):
+    # This test primarily evaluates correctness for efficient scale packing for MFMA-scaled instructions.
+    #
+    # Scales are stored as 8-bit tensors, where each element scales 32 values from the A or B operand tensors.
+    # Since MFMA instructions are wave-level instructions, that means that each thread provides a fixed set of operand values to MFMA instructions.
+    #
+    # For example, in an MFMA instruction with shape 16x16x128:
+    # - 4 threads contribute elements along the K dimension.
+    # - 16 threads contribute elements along the M or N dimension.
+    #
+    # From the perspective of the scales tensor, even if the K dimension is stored contiguously in LDS,
+    # each thread sees its elements along K dim as strided due to interleaving with other threads.
+    # This striding limits the ability to load scale values using vectorized memory access.
+    #
+    # Our goal is to reorganize the scale tensor so that:
+    # 1. Each thread stores the 4 scale values it needs for 4 MFMA ops in contiguous memory.
+    # 2. Continuous threads access contiguous memory locations improving global memory coalescing when bypassing LDS,
+    #    which is especially beneficial for "skinny" matmuls.
+    #
+    # We consider two MFMA cases: one with non-K dimension 16, and one with 32.
+    # In both, the minimum tile size for preshuffling is 32x32x256.
+    # For example, for a 32x256 operand tile, the corresponding scale tensor has shape 32x8,
+    # where each scale covers 32 elements along the K dimension.
+    #
+    # Each thread holds one scale per MFMA operation. We pack the 4 scale values (for 4 different MFMA ops)
+    # next to each other in memory.
+    #
+    # Case 1: mfma_scaled_16x16x128
+    #
+    # Packing order: mfma_op_0, mfma_op_2, mfma_op_1, mfma_op_3
+    #
+    #            K = 128       K = 128
+    #        +------------+ +------------+
+    #    M=16|  MFMA op 0 | |  MFMA op 1 |
+    #        +------------+ +------------+
+    #    M=16|  MFMA op 2 | |  MFMA op 3 |
+    #        +------------+ +------------+
+    #
+    # Case 2: mfma_scaled_32x32x64
+    #
+    # Packing order: mfma_op_0, mfma_op_1, mfma_op_2, mfma_op_3
+    #
+    #            K=64     K=64     K=64     K=64
+    #        +--------+ +--------+ +--------+ +--------+
+    #    M=32| op 0   | | op 1   | | op 2   | | op 3   |
+    #        +--------+ +--------+ +--------+ +--------+
+
+    if preshuffle and (BLOCK_M < 32 or BLOCK_N < 32 or BLOCK_K < 256):
+        pytest.skip("Minimal tile size for preshuffling is 32x32x256")
+
+    def shuffle_scales_cdna4(scales: torch.Tensor):
+        if not preshuffle:
+            return scales
+
+        scales_shuffled = scales.clone()
+
+        sm, sn = scales_shuffled.shape
+        if mfma_nonkdim == 32:
+            scales_shuffled = scales_shuffled.view(sm // 32, 32, sn // 8, 4, 2, 1)
+            scales_shuffled = scales_shuffled.permute(0, 2, 4, 1, 3, 5).contiguous()
+        elif mfma_nonkdim == 16:
+            scales_shuffled = scales_shuffled.view(sm // 32, 2, 16, sn // 8, 2, 4, 1)
+            scales_shuffled = scales_shuffled.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
+
+        scales_shuffled = scales_shuffled.view(sm // 32, sn * 32)
+        return scales_shuffled
+
+    def e8m0_to_f32(x):
+        x_f32 = 2**((x - 127).to(torch.float32))
+        x_f32[x_f32 == 128] = float("nan")
+        return x_f32
+
+    def run_torch(x, w, x_scales, w_scales, dtype):
+        # First convert the x and w inputs to f32.
+        SCALE_GROUP_SIZE = 32
+        x_f32 = x.to(torch.float32)
+        w_f32 = w.to(torch.float32)
+        # Next convert the e8m0 scales to f32.
+        x_scales = x_scales.repeat_interleave(SCALE_GROUP_SIZE, dim=1).to(torch.float32)
+        x_scales_f32 = e8m0_to_f32(x_scales)
+        x_f32 = x_f32 * x_scales_f32
+        w_scales = w_scales.repeat_interleave(SCALE_GROUP_SIZE, dim=1).to(torch.float32)
+        w_scales_f32 = e8m0_to_f32(w_scales)
+        w_f32 = w_f32 * w_scales_f32
+        return torch.mm(x_f32, w_f32.T).to(dtype)
+
+    def generate_gemm_afp4wfp4_inputs(M, N, K):
+        torch.manual_seed(5)
+        SCALE_GROUP_SIZE = 32
+
+        x = MXFP4Tensor(size=(M, K), device="cuda").random()
+        w = MXFP4Tensor(size=(N, K), device="cuda").random()
+
+        x_scales = torch.randint(124, 128, (K // SCALE_GROUP_SIZE, M), dtype=torch.uint8, device="cuda")
+        w_scales = torch.randint(124, 128, (K // SCALE_GROUP_SIZE, N), dtype=torch.uint8, device="cuda")
+        x_scales = x_scales.T
+        w_scales = w_scales.T
+        x_scales_shuffled = shuffle_scales_cdna4(x_scales)
+        w_scales_shuffled = shuffle_scales_cdna4(w_scales)
+
+        return (
+            x,
+            w,
+            x_scales,
+            w_scales,
+            x_scales_shuffled,
+            w_scales_shuffled,
+        )
+
+    x_mxfp4, w_mxfp4, x_scales, w_scales, x_scales_triton, w_scales_triton = generate_gemm_afp4wfp4_inputs(M, N, K)
+
+    x = x_mxfp4.to_packed_tensor(dim=1)
+    w = w_mxfp4.to_packed_tensor(dim=1)
+
+    torch_out = run_torch(x_mxfp4, w_mxfp4, x_scales, w_scales, torch.float32)
+    M, K = x.shape
+    N, K = w.shape
+    w = w.T
+    triton_out = torch.empty((M, N), device=x.device)
+
+    kernel_kwargs = {}
+    if is_hip():
+        kernel_kwargs["matrix_instr_nonkdim"] = mfma_nonkdim
+
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
+    _gemm_afp4_wfp4_kernel_preshuffled_scales_cdna4[grid](x, w, triton_out, x_scales_triton, w_scales_triton, M, N, K,
+                                                          x.stride(0), x.stride(1), w.stride(0), w.stride(1), 0,
+                                                          triton_out.stride(0), triton_out.stride(1),
+                                                          x_scales_triton.stride(0), x_scales_triton.stride(1),
+                                                          w_scales_triton.stride(0), w_scales_triton.stride(1), BLOCK_M,
+                                                          BLOCK_N, BLOCK_K, mfma_nonkdim, preshuffle, num_warps=8,
+                                                          num_stages=1, **kernel_kwargs)
+    triton_out = triton_out.to(torch.float32)
+    torch.testing.assert_close(torch_out, triton_out)
 
 
 @pytest.mark.parametrize("M, N, K", [(1024, 512, 512), (998, 111, 512), (63, 128, 512)])
@@ -440,12 +722,8 @@ def _knob_disable_ptxas_opt(monkeypatch):
                                                        (128, 128, 256), (128, 256, 256)])
 @pytest.mark.parametrize("NUM_STAGES", [1, 2, 4])
 @pytest.mark.parametrize("USE_2D_SCALE_LOAD", [False, True])
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 10, reason="Requires compute capability >= 10")
-def test_blocked_scale_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, USE_2D_SCALE_LOAD, device, monkeypatch):
-    if NUM_STAGES == 1 and USE_2D_SCALE_LOAD:
-        # Disabling ptxas optimization as a temporary workaround, otherwise the test does not pass
-        _knob_disable_ptxas_opt(monkeypatch)
-
+@pytest.mark.skipif(is_hip() or torch.cuda.get_device_capability()[0] != 10, reason="Requires compute capability == 10")
+def test_blocked_scale_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, USE_2D_SCALE_LOAD, device):
     if BLOCK_N == 256 and BLOCK_K == 256:
         NUM_STAGES = min(NUM_STAGES, 2)
     elif BLOCK_K == 256:
@@ -470,6 +748,7 @@ def test_blocked_scale_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, USE_
                                         b.stride(1), output.stride(0), output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K,
                                         NUM_STAGES=NUM_STAGES, USE_2D_SCALE_LOAD=USE_2D_SCALE_LOAD)
     ttgir = out.asm["ttgir"]
+    ptx = out.asm["ptx"]
 
     def flatten_scale(scale):
         num_chunk_m, num_chunk_k, _, _, _ = scale.shape
@@ -494,14 +773,13 @@ def test_blocked_scale_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, USE_
     if USE_2D_SCALE_LOAD:
         # Due to an issue in the coalescing pass, tmem_copy can not be generated for the 5D load.
         # The issue is fixed using the patch from https://github.com/triton-lang/triton/pull/4914
-        assert "tmem_copy" in ttgir
-
+        assert "tcgen05.cp" in ptx
     if NUM_STAGES > 1:
         if BLOCK_M == BLOCK_K and BLOCK_N == BLOCK_K:
-            load_pipelined = ttgir.count(f"ttg.local_alloc  : () -> !ttg.memdesc<{NUM_STAGES}x{BLOCK_M}x{BLOCK_K}") == 2
+            load_pipelined = ttgir.count(f"ttg.local_alloc : () -> !ttg.memdesc<{NUM_STAGES}x{BLOCK_M}x{BLOCK_K}") == 2
         else:
-            load_pipelined = (ttgir.count(f"ttg.local_alloc  : () -> !ttg.memdesc<{NUM_STAGES}x{BLOCK_M}x{BLOCK_K}") and
-                              ttgir.count(f"ttg.local_alloc  : () -> !ttg.memdesc<{NUM_STAGES}x{BLOCK_K}x{BLOCK_N}"))
+            load_pipelined = (ttgir.count(f"ttg.local_alloc : () -> !ttg.memdesc<{NUM_STAGES}x{BLOCK_M}x{BLOCK_K}")
+                              and ttgir.count(f"ttg.local_alloc : () -> !ttg.memdesc<{NUM_STAGES}x{BLOCK_K}x{BLOCK_N}"))
 
         if load_pipelined and USE_2D_SCALE_LOAD:
             # If load is pipelined and tmem_copy is used,  MMA pipelining should also kick in
@@ -513,90 +791,44 @@ def test_blocked_scale_mxfp(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, USE_
             print(f"SWP failed for M = {M}, N = {N}")
 
 
-@triton.jit
-def lhs_in_tmem_kernel(  #
-        a_ptr, b_ptr, output_ptr,  #
-        stride_am, stride_ak,  #
-        stride_bk, stride_bn,  #
-        stride_cm, stride_cn,  #
-        M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, A_TRANS: tl.constexpr, BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_M)
-    pid_m = pid % num_pid_m
-    pid_n = pid // num_pid_m
-    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
-    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
-    offs_k = tl.arange(0, BLOCK_K)
-
-    if not A_TRANS:
-        a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    else:
-        a_ptrs = a_ptr + (offs_k[:, None] * stride_am + offs_am[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=1):
-        k_remaining = K - k * BLOCK_K
-        valid_k = offs_k < k_remaining
-        m_remaining = M - pid_m * BLOCK_M
-        valid_m = offs_am < m_remaining
-        a = tl.load(a_ptrs, mask=(valid_k[None, :] & valid_m[:, None]), other=0.0)
-        if A_TRANS:
-            a = a.T
-        n_remaining = N - pid_n * BLOCK_N
-        valid_n = offs_bn < n_remaining
-        b = tl.load(b_ptrs, mask=(valid_k[:, None] & valid_n[None, :]), other=0.0)
-        accumulator = tl.dot(a, b, acc=accumulator)
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += BLOCK_K * stride_bk
-
-    offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    output_ptrs = output_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    mask_c = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(output_ptrs, accumulator, mask=mask_c)
-
-
-@pytest.mark.parametrize("M, N, K", [(128, 64, 64), (1024, 512, 256)])
-@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (256, 128, 128), (128, 256, 128),
-                                                       (128, 256, 256), (128, 128, 64), (128, 64, 128)])
+@pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 64), (128, 64, 128), (64, 128, 32), (128, 256, 32),
+                                                       (256, 64, 32)])
 @pytest.mark.parametrize("a_trans", [False, True])
 @pytest.mark.parametrize("dtype_src_str", ["float32", "float16", "float8e5"])
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 10, reason="Requires compute capability >= 10")
-def test_lhs_in_tmem(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, a_trans, dtype_src_str, device, monkeypatch):
+@pytest.mark.skipif(is_hip() or torch.cuda.get_device_capability()[0] != 10, reason="Requires compute capability == 10")
+def test_lhs_in_tmem(BLOCK_M, BLOCK_N, BLOCK_K, a_trans, dtype_src_str, device, monkeypatch):
+    M = 1024
+    N = 512
+    K = 256
     _knob_promote_lhs_to_tmem(monkeypatch)
-    if M != BLOCK_M or N != BLOCK_N or K != BLOCK_K:
-        # TODO: Make LHS TMEM promotion work for all problem sizes regardless of block dims
-        pytest.xfail(
-            "LHS TMEM promotion produces incorrect results when the workload dimensions are not equal to the block dims"
-        )
     torch.manual_seed(42)
     if dtype_src_str == "float8e5":
         a = torch.randint(20, 40, (M, K), dtype=torch.int8, device=device).view(torch.float8_e5m2)
-        if (a_trans):
-            a = a.T
         b = torch.randint(20, 40, (K, N), dtype=torch.int8, device=device).view(torch.float8_e5m2)
+        if a_trans:
+            a = a.T.contiguous().T
         A = f8_to_f16(a, dtype_src_str)
         B = f8_to_f16(b, dtype_src_str)
     else:
         dtype_src = getattr(torch, dtype_src_str)
         a = torch.randn(M, K, dtype=dtype_src, device=device)
-        if (a_trans):
-            a = a.T
         b = torch.randn(K, N, dtype=dtype_src, device=device)
+        if a_trans:
+            a = a.T.contiguous().T
         A = a
         B = b
-    output = torch.empty((M, N), dtype=torch.float16, device=device)
-    grid = (1, 1)
-    lhs_in_tmem_kernel[grid](a, b, output, a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0),
-                             output.stride(1), M, N, K, A_TRANS=a_trans, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                             BLOCK_K=BLOCK_K)
-    ref_out = torch.matmul(A if not a_trans else A.T, B).to(torch.float16)
-
+    output = torch.empty((M, N), dtype=torch.float32, device=device)
+    grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
+    k = matmul_kernel[grid](a, b, output, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0),
+                            output.stride(1), BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES=1, SCALE_A=None, PRECISION="tf32",
+                            A_TRANS=a_trans)
+    ref_out = torch.matmul(A, B).to(torch.float32)
     atol = 0.03
     rtol = 0.03
     torch.testing.assert_close(ref_out, output, atol=atol, rtol=rtol)
+    pattern = r"%\w+\s*=\s*ttng\.tmem_alloc[\s\S]*?tng\.tc_gen5_mma\s+%\w+,"
+    ttgir = k.asm["ttgir"]
+    assert re.search(pattern, ttgir)
 
 
 @triton.jit
@@ -627,7 +859,7 @@ def lhs_in_tmem_kernel_mxfp(  #
     tl.store(output_ptrs, accumulator)
 
 
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 10, reason="Requires compute capability >= 10")
+@pytest.mark.skipif(is_hip() or torch.cuda.get_device_capability()[0] != 10, reason="Requires compute capability == 10")
 def test_lhs_in_tmem_mxfp(device, monkeypatch):
     _knob_promote_lhs_to_tmem(monkeypatch)
     M, N, K = 128, 64, 32
@@ -671,29 +903,31 @@ def block_scale_fp4_matmul(  #
         BLOCK_M: tl.constexpr,  #
         BLOCK_N: tl.constexpr,  #
         BLOCK_K: tl.constexpr,  #
-        NUM_STAGES: tl.constexpr):  #
+        NUM_STAGES: tl.constexpr, PACK_ALONG_K: tl.constexpr):  #
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
     pid_n = pid // num_pid_m
-    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
-    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M))
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N))
+    PACKING_ALONG_M_N: tl.constexpr = 1 if PACK_ALONG_K else 2
+    offs_am_packed = (pid_m * (BLOCK_M // PACKING_ALONG_M_N) + tl.arange(0, BLOCK_M // PACKING_ALONG_M_N))
+    offs_bn_packed = (pid_n * (BLOCK_N // PACKING_ALONG_M_N) + tl.arange(0, BLOCK_N // PACKING_ALONG_M_N))
+    BLOCK_K_PACKED: tl.constexpr = BLOCK_K // 2 if PACK_ALONG_K else BLOCK_K
 
     # Two e2m1 values per K
-    offs_k = tl.arange(0, BLOCK_K // 2)
+    offs_k = tl.arange(0, BLOCK_K_PACKED)
     offs_scale_k = tl.arange(0, BLOCK_K // VEC_SIZE)
     if a_scale is not None:
         a_scale_ptr = a_scale + offs_am[:, None] * stride_scale + offs_scale_k[None, :]
     if b_scale is not None:
         b_scale_ptr = b_scale + offs_bn[:, None] * stride_scale + offs_scale_k[None, :]
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    a_ptrs = a_ptr + (offs_am_packed[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn_packed[None, :] * stride_bn)
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=output_ptr.dtype.element_ty)
     for k in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=NUM_STAGES):
-        k_remaining = tl.cdiv(K - k * BLOCK_K, 2)
-        valid_k = offs_k < k_remaining
-        a = tl.load(a_ptrs, mask=valid_k[None, :], other=0)
-        b = tl.load(b_ptrs, mask=valid_k[:, None], other=0)
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
         if a_scale is not None:
             scale_a = tl.load(a_scale_ptr)
         else:
@@ -702,9 +936,10 @@ def block_scale_fp4_matmul(  #
             scale_b = tl.load(b_scale_ptr)
         else:
             scale_b = None
-        accumulator = tl.dot_scaled(a, scale_a, "e2m1", b, scale_b, "e2m1", accumulator)
-        a_ptrs += (BLOCK_K // 2) * stride_ak
-        b_ptrs += (BLOCK_K // 2) * stride_bk
+        accumulator = tl.dot_scaled(a, scale_a, "e2m1", b, scale_b, "e2m1", accumulator, lhs_k_pack=PACK_ALONG_K,
+                                    rhs_k_pack=PACK_ALONG_K)
+        a_ptrs += (BLOCK_K_PACKED) * stride_ak
+        b_ptrs += (BLOCK_K_PACKED) * stride_bk
         if a_scale is not None:
             a_scale_ptr += BLOCK_K // VEC_SIZE
         if b_scale is not None:
@@ -716,36 +951,43 @@ def block_scale_fp4_matmul(  #
     tl.store(output_ptrs, accumulator, mask=c_mask)
 
 
-@pytest.mark.parametrize("M, N, K", [(1024, 512, 256), (2, 4, 64)])
+@pytest.mark.parametrize("M, N, K", [(1024, 512, 256)])
 @pytest.mark.parametrize("BLOCK_M, BLOCK_N, BLOCK_K", [(128, 128, 128), (256, 128, 128), (128, 256, 128),
                                                        (128, 256, 256), (128, 128, 64), (128, 64, 128)])
 @pytest.mark.parametrize("with_a_scale", [True, False])
 @pytest.mark.parametrize("with_b_scale", [True, False])
+@pytest.mark.parametrize("pack_along_k", [True, False])
 @pytest.mark.parametrize(("scale_type", "VEC_SIZE"), [("float8_e8m0fnu", 32), ("float8_e4m3fn", 16)],
                          ids=["mxfp4", "nvfp4"])
-@pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else []))
-def test_block_scale_fp4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, VEC_SIZE, with_a_scale, with_b_scale, scale_type, nonKDim,
-                         device):
+@pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else [0]))
+def test_block_scale_fp4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, VEC_SIZE, with_a_scale, with_b_scale, pack_along_k,
+                         scale_type, nonKDim, device):
+    assert M % BLOCK_M == 0
+    assert N % BLOCK_N == 0
+    assert K % BLOCK_K == 0
     if is_cuda():
-        if torch.cuda.get_device_capability()[0] < 10:
-            pytest.skip("Requires compute capability >= 10")
+        if scale_type == "float8_e4m3fn" and not pack_along_k:
+            pytest.skip("Packing along K is required for float8_e4m3fn")
+        if torch.cuda.get_device_capability()[0] != 10:
+            pytest.skip("Requires compute capability == 10")
         if not (with_a_scale and with_b_scale):
             pytest.skip("None aScale/bScale is only tested on AMD backend for now")
     elif is_hip():
-        if not is_hip_mi350():
-            pytest.skip("Scaled fp4 matmul is only natively supported on MI350")
+        if not is_hip_cdna4():
+            pytest.skip("Scaled fp4 matmul is only natively supported on CDNA4")
         if scale_type != 'float8_e8m0fnu':
-            pytest.skip("MI350 only supports E8M0 scale")
+            pytest.skip("CDNA4 only supports E8M0 scale")
         if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
-            pytest.skip(f"MI350 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
+            pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
 
     NUM_STAGES = 1
     torch.manual_seed(42)
+    packing_dim = 1 if pack_along_k else 0
     a_mxfp4 = MXFP4Tensor(size=(M, K), device=device).random()
-    a = a_mxfp4.to_packed_tensor(dim=1)
-    # Generate b with k-major layout, pack two e2m1 along k, then logical transpose to K, N
+    a = a_mxfp4.to_packed_tensor(dim=packing_dim)
+    # Generate b with k-major layout, pack two e2m1 along k or n, then logical transpose to K, N
     b_mxfp4 = MXFP4Tensor(size=(N, K), device=device).random()
-    b = b_mxfp4.to_packed_tensor(dim=1).T
+    b = b_mxfp4.to_packed_tensor(dim=packing_dim).T
     # No need to pack along K since we convert each e2m1 to f32 directly for the reference matmul
     b_ref = b_mxfp4.to(torch.float32).T
 
@@ -780,11 +1022,17 @@ def test_block_scale_fp4(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, VEC_SIZE, with_a_sc
     kernel_kwargs = {}
     if is_hip():
         kernel_kwargs["matrix_instr_nonkdim"] = nonKDim
-    block_scale_fp4_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, stride_scale, a.stride(0), a.stride(1),
-                                 b.stride(0), b.stride(1), output.stride(0), output.stride(1), VEC_SIZE, BLOCK_M,
-                                 BLOCK_N, BLOCK_K, NUM_STAGES=NUM_STAGES, **kernel_kwargs)
-
+    k = block_scale_fp4_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, stride_scale, a.stride(0), a.stride(1),
+                                     b.stride(0), b.stride(1), output.stride(0), output.stride(1), VEC_SIZE, BLOCK_M,
+                                     BLOCK_N, BLOCK_K, NUM_STAGES=NUM_STAGES, PACK_ALONG_K=pack_along_k,
+                                     **kernel_kwargs)
     torch.testing.assert_close(ref_out, output, atol=1e-2, rtol=1e-2)
+    if is_cuda():
+        ptx = k.asm["ptx"]
+        if pack_along_k:
+            assert "kind::mxf4" in ptx
+        else:
+            assert "kind::mxf8f6f4" in ptx
 
 
 @triton.jit
@@ -796,23 +1044,33 @@ def mxfp8_mxfp4_matmul(  #
         stride_am, stride_ak,  #
         stride_bk, stride_bn,  #
         stride_cm, stride_cn,  #
+        tensor_scale: tl.constexpr,  #
+        DTYPE_A: tl.constexpr,  #
+        DTYPE_B: tl.constexpr,  #
         BLOCK_M: tl.constexpr,  #
         BLOCK_N: tl.constexpr,  #
         BLOCK_K: tl.constexpr,  #
-        NUM_STAGES: tl.constexpr):  #
-    tensor_scale: tl.constexpr = isinstance(a_scale.dtype, tl.pointer_type)
+        NUM_STAGES: tl.constexpr,  #
+        PACK_B_ALONG_K: tl.constexpr = True):  #
+    DIV_FACTOR_A: tl.constexpr = 2 if DTYPE_A == "e2m1" else 1
+    DIV_FACTOR_B: tl.constexpr = 2 if DTYPE_B == "e2m1" else 1
+    DIV_FACTOR_B_K: tl.constexpr = DIV_FACTOR_B if PACK_B_ALONG_K else 1
+    DIV_FACTOR_B_N: tl.constexpr = 1 if PACK_B_ALONG_K else DIV_FACTOR_B
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     pid_m = pid % num_pid_m
     pid_n = pid // num_pid_m
-    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
-    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
-    offs_ak = tl.arange(0, BLOCK_K)
-    offs_bk = tl.arange(0, BLOCK_K // 2)
+    offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M))
+    offs_bn = (pid_n * BLOCK_N // DIV_FACTOR_B_N + tl.arange(0, BLOCK_N // DIV_FACTOR_B_N))
+    offs_bn_scale = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
+    offs_ak = tl.arange(0, BLOCK_K // DIV_FACTOR_A)
+    offs_bk = tl.arange(0, BLOCK_K // DIV_FACTOR_B_K)
     offs_scale_k = tl.arange(0, BLOCK_K // 32)
 
-    a_scale_ptr = a_scale + offs_am[:, None] * stride_scale + offs_scale_k[None, :]
-    b_scale_ptr = b_scale + offs_bn[:, None] * stride_scale + offs_scale_k[None, :]
+    if a_scale is not None:
+        a_scale_ptr = a_scale + offs_am[:, None] * stride_scale + offs_scale_k[None, :]
+    if b_scale is not None:
+        b_scale_ptr = b_scale + offs_bn_scale[:, None] * stride_scale + offs_scale_k[None, :]
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_ak[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_bk[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
@@ -821,16 +1079,24 @@ def mxfp8_mxfp4_matmul(  #
     for k in tl.range(0, tl.cdiv(K, BLOCK_K), num_stages=NUM_STAGES):
         a = tl.load(a_ptrs)
         b = tl.load(b_ptrs)
-        if tensor_scale:
-            scale_a = tl.load(a_scale_ptr)
+        if a_scale is not None:
+            if tensor_scale:
+                scale_a = tl.load(a_scale_ptr)
+            else:
+                scale_a = tl.full(a_scale_ptr.shape, a_scale.to(tl.int8), dtype=tl.int8)
         else:
-            scale_a = tl.full(a_scale_ptr.shape, a_scale.to(tl.int8), dtype=tl.int8)
-        scale_b = tl.load(b_scale_ptr)
-        accumulator = tl.dot_scaled(a, scale_a, "e5m2", b, scale_b, "e2m1", accumulator)
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += (BLOCK_K // 2) * stride_bk
-        a_scale_ptr += BLOCK_K // 32
-        b_scale_ptr += BLOCK_K // 32
+            scale_a = None
+        if b_scale is not None:
+            scale_b = tl.load(b_scale_ptr)
+        else:
+            scale_b = None
+        accumulator = tl.dot_scaled(a, scale_a, DTYPE_A, b, scale_b, DTYPE_B, accumulator, rhs_k_pack=PACK_B_ALONG_K)
+        a_ptrs += (BLOCK_K // DIV_FACTOR_A) * stride_ak
+        b_ptrs += (BLOCK_K // DIV_FACTOR_B_K) * stride_bk
+        if a_scale is not None:
+            a_scale_ptr += BLOCK_K // 32
+        if b_scale is not None:
+            b_scale_ptr += BLOCK_K // 32
 
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -844,28 +1110,75 @@ def mxfp8_mxfp4_matmul(  #
                                                        (128, 256, 256), (128, 128, 64), (128, 64, 128)])
 @pytest.mark.parametrize("NUM_STAGES", [1, 3])
 @pytest.mark.parametrize("B_TRANS", [True, False])
+@pytest.mark.parametrize("PACK_B_ALONG_K", [True, False])
 @pytest.mark.parametrize("CONST_SCALE", [True, False])
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] < 10, reason="Requires compute capability >= 10")
-def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TRANS, CONST_SCALE, device):
+@pytest.mark.parametrize("A_DATA_TYPE", ["float8e5", "float8e4nv", "float4"])
+@pytest.mark.parametrize("B_DATA_TYPE", ["float8e5", "float8e4nv", "float4"])
+@pytest.mark.parametrize("WITH_A_SCALE", [True, False])
+@pytest.mark.parametrize("WITH_B_SCALE", [True, False])
+@pytest.mark.parametrize("nonKDim", ([0, 16, 32] if is_hip_cdna() else [0]))
+def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TRANS, PACK_B_ALONG_K, CONST_SCALE,
+                            A_DATA_TYPE, B_DATA_TYPE, WITH_A_SCALE, WITH_B_SCALE, nonKDim, device):
+    if is_cuda():
+        if torch.cuda.get_device_capability()[0] != 10:
+            pytest.skip("Requires compute capability == 10")
+        if not (WITH_A_SCALE and WITH_B_SCALE):
+            pytest.skip("None scale has not been tested on NV backend")
+        if not (A_DATA_TYPE == "float8e5" and B_DATA_TYPE == "float4"):
+            pytest.skip(f"(A: {A_DATA_TYPE}, B: {B_DATA_TYPE}) has not been tested on NV backend")
+    elif is_hip():
+        if not is_hip_cdna4():
+            pytest.skip("Scaled mxfp4 & mxfp8 matmul is only natively supported on CDNA4")
+        if (nonKDim == 16 and BLOCK_K < 128) or (nonKDim == 32 and BLOCK_K < 64):
+            pytest.skip(f"CDNA4 does not support {BLOCK_K=} for scaled mfma {nonKDim=} variants")
+        if (A_DATA_TYPE == 'float4' and not WITH_A_SCALE) or (B_DATA_TYPE == 'float4' and not WITH_B_SCALE):
+            pytest.skip("Float4 without scale is tested in test_block_scale_fp4")
+    if not PACK_B_ALONG_K and B_DATA_TYPE != "float4":
+        pytest.skip("Pack along K can only be False for float4")
     if BLOCK_N == 256 and BLOCK_K == 256:
         NUM_STAGES = 2
 
-    a = torch.randint(20, 40, (M, K), dtype=torch.uint8).view(torch.float8_e5m2).to(device)
+    torch.manual_seed(42)
 
-    dtype_src_str = "float8e5"
-    a_ref = f8_to_f16(a.view(torch.float8_e5m2), dtype_src_str).to(torch.float32)
+    def create_operand(dtype: str, size0: int, size1: int, k_dim: int, transpose: bool = True,
+                       pack_along_k: bool = True):
+        if dtype == "float8e5":
+            if transpose:
+                v = torch.randint(20, 40, (size0, size1), dtype=torch.uint8).view(torch.float8_e5m2).to(device)
+                v_ref = f8_to_f16(v.view(torch.float8_e5m2), dtype).to(torch.float32)
+            else:
+                v = torch.randint(20, 40, (size1, size0), dtype=torch.uint8).view(torch.float8_e5m2).to(device).T
+                v_ref = f8_to_f16(v.view(torch.float8_e5m2).T, dtype).to(torch.float32).T
+        elif dtype == "float8e4nv":
+            if transpose:
+                v = torch.randint(20, 40, (size0, size1), dtype=torch.uint8).view(torch.float8_e4m3fn).to(device)
+                v_ref = f8_to_f16(v.view(torch.float8_e4m3fn), dtype).to(torch.float32)
+            else:
+                v = torch.randint(20, 40, (size1, size0), dtype=torch.uint8).view(torch.float8_e4m3fn).to(device).T
+                v_ref = f8_to_f16(v.view(torch.float8_e4m3fn).T, dtype).to(torch.float32).T
+        else:
+            # float4
+            if pack_along_k:
+                pack_dim = k_dim
+            else:
+                pack_dim = (k_dim + 1) % 2
+            if transpose:
+                v_mxfp4 = MXFP4Tensor(size=(size0, size1), device=device).random()
+                v = v_mxfp4.to_packed_tensor(dim=pack_dim)
+                v_ref = v_mxfp4.to(torch.float32)
+            else:
+                v_mxfp4 = MXFP4Tensor(size=(size1, size0), device=device).random()
+                v = v_mxfp4.to_packed_tensor(dim=(pack_dim + 1) % 2).T
+                v_ref = v_mxfp4.to(torch.float32).T
+        return v, v_ref
 
-    if B_TRANS:
-        b_mxfp4 = MXFP4Tensor(size=(K, N), device=device).random()
-        b = b_mxfp4.to_packed_tensor(dim=0)
-        b_ref = b_mxfp4.to(torch.float32)
-    else:
-        b_mxfp4 = MXFP4Tensor(size=(N, K), device=device).random()
-        b = b_mxfp4.to_packed_tensor(dim=1).T
-        b_ref = b_mxfp4.to(torch.float32).T
+    dtype_converter = {'float8e5': 'e5m2', 'float8e4nv': 'e4m3', 'float4': 'e2m1'}
 
-    a_scale_mxfp4 = MXScaleTensor(size=(M, (K + 32 - 1) // 32), device=device).random(high=64.0)
-    b_scale_mxfp4 = MXScaleTensor(size=(N, (K + 32 - 1) // 32), device=device).random(high=64.0)
+    a, a_ref = create_operand(A_DATA_TYPE, M, K, 1)
+    b, b_ref = create_operand(B_DATA_TYPE, K, N, 0, B_TRANS, PACK_B_ALONG_K)
+
+    a_scale_mxfp4 = MXScaleTensor(size=(M, (K + 32 - 1) // 32), device=device).random(high=32.0)
+    b_scale_mxfp4 = MXScaleTensor(size=(N, (K + 32 - 1) // 32), device=device).random(high=32.0)
     a_scale = a_scale_mxfp4.data
     b_scale = b_scale_mxfp4.data
 
@@ -874,13 +1187,27 @@ def test_mxfp8_mxfp4_matmul(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, NUM_STAGES, B_TR
         a_scale_ref = torch.full_like(a_scale_ref, 2.0)
         a_scale = 128  # 2.0 in e8m0
     b_scale_ref = b_scale_mxfp4.to(torch.float32).repeat_interleave(32, dim=1).T.contiguous()[:K, :N]
+    stride_scale = b_scale.stride(0)
+    if not WITH_A_SCALE:
+        a_scale = None
+        a_scale_ref = 1.0
+    if not WITH_B_SCALE:
+        b_scale = None
+        b_scale_ref = 1.0
+
     ref_out = torch.matmul(a_ref * a_scale_ref, b_ref * b_scale_ref)
 
     output = a.new_empty((M, N), dtype=torch.float32)
     grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1)
-    out = mxfp8_mxfp4_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, b_scale.stride(0), a.stride(0), a.stride(1),
-                                   b.stride(0), b.stride(1), output.stride(0), output.stride(1), BLOCK_M, BLOCK_N,
-                                   BLOCK_K, NUM_STAGES=NUM_STAGES)
-    ttgir = out.asm["ttgir"]
-    assert "fp4Padded = true" in ttgir
+    kernel_kwargs = {}
+    if is_hip():
+        kernel_kwargs["matrix_instr_nonkdim"] = nonKDim
+    out = mxfp8_mxfp4_matmul[grid](a, b, output, a_scale, b_scale, M, N, K, stride_scale, a.stride(0), a.stride(1),
+                                   b.stride(0), b.stride(1), output.stride(0), output.stride(1), not CONST_SCALE,
+                                   dtype_converter[A_DATA_TYPE], dtype_converter[B_DATA_TYPE], BLOCK_M, BLOCK_N,
+                                   BLOCK_K, PACK_B_ALONG_K=PACK_B_ALONG_K, NUM_STAGES=NUM_STAGES, **kernel_kwargs)
+    if is_cuda():
+        ttgir = out.asm["ttgir"]
+        assert "fp4Padded = true" in ttgir
+
     torch.testing.assert_close(ref_out, output, atol=1e-3, rtol=1e-3)

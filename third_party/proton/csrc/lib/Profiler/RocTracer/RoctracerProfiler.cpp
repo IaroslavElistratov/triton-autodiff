@@ -82,7 +82,8 @@ convertActivityToMetric(const roctracer_record_t *activity) {
           static_cast<uint64_t>(activity->end_ns), 1,
           static_cast<uint64_t>(
               DeviceInfo::instance().mapDeviceId(activity->device_id)),
-          static_cast<uint64_t>(DeviceType::HIP));
+          static_cast<uint64_t>(DeviceType::HIP),
+          static_cast<uint64_t>(activity->queue_id));
     }
     break;
   }
@@ -109,7 +110,7 @@ void processActivityKernel(
     }
   } else {
     // Graph kernels
-    // A single grpah launch can trigger multiple kernels.
+    // A single graph launch can trigger multiple kernels.
     // Our solution is to construct the following maps:
     // --- Application threads ---
     // 1. Graph -> numKernels
@@ -271,6 +272,7 @@ void RoctracerProfiler::RoctracerProfilerPimpl::apiCallback(
         uint32_t StreamCaptureCount = pImpl->StreamToCaptureCount[Stream];
         pImpl->GraphToNumInstances[Graph] = StreamCaptureCount;
         pImpl->StreamToCapture.erase(Stream);
+        break;
       }
       case HIP_API_ID_hipLaunchKernel: {
         hipStream_t Stream = data->args.hipLaunchKernel.stream;

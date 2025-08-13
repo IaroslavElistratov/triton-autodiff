@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file -tritongpu-loop-scheduling=num-stages=3 -tritongpu-pipeline=num-stages=3 -canonicalize | FileCheck %s
+// RUN: triton-opt %s -split-input-file -tritongpu-assign-latencies -tritongpu-schedule-loops -tritongpu-pipeline -canonicalize | FileCheck %s
 
 #blocked = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [8, 4], warpsPerCTA = [1, 4], order = [0, 1]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
@@ -34,12 +34,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
     %14 = tt.broadcast %11 : tensor<1x16x!tt.ptr<f16>, #blocked> -> tensor<64x16x!tt.ptr<f16>, #blocked>
     %15 = tt.broadcast %13 : tensor<64x1xi32, #blocked> -> tensor<64x16xi32, #blocked>
     %16 = tt.addptr %14, %15 : tensor<64x16x!tt.ptr<f16>, #blocked>, tensor<64x16xi32, #blocked>
-    // CHECK: ttg.async_wait {{.*}} {num = 1 : i32}
     // CHECK: scf.for
+    // CHECK:   ttg.async_wait {{.*}} {num = 1 : i32}
     // CHECK:   tt.dot
     // CHECK:   tt.dot
     // CHECK:   ttg.async_copy_global_to_local
-    // CHECK:   ttg.async_wait {{.*}} {num = 1 : i32}
     // CHECK:   scf.yield
     // CHECK: ttg.async_wait {num = 0 : i32}
 
@@ -71,7 +70,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 #shared1 = #ttg.swizzled_shared<{vec = 8, perPhase = 1, maxPhase = 4, order = [1, 0]}>
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
-  tt.func public @_jagged_hstu_attn_fwd_0d1d2d3d4d5de(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<i64> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg5: i32 {tt.divisibility = 16 : i32, tt.max_divisibility = 8 : i32}) attributes {noinline = false} {
+  tt.func public @_jagged_hstu_attn_fwd_0d1d2d3d4d5de(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<i64> {tt.divisibility = 16 : i32}, %arg4: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg5: i32 {tt.divisibility = 16 : i32, tt.max_divisibility = 8 : i32}) {
     %cst = arith.constant dense<0.000000e+00> : tensor<64x32xf32, #mma>
     %c64_i32 = arith.constant 64 : i32
     %c0_i32 = arith.constant 0 : i32
@@ -172,9 +171,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 #smem = #ttg.shared_memory
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 //   CHECK-LABEL: @matmul_tma
-//     CHECK-DAG:   ttg.local_alloc  : () -> !ttg.memdesc<3x128x64xf16, #{{.+}}, #smem, mutable>
-//     CHECK-DAG:   ttg.local_alloc  : () -> !ttg.memdesc<3x64x256xf16, #{{.+}}, #smem, mutable>
-//     CHECK-DAG:   ttg.local_alloc  : () -> !ttg.memdesc<3xi64, #{{.+}}, #smem, mutable>
+//     CHECK-DAG:   ttg.local_alloc : () -> !ttg.memdesc<3x128x64xf16, #{{.+}}, #smem, mutable>
+//     CHECK-DAG:   ttg.local_alloc : () -> !ttg.memdesc<3x64x256xf16, #{{.+}}, #smem, mutable>
+//     CHECK-DAG:   ttg.local_alloc : () -> !ttg.memdesc<3x1xi64, #{{.+}}, #smem, mutable>
 // CHECK-COUNT-3:   ttng.init_barrier
 // CHECK-COUNT-4:   ttng.async_tma_copy_global_to_local
 //         CHECK:   scf.for
@@ -182,16 +181,16 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32} {
 //     CHECK-NOT:     ttng.wait_barrier
 // CHECK-COUNT-2:     ttng.async_tma_copy_global_to_local
 //         CHECK:     scf.yield
-  tt.func public @matmul_tma(%arg0: !tt.tensordesc<tensor<128x64xf16>>, %arg1: !tt.tensordesc<tensor<64x256xf16>>) -> tensor<128x256xf32, #mma> {
+  tt.func public @matmul_tma(%arg0: !tt.tensordesc<tensor<128x64xf16, #shared>>, %arg1: !tt.tensordesc<tensor<64x256xf16, #shared>>) -> tensor<128x256xf32, #mma> {
     %c256_i32 = arith.constant 256 : i32
     %c0_i32 = arith.constant 0 : i32
     %c64_i32 = arith.constant 64 : i32
     %c1_i32 = arith.constant 1 : i32
     %cst = arith.constant dense<0.000000e+00> : tensor<128x256xf32, #mma>
     %0:2 = scf.for %arg3 = %c0_i32 to %c256_i32 step %c1_i32 iter_args(%arg4 = %cst, %arg5 = %c0_i32) -> (tensor<128x256xf32, #mma>, i32)  : i32 {
-      %1 = tt.experimental_descriptor_load %arg0[%c0_i32, %arg5] : !tt.tensordesc<tensor<128x64xf16>> -> tensor<128x64xf16, #blocked>
+      %1 = tt.descriptor_load %arg0[%c0_i32, %arg5] : !tt.tensordesc<tensor<128x64xf16, #shared>> -> tensor<128x64xf16, #blocked>
       %2 = ttg.local_alloc %1 : (tensor<128x64xf16, #blocked>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
-      %3 = tt.experimental_descriptor_load %arg1[%arg5, %c0_i32] : !tt.tensordesc<tensor<64x256xf16>> -> tensor<64x256xf16, #blocked1>
+      %3 = tt.descriptor_load %arg1[%arg5, %c0_i32] : !tt.tensordesc<tensor<64x256xf16, #shared>> -> tensor<64x256xf16, #blocked1>
       %4 = ttg.local_alloc %3 : (tensor<64x256xf16, #blocked1>) -> !ttg.memdesc<64x256xf16, #shared, #smem>
       %5 = ttng.warp_group_dot %2, %4, %arg4 { inputPrecision = 0 : i32 } : !ttg.memdesc<128x64xf16, #shared, #smem> * !ttg.memdesc<64x256xf16, #shared, #smem> -> tensor<128x256xf32, #mma>
       %6 = arith.addi %arg5, %c64_i32 : i32

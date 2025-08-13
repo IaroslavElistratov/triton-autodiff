@@ -4,6 +4,7 @@
 #include "triton/Conversion/MLIRTypes.h"
 
 namespace mlir::triton {
+enum class ProgramIDDim : uint32_t;
 
 class TargetInfoBase {
 public:
@@ -25,8 +26,8 @@ public:
                             std::optional<Value> ctaId, Value val,
                             Value pred) const = 0;
   virtual Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                            std::optional<Value> ctaId, Type elemTy,
-                            Value pred) const = 0;
+                            std::optional<Value> ctaId, Type elemTy, Value pred,
+                            Operation *localLoadOp = nullptr) const = 0;
 
   void storeShared(RewriterBase &rewriter, Location loc, Value ptr, Value val,
                    Value pred) const {
@@ -38,15 +39,6 @@ public:
                        pred);
   }
 
-  virtual bool canUseStMatrix(RankedTensorType tensorTy,
-                              ArrayRef<unsigned> repShape,
-                              ArrayRef<unsigned> paddedRepShape,
-                              ArrayRef<unsigned> order,
-                              int swizzleByteSize) const = 0;
-
-  virtual void storeMatrixShared(RewriterBase &rewriter, Location loc,
-                                 Value ptr, Value val) const = 0;
-
   virtual Value shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                            int i) const = 0;
   virtual Value shuffleUp(RewriterBase &rewriter, Location loc, Value val,
@@ -56,8 +48,11 @@ public:
   virtual Value shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                            Value i) const = 0;
 
+  virtual Value permute(RewriterBase &rewriter, Location loc, Value a, Value b,
+                        Value selector) const = 0;
+
   virtual Value programId(RewriterBase &rewriter, Location loc,
-                          ModuleOp moduleOp, int axis) const = 0;
+                          ModuleOp moduleOp, ProgramIDDim axis) const = 0;
 
   virtual bool warpReduce(RewriterBase &rewriter, Location loc,
                           SmallVector<Value> &acc, triton::ReduceOp op,
@@ -70,7 +65,8 @@ public:
   // the format string global variable; |args| are the arguments to fill
   // placeholders in the format string.
   virtual void printf(RewriterBase &rewriter, Value formatStrStart,
-                      int formatStrByteCount, ValueRange args) const = 0;
+                      int formatStrByteCount, ValueRange args,
+                      ArrayRef<bool> isSigned = {}) const = 0;
 
   // Emits LLVM code with |rewriter| to print a message, particularly useful for
   // backend debug. |msg| is the message to print, |args| are the arguments to
@@ -78,8 +74,8 @@ public:
   // NOTE: This function is used for backend debug. DO NOT DELETE.
   // Example use: targetInfo.printf(rewriter,"index: %d, value: %f", {index,
   // value});
-  virtual void printf(RewriterBase &rewriter, StringRef msg,
-                      ValueRange args) const = 0;
+  virtual void printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
+                      ArrayRef<bool> isSigned = {}) const = 0;
 
   // Emits LLVM code with |rewriter| to perform assertion failure with the given
   // |message| from the given |func| in |file|.
@@ -89,12 +85,18 @@ public:
 
   virtual int getSharedAddressSpace() const = 0;
 
+  virtual int getAddressSpace(Attribute addressSpace) const = 0;
+
   virtual bool supportVectorizedAtomics() const = 0;
 
-  // Helper used by targets to annotate store operations during lowering to
-  // llvm.
-  virtual void storeOpAnnotation(triton::gpu::LocalStoreOp op,
-                                 size_t localStoreOpCount, Type type) const {}
+  virtual bool supportLdMatrix() const { return false; }
+  virtual bool supportStMatrix() const { return false; }
+  virtual bool isCuda() const { return false; }
+
+  // Annotate target specific information to local load operations during
+  // lowering to LLVM. `llLoadOp` is the generated LLVM load op.
+  virtual void localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
+                                     Operation *llLoadOp) const {}
 
   virtual ~TargetInfoBase() {}
 };

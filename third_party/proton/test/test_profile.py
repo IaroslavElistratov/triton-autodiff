@@ -7,7 +7,12 @@ from typing import NamedTuple
 import pathlib
 
 import triton.language as tl
-from triton.profiler.hook import COMPUTE_METADATA_SCOPE_NAME
+from triton.profiler.hooks.launch import COMPUTE_METADATA_SCOPE_NAME
+import triton.profiler.language as pl
+
+
+def is_cuda():
+    return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 
 def is_hip():
@@ -177,7 +182,7 @@ def test_cpu_timed_scope(tmp_path: pathlib.Path):
     assert kernel_frame["metrics"]["time (ns)"] > 0
 
 
-def test_hook(tmp_path: pathlib.Path):
+def test_hook_launch(tmp_path: pathlib.Path):
 
     def metadata_fn(grid: tuple, metadata: NamedTuple, args: dict):
         # get arg's element size
@@ -194,7 +199,7 @@ def test_hook(tmp_path: pathlib.Path):
 
     x = torch.tensor([2], device="cuda", dtype=torch.float32)
     y = torch.zeros_like(x)
-    temp_file = tmp_path / "test_hook.hatchet"
+    temp_file = tmp_path / "test_hook_triton.hatchet"
     proton.start(str(temp_file.with_suffix("")), hook="triton")
     with proton.scope("test0"):
         foo[(1, )](x, 1, y, num_warps=4)
@@ -209,7 +214,7 @@ def test_hook(tmp_path: pathlib.Path):
 
 
 @pytest.mark.parametrize("context", ["shadow", "python"])
-def test_hook_gpu_kernel(tmp_path: pathlib.Path, context: str):
+def test_hook_launch_context(tmp_path: pathlib.Path, context: str):
 
     def metadata_fn(grid: tuple, metadata: NamedTuple, args: dict):
         x = args["x"]
@@ -256,7 +261,7 @@ def test_pcsampling(tmp_path: pathlib.Path):
             tl.store(y + offs, tl.load(x + offs))
 
     temp_file = tmp_path / "test_pcsampling.hatchet"
-    proton.start(str(temp_file.with_suffix("")), hook="triton", backend="cupti_pcsampling")
+    proton.start(str(temp_file.with_suffix("")), hook="triton", backend="cupti", mode="pcsampling")
     with proton.scope("init"):
         x = torch.ones((1024, ), device="cuda", dtype=torch.float32)
         y = torch.zeros_like(x)
@@ -298,16 +303,81 @@ def test_multiple_sessions(tmp_path: pathlib.Path):
     temp_file1 = tmp_path / "test_multiple_sessions1.hatchet"
     session_id0 = proton.start(str(temp_file0.with_suffix("")))
     session_id1 = proton.start(str(temp_file1.with_suffix("")))
-    torch.randn((10, 10), device="cuda")
-    torch.randn((10, 10), device="cuda")
+    with proton.scope("scope0"):
+        torch.randn((10, 10), device="cuda")
+        torch.randn((10, 10), device="cuda")
     proton.deactivate(session_id0)
     proton.finalize(session_id0)
-    torch.randn((10, 10), device="cuda")
+    with proton.scope("scope1"):
+        torch.randn((10, 10), device="cuda")
     proton.finalize(session_id1)
-    # kernel has been invokved twice in session 0 and three times in session 1
+    # kernel has been invoked twice in session 0 and three times in session 1
     with temp_file0.open() as f:
         data = json.load(f)
-    assert int(data[0]["children"][0]["metrics"]["count"]) == 2
+    assert data[0]["children"][0]["frame"]["name"] == "scope0"
+    assert int(data[0]["children"][0]["children"][0]["metrics"]["count"]) == 2
     with temp_file1.open() as f:
         data = json.load(f)
-    assert int(data[0]["children"][0]["metrics"]["count"]) == 3
+    scope0_count = int(data[0]["children"][0]["children"][0]["metrics"]["count"])
+    scope1_count = int(data[0]["children"][1]["children"][0]["metrics"]["count"])
+    assert scope0_count + scope1_count == 3
+
+
+def test_trace(tmp_path: pathlib.Path):
+    temp_file = tmp_path / "test_trace.chrome_trace"
+    proton.start(str(temp_file.with_suffix("")), data="trace")
+
+    @triton.jit
+    def foo(x, y, size: tl.constexpr):
+        offs = tl.arange(0, size)
+        tl.store(y + offs, tl.load(x + offs))
+
+    with proton.scope("init"):
+        x = torch.ones((1024, ), device="cuda", dtype=torch.float32)
+        y = torch.zeros_like(x)
+
+    with proton.scope("test"):
+        foo[(1, )](x, y, x.size()[0], num_warps=4)
+
+    proton.finalize()
+
+    with temp_file.open() as f:
+        data = json.load(f)
+        trace_events = data["traceEvents"]
+        assert len(trace_events) == 3
+        assert trace_events[-1]["name"] == "foo"
+        assert trace_events[-1]["args"]["call_stack"] == ["ROOT", "test", "foo"]
+
+
+def test_timeline(tmp_path: pathlib.Path):
+    temp_file = tmp_path / "test_timeline.chrome_trace"
+    mode = proton.mode.Default(metric_type="cycle", optimizations="time_shift")
+    proton.start(str(temp_file.with_suffix("")), data="trace", backend="instrumentation", mode=mode)
+
+    @triton.jit
+    def foo(x, y, size: tl.constexpr):
+        pl.enter_scope("entire")
+        offs = tl.arange(0, size)
+        pl.enter_scope("load")
+        x = tl.load(x + offs)
+        x = x + 1
+        pl.exit_scope("load")
+        pl.enter_scope("store")
+        tl.store(y + offs, x)
+        pl.exit_scope("store")
+        pl.exit_scope("entire")
+
+    with proton.scope("init"):
+        x = torch.ones((1024, ), device="cuda", dtype=torch.float32)
+        y = torch.zeros_like(x)
+
+    with proton.scope("test"):
+        foo[(1, )](x, y, x.size()[0], num_warps=4)
+
+    proton.finalize()
+
+    with temp_file.open() as f:
+        data = json.load(f)
+        trace_events = data["traceEvents"]
+        assert len(trace_events) == 12
+        assert trace_events[-1]["tid"][0:4] == "warp"
