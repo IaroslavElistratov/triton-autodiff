@@ -1556,7 +1556,8 @@ class CodeGenerator(ast.NodeVisitor):
         # Location.file and Location.name are the canonical factory helpers in the bindings. 
         # The nested structure retains the file/line/col information, so IDE “jump-to-definition” and stack-trace printing still work. 
 
-        from mlir.ir import Location, StringAttr          # MLIR Python API
+        # todo: that import now requires mlir python package
+        # from mlir.ir import Location, StringAttr          # MLIR Python API
         def _name_loc(ctx, var_name, file_name, line, col):
             file_loc = Location.file(file_name, line, col, context=ctx)
             return Location.name(StringAttr.get(var_name, context=ctx), file_loc)

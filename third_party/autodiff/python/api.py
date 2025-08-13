@@ -26,7 +26,7 @@ if dir is None:
     raise ValueError("Please specify TRITON_AUTODIFF_DIR, see README.")
 
 # todo: don't hardcode
-tool = f"{dir}/python/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
+tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
 
 def run_mlir_pass(path):
@@ -169,7 +169,9 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             p = inspect.Parameter(
                 f"grad_{i}",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation="tl.float16*" # "tl.pointer"
+                # leave annotation empty so the binder infers the correct pointer
+                # dtype from the actual runtime tensors (e.g. *fp32, *bf16, ...)
+                annotation=inspect._empty
             )
             jit_fn.params.append(KernelParam(len(jit_fn.params), p, False, False))
             sig_params.append(p)
@@ -293,8 +295,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 # Bc I'm registering hooks on the fwd JITFucntions -- so I need to register my hook
 # before the first user invocation of fwd JITFucntions (so that my wrapping can see
 # as many fwd signatures as possible)
-triton.runtime.jit.JITFunction.compiled_hook = my_post_hook
-
+triton.knobs.runtime.jit_post_compile_hook = my_post_hook
 
 
 # it's not as much as a stub, but more like helper to wrap_bwd_kernel

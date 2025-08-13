@@ -26,6 +26,21 @@ public:
     setLastLoc(mlir::FileLineColLoc::get(context, fileName, line, column));
   }
 
+  // my cahges in triton-autodiff/python/triton/compiler/code_generator.py
+  // still use the 4 arg overload, while after mergning newer trition updates
+  // the upstream only kept the 3 arg overload
+  void setLastLoc(const std::string &varName,
+    const std::string &fileName,
+    int line,
+    int column) {
+
+    auto *ctx = builder->getContext();
+    auto fileLoc = mlir::FileLineColLoc::get(ctx, fileName, line, column);
+    auto nameAttr = mlir::StringAttr::get(ctx, varName);
+    auto nameLoc = mlir::NameLoc::get(nameAttr, fileLoc);
+    lastLoc = std::make_unique<mlir::Location>(nameLoc);
+  }
+
   mlir::Location getLastLoc() {
     assert(lastLoc);
     return *lastLoc;
