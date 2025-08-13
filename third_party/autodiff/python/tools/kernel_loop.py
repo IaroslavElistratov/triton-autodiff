@@ -45,6 +45,7 @@ from gpt_oss.tools import apply_patch
 from gpt_oss.tools.simple_browser import SimpleBrowserTool
 from gpt_oss.tools.simple_browser.backend import ExaBackend
 from gpt_oss.tools.python_docker.docker_tool import PythonTool
+from gpt_oss.tools.triton_backward import TritonBackwardTool
 
 from openai_harmony import (
     Author,
@@ -119,6 +120,10 @@ def main(args):
         python_tool = PythonTool()
         system_message_content = system_message_content.with_tools(python_tool.tool_config)
 
+    if getattr(args, "triton_backward", False):
+        triton_backward_tool = TritonBackwardTool()
+        system_message_content = system_message_content.with_tools(triton_backward_tool.tool_config)
+
     system_message = Message.from_role_and_content(Role.SYSTEM, system_message_content)
     messages = [system_message]
 
@@ -167,6 +172,7 @@ def main(args):
         print(termcolor.colored("Knowledge Cutoff:", "cyan"), system_message_content.knowledge_cutoff, flush=True)
         print(termcolor.colored("Browser Tool:", "cyan"), "Enabled" if args.browser else "Disabled", flush=True)
         print(termcolor.colored("Python Tool:", "cyan"), "Enabled" if args.python else "Disabled", flush=True)
+        print(termcolor.colored("Triton Backward Tool:", "cyan"), "Enabled" if getattr(args, "triton_backward", False) else "Disabled", flush=True)
         print(termcolor.colored("Apply Patch Function:", "cyan"), "Enabled" if args.apply_patch else "Disabled", flush=True)
         if developer_message_content:
             print(termcolor.colored("Developer Message:", "yellow"), flush=True)
@@ -205,6 +211,17 @@ def main(args):
                 async def run_tool():
                     results = []
                     async for msg in python_tool.process(last_message):
+                        results.append(msg)
+                    return results
+
+                result = asyncio.run(run_tool())
+                messages += result
+            elif last_message.recipient.startswith("triton_backward"):
+                assert getattr(args, "triton_backward", False), "Triton backward tool is not enabled"
+                tool_name = "Triton Backward"
+                async def run_tool():
+                    results = []
+                    async for msg in triton_backward_tool.process(last_message):
                         results.append(msg)
                     return results
 
@@ -377,6 +394,13 @@ if __name__ == "__main__":
         default="triton",
         choices=["triton", "torch", "vllm"],
         help="Inference backend",
+    )
+    parser.add_argument(
+        "--triton-backward",
+        dest="triton_backward",
+        default=False,
+        action="store_true",
+        help="Use Triton backward-generation tool",
     )
     args = parser.parse_args()
 
