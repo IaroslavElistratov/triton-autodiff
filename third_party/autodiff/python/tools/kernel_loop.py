@@ -223,6 +223,18 @@ Output policy
             else:
                 print(termcolor.colored("User:".ljust(MESSAGE_PADDING), "red"), flush=True)
                 user_message = get_user_input()
+
+            # Support in-session reset without restarting the process
+            if user_message.strip() == "/reset":
+                # Reinitialize the conversation with a fresh system message
+                system_message = Message.from_role_and_content(Role.SYSTEM, system_message_content)
+                messages = [system_message]
+                if args.raw:
+                    print("\n[Conversation reset]\n", flush=True)
+                else:
+                    print(termcolor.colored("Conversation reset.", "cyan"), flush=True)
+                continue
+
             user_message = Message.from_role_and_content(Role.USER, user_message)
             messages.append(user_message)
         else:
@@ -319,41 +331,51 @@ Output policy
         field_created = False
         current_output_text = ""
         output_text_delta_buffer = ""
-        for predicted_token in generator.generate(tokens, encoding.stop_tokens_for_assistant_actions()):
-            parser.process(predicted_token)
-            if args.raw:
-                print(encoding.decode([predicted_token]), end="", flush=True)
-                continue
+        #  interrupt generation with Ctrl-C. It won’t crash; it
+        try:
+            for predicted_token in generator.generate(tokens, encoding.stop_tokens_for_assistant_actions()):
+                parser.process(predicted_token)
+                if args.raw:
+                    print(encoding.decode([predicted_token]), end="", flush=True)
+                    continue
 
-            if parser.state == StreamState.EXPECT_START:
-                print("")  # new line
-                field_created = False
+                if parser.state == StreamState.EXPECT_START:
+                    print("")  # new line
+                    field_created = False
 
-            if not parser.last_content_delta:
-                continue
+                if not parser.last_content_delta:
+                    continue
 
-            if not field_created:
-                field_created = True
-                if parser.current_channel == "final":
-                    print(termcolor.colored("Assistant:", "green"), flush=True)
-                elif parser.current_recipient is not None:
-                    print(termcolor.colored(f"Tool call to {parser.current_recipient}:", "cyan"), flush=True)
-                else:
-                    print(termcolor.colored("CoT:", "yellow"), flush=True)
+                if not field_created:
+                    field_created = True
+                    if parser.current_channel == "final":
+                        print(termcolor.colored("Assistant:", "green"), flush=True)
+                    elif parser.current_recipient is not None:
+                        print(termcolor.colored(f"Tool call to {parser.current_recipient}:", "cyan"), flush=True)
+                    else:
+                        print(termcolor.colored("CoT:", "yellow"), flush=True)
 
-            should_send_output_text_delta = True
-            output_text_delta_buffer += parser.last_content_delta
-            if args.browser:
-                updated_output_text, _annotations, has_partial_citations = browser_tool.normalize_citations(current_output_text + output_text_delta_buffer)
-                output_text_delta_buffer = updated_output_text[len(current_output_text):]
-                if has_partial_citations:
-                    should_send_output_text_delta = False
-            if should_send_output_text_delta:
-                print(output_text_delta_buffer, end="", flush=True)
-                current_output_text += output_text_delta_buffer
-                output_text_delta_buffer = ""
+                should_send_output_text_delta = True
+                output_text_delta_buffer += parser.last_content_delta
+                if args.browser:
+                    updated_output_text, _annotations, has_partial_citations = browser_tool.normalize_citations(current_output_text + output_text_delta_buffer)
+                    output_text_delta_buffer = updated_output_text[len(current_output_text):]
+                    if has_partial_citations:
+                        should_send_output_text_delta = False
+                if should_send_output_text_delta:
+                    print(output_text_delta_buffer, end="", flush=True)
+                    current_output_text += output_text_delta_buffer
+                    output_text_delta_buffer = ""
 
-        messages += parser.messages
+            messages += parser.messages
+        except KeyboardInterrupt:
+            # Gracefully interrupt generation without crashing the app and let the model know.
+            interruption_note = "[Generation interrupted]"
+            appended_text = (
+                current_output_text + ("\n" if current_output_text else "") + interruption_note
+            )
+            messages.append(Message.from_role_and_content(Role.ASSISTANT, appended_text))
+            print(termcolor.colored(f"\n{interruption_note}", "red"), flush=True)
 
 
 if __name__ == "__main__":
