@@ -434,7 +434,7 @@ if __name__ == "__main__":
         "--context",
         metavar="CONTEXT",
         type=int,
-        default=8192,
+        default=32768,
         help="Max context length",
     )
     parser.add_argument(
