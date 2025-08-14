@@ -22,6 +22,33 @@ if dir is None:
 # todo: don't hardcode
 tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
+# def _locate_triton_opt(base_dir: str) -> str:
+#     """
+#     Locate `triton-opt`:
+#       1) Use TRITON_OPT_BIN if set and executable.
+#       2) Search under {base_dir}/build/**/triton-opt.
+#       3) Fallback to PATH.
+#     """
+#     env_path = os.getenv("TRITON_OPT_BIN")
+#     if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+#         return env_path
+
+#     search_root = os.path.join(base_dir, "build")
+#     if os.path.isdir(search_root):
+#         for root, _dirs, files in os.walk(search_root):
+#             if "triton-opt" in files:
+#                 return os.path.join(root, "triton-opt")
+
+#     which_path = shutil.which("triton-opt")
+#     if which_path:
+#         return which_path
+
+#     raise FileNotFoundError(
+#         "Could not find `triton-opt`. Set TRITON_OPT_BIN to its full path or ensure it is on PATH."
+#     )
+
+
+# tool = _locate_triton_opt(dir)
 
 def run_mlir_pass(path):
 
