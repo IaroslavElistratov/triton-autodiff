@@ -16,6 +16,8 @@ from typing import Any, AsyncIterator, Callable, Optional
 import json
 import os
 import torch
+import queue
+import threading
 
 from openai_harmony import (
     Author,
@@ -27,12 +29,13 @@ from openai_harmony import (
 )
 
 from ..tool import Tool
+from .utils import extract_request, run_with_timeout
 from triton.runtime.jit import JITFunction
 
 
 class TritonBackwardTool(Tool):
-    def __init__(self, name: str = "triton_backward"):
-        assert name == "triton_backward"
+    def __init__(self) -> None:
+        super().__init__()
 
     @classmethod
     def get_tool_name(cls) -> str:
@@ -159,29 +162,24 @@ What to provide:
             message = message.with_channel(channel)
         return message
 
-    def _extract_request(self, text: str) -> tuple[str, None | str, list[str], None | str]:
-        try:
-            obj = json.loads(text)
-            if isinstance(obj, dict) and "code" in obj:
-                code = str(obj["code"])  # type: ignore
-                function_name = None
-                if "setup" not in obj or not obj["setup"]:
-                    raise ValueError("Missing required field: setup")
-                setup = str(obj["setup"])  # type: ignore
-                if "warmup_call" not in obj or not obj["warmup_call"]:
-                    raise ValueError("Missing required field: warmup_call")
-                warmups: list[str] = [str(obj["warmup_call"])]
-                return code, function_name, warmups, setup
-        except Exception as e:
-            raise ValueError(
-                "Invalid request. Expected JSON with required fields: code, setup, warmup_call.\n"
-                "Tip: See the Example JSON request in the tool description."
-            ) from e
+    def _extract_request(self, text: str) -> tuple[str, list[str], None | str]:
+        # Delegate to shared utils for validation and extraction
+        return extract_request(text)
 
     def _load_function_from_code(self, code: str, function_name: str | None) -> tuple[dict[str, Any], Any]:
+        """
+        Execute the provided Python `code` and extract exactly one Triton JITFunction.
+
+        * executes code in an isolated namespace,
+        * enumerates ALL JITFunction instances,
+        * requires exactly one (explicit, deterministic),
+        * raises with a clear error if there are 0 or >1 kernels.
+        """
+        del function_name  # single-kernel enforcement; parameter is ignored
+
         local_ns: dict[str, Any] = {}
         try:
-            exec(code, local_ns, local_ns)
+            run_with_timeout(lambda: exec(code, local_ns, local_ns), CODE_EXEC_TIMEOUT_S)
         except Exception as e:
             raise RuntimeError(
                 "Failed to execute `code`. Ensure it is valid Python and defines a Triton kernel decorated with @triton.jit.\n"
@@ -189,31 +187,39 @@ What to provide:
                 f"Exec error: {e}"
             ) from e
 
-        candidate: Any | None = None
-        # Require that the code expose a JITFunction instance
-        for name, value in local_ns.items():
-            if isinstance(value, JITFunction):
-                candidate = value
-        if candidate is None:
+        kernels: dict[str, Any] = {name: value for name, value in local_ns.items() if isinstance(value, JITFunction)}
+
+        if not kernels:
             raise RuntimeError(
                 "No Triton JITFunction found.\n"
-                "Expected your `code` to define a top-level function decorated with @triton.jit, e.g.:\n"
+                "Expected your `code` to define exactly one top-level function decorated with @triton.jit, e.g.:\n"
                 "@triton.jit\n"
                 "def my_kernel(...): ...\n"
-                "Tip: Expose exactly one top-level JITFunction variable so the tool can pick it."
             )
-        return local_ns, candidate
+
+        if len(kernels) > 1:
+            available = ", ".join(sorted(kernels.keys()))
+            raise RuntimeError(
+                f"Multiple Triton kernels found: [{available}]. Expose exactly one top-level @triton.jit kernel in `code`."
+            )
+
+        selected_kernel = next(iter(kernels.values()))
+        return local_ns, selected_kernel
+
+    # Tunable limits (seconds)
+    CODE_EXEC_TIMEOUT_S = 15.0     # for `exec(code)` and `exec(setup)`
+    WARMUP_TIMEOUT_S    = 30.0     # for `eval(warmup_call)`; compilation may take longer
 
     async def _process(self, message: Message) -> AsyncIterator[Message]:
         channel = message.channel
         text = message.content[0].text if message.content else ""
         try:
-            code, fn_name, warmups, setup = self._extract_request(text)
-            local_ns, fn_obj = self._load_function_from_code(code, fn_name)
+            code, warmups, setup = self._extract_request(text)
+            local_ns, fn_obj = self._load_function_from_code(code, None)
 
             # Required setup snippet (e.g., create inputs)
             try:
-                exec(setup, local_ns, local_ns)
+                run_with_timeout(lambda: exec(setup, local_ns, local_ns), CODE_EXEC_TIMEOUT_S)
             except Exception as e:
                 raise RuntimeError(
                     "Failed to execute `setup`.\n"
@@ -224,7 +230,7 @@ What to provide:
             # Required warmup to trigger Triton JIT compilation (single call);
             # capture the compiled kernel if the stub returns it
             try:
-                result = eval(warmups[0], local_ns, local_ns)
+                result = run_with_timeout(lambda: eval(warmups[0], local_ns, local_ns), WARMUP_TIMEOUT_S)
             except Exception as e:
                 raise RuntimeError(
                     "Failed to execute `warmup_call`. It must run the kernel once and return the compiled kernel or (output, compiled_kernel).\n"

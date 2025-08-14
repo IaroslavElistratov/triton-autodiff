@@ -22,6 +22,9 @@ if dir is None:
 # todo: don't hardcode
 tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
+# Configurable timeout for triton-opt invocations (seconds)
+SUBPROCESS_TIMEOUT_S = float(os.environ.get("TRITON_OPT_TIMEOUT_S", "60"))
+
 # def _locate_triton_opt(base_dir: str) -> str:
 #     """
 #     Locate `triton-opt`:
