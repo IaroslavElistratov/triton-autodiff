@@ -1,5 +1,4 @@
-# python -m gpt_oss.chat --backend triton gpt-oss-20b/original/ -r high 
-
+# python -m gpt_oss.tools.kernel_loop --backend triton /workspace/gpt-oss/gpt-oss-20b/original/ -r high --triton-backward
 
 # positional arguments:
 #   FILE                  Path to the SafeTensors checkpoint

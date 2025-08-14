@@ -45,7 +45,7 @@ class TritonBackwardTool(Tool):
     @property
     def instruction(self) -> str:
         return (
-            """
+            '''
 
 Send Python code that defines and binds a Triton JITFunction (e.g., `@triton.jit`),
 as a JSON object with fields:
@@ -133,7 +133,7 @@ What to provide:
   - `_compiled_kernel`
   - `(output, _compiled_kernel)` or any tuple/list where one element is the compiled kernel (the tool scans from the end to find it)
 - Concrete pytorch tensor inputs (device=cuda) and a warmup call to the stub to compile the kernel.
-"""
+'''
         ).strip()
 
     @property
