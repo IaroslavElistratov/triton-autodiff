@@ -30,9 +30,7 @@ import argparse
 import asyncio
 import datetime
 import os
-import select
 import sys
-import time
 from pathlib import Path
 
 try:
@@ -73,50 +71,30 @@ REASONING_EFFORT = {
 }
 
 
-def _drain_pasted_block(initial_line: str, idle_ms: int = 40) -> str:
-    """Merge a pasted multi-line block into a single message.
+ 
 
-    Keep reading lines until stdin has been idle for idle_ms. Normal typed input
-    (no extra buffered lines) remains one line.
+
+def _read_block_from_stdin(show_prompt: bool = True) -> str:
+    """Read until EOF to capture a full user block.
+
+    Works with TTY (Ctrl-D on Unix/macOS; Ctrl-Z then Enter on Windows), pipes,
+    and here-documents.
     """
-    lines: list[str] = [initial_line]
-
-    # Non-TTY: best-effort non-blocking drain
-    if not sys.stdin.isatty():
-        while True:
-            rlist, _, _ = select.select([sys.stdin], [], [], 0)
-            if not rlist:
-                break
-            nxt = sys.stdin.readline()
-            if nxt == "":
-                break
-            lines.append(nxt.rstrip("\r\n"))
-        return "\n".join(lines)
-
-    # TTY: read until short idle window passes
-    deadline = time.monotonic() + idle_ms / 1000.0
-    while True:
-        timeout = max(0.0, deadline - time.monotonic())
-        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-        if rlist:
-            nxt = sys.stdin.readline()
-            if nxt == "":
-                break
-            lines.append(nxt.rstrip("\r\n"))
-            deadline = time.monotonic() + idle_ms / 1000.0
-        else:
-            break
-    return "\n".join(lines)
+    try:
+        if show_prompt and sys.stdin.isatty():
+            print("Paste your prompt. Press Ctrl-D (Unix/macOS) or Ctrl-Z then Enter (Windows) when done:")
+        data = sys.stdin.read()
+        # Normalize newlines
+        return data.replace("\r\n", "\n").replace("\r", "\n")
+    except Exception:
+        # Fallback to empty on unexpected read errors
+        return ""
 
 
-def get_user_input():
+def get_user_input(show_stdin_prompt: bool = True) -> str:
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     if rank == 0:
-        try:
-            first_line = input()
-        except EOFError:
-            first_line = ""
-        user_input = _drain_pasted_block(first_line)
+        user_input = _read_block_from_stdin(show_prompt=show_stdin_prompt)
     else:
         user_input = ""
     user_input_list = [user_input]
@@ -261,11 +239,11 @@ Output policy
         if last_message.recipient is None:
             if args.raw:
                 print(user_message_start, end="", flush=True)
-                user_message = get_user_input()
+                user_message = get_user_input(show_stdin_prompt=False)
                 print(user_message_end, flush=True, end="")
             else:
                 print(termcolor.colored("User:".ljust(MESSAGE_PADDING), "red"), flush=True)
-                user_message = get_user_input()
+                user_message = get_user_input(show_stdin_prompt=True)
 
             # Support in-session reset without restarting the process
             if user_message.strip() == "/reset":
