@@ -30,6 +30,9 @@ import argparse
 import asyncio
 import datetime
 import os
+import select
+import sys
+import time
 from pathlib import Path
 
 try:
@@ -70,10 +73,50 @@ REASONING_EFFORT = {
 }
 
 
+def _drain_pasted_block(initial_line: str, idle_ms: int = 40) -> str:
+    """Merge a pasted multi-line block into a single message.
+
+    Keep reading lines until stdin has been idle for idle_ms. Normal typed input
+    (no extra buffered lines) remains one line.
+    """
+    lines: list[str] = [initial_line]
+
+    # Non-TTY: best-effort non-blocking drain
+    if not sys.stdin.isatty():
+        while True:
+            rlist, _, _ = select.select([sys.stdin], [], [], 0)
+            if not rlist:
+                break
+            nxt = sys.stdin.readline()
+            if nxt == "":
+                break
+            lines.append(nxt.rstrip("\r\n"))
+        return "\n".join(lines)
+
+    # TTY: read until short idle window passes
+    deadline = time.monotonic() + idle_ms / 1000.0
+    while True:
+        timeout = max(0.0, deadline - time.monotonic())
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+        if rlist:
+            nxt = sys.stdin.readline()
+            if nxt == "":
+                break
+            lines.append(nxt.rstrip("\r\n"))
+            deadline = time.monotonic() + idle_ms / 1000.0
+        else:
+            break
+    return "\n".join(lines)
+
+
 def get_user_input():
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     if rank == 0:
-        user_input = input()
+        try:
+            first_line = input()
+        except EOFError:
+            first_line = ""
+        user_input = _drain_pasted_block(first_line)
     else:
         user_input = ""
     user_input_list = [user_input]
