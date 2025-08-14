@@ -1,7 +1,9 @@
+import sys
 import hashlib
 import subprocess
 import os
-os.environ['TRITON_ALWAYS_COMPILE']='1'
+import shutil
+os.environ['TRITON_ALWAYS_COMPILE'] = '1'
 
 import triton
 # from triton.compiler import compile
@@ -27,7 +29,7 @@ def run_mlir_pass(path):
 
   # produce bwd ttir
   with open(f"{path}/out.ttir", "w") as f:
-    subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+    subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f, check=True)
 
   if VERBOSE >= 1:
     # optionally, produce readable fwd ttir
@@ -39,7 +41,7 @@ def run_mlir_pass(path):
         content = f.read()         # Read existing content
         f.seek(0)                  # Move cursor to the beginning
         # Overwrite from the start
-        subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+        subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f, check=True)
         f.truncate()               # Remove remaining old content
 
     # if VERBOSE == 2:

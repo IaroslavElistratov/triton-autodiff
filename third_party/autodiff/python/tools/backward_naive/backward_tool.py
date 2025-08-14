@@ -1,16 +1,21 @@
 """
-- `gpt_oss/tools/backward_naive/backward_tool.py`: Triton backward tool that
+- `gpt_oss/tools/backward_naive/backward_tool.py`: new tool that
     - parses input, executes code,
-    - imports `generate_naive_backward` from `.core`,
-    - and returns the generated backward code (TTIR string)
-- `gpt_oss/tools/kernel_loop.py`:
-    - (Example CLI) Shows how to register and route to `TritonBackwardTool`
+    - imports `generate_naive_backward` from `.core`
+    - and returns the backward code
+- `gpt_oss/grad.py`:
+    - Imports `TritonBackwardTool`
+    - Adds `--triton-backward` flag
+    - Registers tool with Harmony when enabled
+    - Adds processing branch for `triton_backward.*` messages and prints tool status
 """
 
 
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable, Optional
 
 import json
+import os
+import torch
 
 from openai_harmony import (
     Author,
@@ -48,6 +53,7 @@ as a JSON object with fields:
     NOTE: any for-loops MUST have static bounds
   - setup: required, Python snippet executed after code (e.g., to create inputs)
   - warmup_call: required, a single Python snippet to run the kernel once
+  - return shape: either return the compiled kernel directly, or return a tuple/list containing it
 
 The tool executes code, then runs setup and warmup to JIT-compile the kernel, obtains the compiled kernel,
 and returns the generated backward TTIR as a string.
@@ -122,7 +128,10 @@ stub(a, b)
 
 What to provide:
 - Expose exactly one top-level python function decorated with `@triton.jit` (the tool will pick it).
-- A stub that chooses an appropriate grid, launches the kernel, and returns the compiled kernel (return either `_compiled_kernel` or `(output, _compiled_kernel)`).
+- A stub that chooses an appropriate grid, launches the kernel, and returns the compiled kernel.
+  Accepted return shapes:
+  - `_compiled_kernel`
+  - `(output, _compiled_kernel)` or any tuple/list where one element is the compiled kernel (the tool scans from the end to find it)
 - Concrete pytorch tensor inputs (device=cuda) and a warmup call to the stub to compile the kernel.
 """
         ).strip()
@@ -225,24 +234,33 @@ What to provide:
             # Lazy import to avoid hard dependency unless the tool is used
             try:
                 from .core import generate_naive_backward  # type: ignore
-            except Exception as e1:
+            except Exception:
                 try:
-                    from gpt_oss.tools.triton_backward.core import generate_naive_backward  # type: ignore
+                    from gpt_oss.tools.backward_naive.core import generate_naive_backward  # type: ignore
                 except Exception as e2:
                     raise RuntimeError(
                         "Could not import `generate_naive_backward`. Ensure the core implementation is available."
                     ) from e2
 
-            # Expect the warmup result to contain the compiled kernel; accept either the kernel
-            # itself or a tuple (output, compiled_kernel)
-            if hasattr(result, 'asm') and isinstance(getattr(result, 'asm'), dict) and 'ttir' in result.asm:
+            # Extract the compiled kernel from result:
+            #   - the kernel itself, or
+            #   - a tuple/list containing the kernel (often last element)
+            def _is_compiled_kernel(x: Any) -> bool:
+                return hasattr(x, 'asm') and isinstance(getattr(x, 'asm'), dict) and 'ttir' in x.asm
+
+            compiled_kernel = None
+            if _is_compiled_kernel(result):
                 compiled_kernel = result
-            elif isinstance(result, tuple) and len(result) == 2 and hasattr(result[1], 'asm') and isinstance(getattr(result[1], 'asm'), dict) and 'ttir' in result[1].asm:
-                compiled_kernel = result[1]
-            else:
+            elif isinstance(result, (tuple, list)):
+                for elem in reversed(result):
+                    if _is_compiled_kernel(elem):
+                        compiled_kernel = elem
+                        break
+
+            if compiled_kernel is None:
                 raise RuntimeError(
                     "Warmup did not yield a compiled kernel.\n"
-                    f"Got type: {type(result).__name__}. Expected a compiled kernel or a tuple (output, compiled_kernel).\n"
+                    f"Got type: {type(result).__name__}. Expected a compiled kernel or a tuple containing one.\n"
                     "Fix: Modify your stub to return the compiled kernel object. Example pattern:\n"
                     "_compiled_kernel = my_kernel[grid](...); return out, _compiled_kernel"
                 )

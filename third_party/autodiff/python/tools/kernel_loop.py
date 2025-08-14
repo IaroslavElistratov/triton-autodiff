@@ -45,7 +45,7 @@ from gpt_oss.tools import apply_patch
 from gpt_oss.tools.simple_browser import SimpleBrowserTool
 from gpt_oss.tools.simple_browser.backend import ExaBackend
 from gpt_oss.tools.python_docker.docker_tool import PythonTool
-from gpt_oss.tools.triton_backward import TritonBackwardTool
+from gpt_oss.tools.backward_naive import TritonBackwardTool
 
 from openai_harmony import (
     Author,
