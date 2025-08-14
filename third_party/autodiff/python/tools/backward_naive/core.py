@@ -57,22 +57,45 @@ def run_mlir_pass(path):
 
   os.makedirs(path, exist_ok=True)
 
+  inp_path = f"{path}/inp.ttir"
+  out_path = f"{path}/out.ttir"
+
   # produce bwd ttir
-  with open(f"{path}/out.ttir", "w") as f:
-    subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f, check=True)
+  with open(out_path, "w") as f_out:
+    try:
+      subprocess.run(
+        [tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", inp_path],
+        stdout=f_out,
+        stderr=subprocess.DEVNULL,  # suppress verbose compiler diagnostics
+        check=True,                 # raise on failure; we map to a friendly message
+        timeout=SUBPROCESS_TIMEOUT_S,
+      )
+    except subprocess.CalledProcessError:
+      raise RuntimeError(
+        "triton-opt failed while generating the backward TTIR.\n"
+        "Hint: Check that your kernel has static loop bounds, shapes line up, and dtypes are supported."
+      )
 
+  # optionally, produce readable fwd ttir
   if VERBOSE >= 1:
-    # optionally, produce readable fwd ttir
-
     # ugly, needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
     # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix"
     # on it and write to the same files to avoid creating redundant files
-    with open(f"{path}/inp.ttir", "r+") as f:
-        content = f.read()         # Read existing content
-        f.seek(0)                  # Move cursor to the beginning
+    with open(inp_path, "r+") as f_out:
+      _ = f_out.read()         # Read existing content
+      f_out.seek(0)            # Move cursor to the beginning
+      try:
         # Overwrite from the start
-        subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f, check=True)
-        f.truncate()               # Remove remaining old content
+        subprocess.run(
+          [tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", inp_path],
+          stdout=f_out,
+          stderr=subprocess.DEVNULL,  # suppress verbose diagnostics
+          check=True,
+          timeout=SUBPROCESS_TIMEOUT_S,
+        )
+        f_out.truncate()               # Remove remaining old content
+      except subprocess.CalledProcessError:
+        raise RuntimeError("triton-opt failed while pretty-printing the forward TTIR.")
 
     # if VERBOSE == 2:
 
