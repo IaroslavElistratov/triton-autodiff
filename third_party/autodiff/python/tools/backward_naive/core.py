@@ -1,17 +1,13 @@
-import sys
 import hashlib
 import subprocess
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
-import torch
-torch.manual_seed(0)
-DEVICE = torch.device("cuda:0")
-
 import triton
-import triton.language as tl
-from triton.runtime.jit import JITFunction
-from triton.compiler import compile as compile_kernel
+# from triton.compiler import compile
+# from triton.backends.compiler import GPUTarget
+# from triton.runtime.jit import JITFunction
+from typing import Callable, Optional, Any
 
 
 VERBOSE = int(os.environ.get('VERBOSE', 0))
@@ -99,35 +95,113 @@ def run_mlir_pass(path):
 
 #     return new
 
-def generate_naive_backward(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
-    # 1) extract fwd_compiled_kernel
+# def generate_naive_backward(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
-    # get the kernel using the same key
-    fwd_compiled_kernel = 
+#     # 1) extract fwd_compiled_kernel
 
-    # 2) write fwd IR
+#     # get the kernel using the same key
+#     fwd_compiled_kernel = 
 
-    # todo: cleanup
-    # the "key" arg is just a python string with input signatures of the kernel
-    # but I want some folder name -- one way is to hash it
-    hash_object = hashlib.sha256(key.encode())
-    dir_name = hash_object.hexdigest()[:10]
-    if VERBOSE: print("dir_name: ", dir_name)
+#     # 2) write fwd IR
 
-    os.makedirs(f"generated/{dir_name}", exist_ok=True)
-    with open(f"generated/{dir_name}/inp.ttir", "w") as f:
-      f.write(fwd_compiled_kernel.asm['ttir'])
+#     # todo: cleanup
+#     # the "key" arg is just a python string with input signatures of the kernel
+#     # but I want some folder name -- one way is to hash it
+#     hash_object = hashlib.sha256(key.encode())
+#     dir_name = hash_object.hexdigest()[:10]
+#     if VERBOSE: print("dir_name: ", dir_name)
 
-    # 3) autodiff
-    run_mlir_pass(f"generated/{dir_name}")
+#     os.makedirs(f"generated/{dir_name}", exist_ok=True)
+#     with open(f"generated/{dir_name}/inp.ttir", "w") as f:
+#       f.write(fwd_compiled_kernel.asm['ttir'])
 
-    # # 4) create callable python fn for bwd
-    # # CompiledKernel
-    # bwd_compiled_kernel = compile_kernel(
-    #     f"generated/{dir_name}/out.ttir",
-    #     target=target,
-    #     # keep original CompiledKernel.options to preserve same PTX flavour
-    #     # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
-    # )
+#     # 3) autodiff
+#     run_mlir_pass(f"generated/{dir_name}")
 
+#     # # 4) create callable python fn for bwd
+#     # # CompiledKernel(
+#     #     f"generated/{dir_name}/out.ttir",
+#     #     target=target,
+#     #     # keep original CompiledKernel.options to preserve same PTX flavour
+#     #     # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
+#     # )
+
+
+
+def generate_naive_backward(compiled_kernel: Any) -> str:
+  """
+  Given a compiled Triton kernel object (duck-typed: has asm dict with 'ttir'),
+  run the autodiff pass and return the generated backward TTIR as a string.
+
+  Expected usage in user stub:
+    _compiled_kernel = my_kernel[grid](...)
+    return out, _compiled_kernel  # or just return _compiled_kernel
+  """
+  try:
+    ttir_text = compiled_kernel.asm['ttir']
+  except Exception as e:
+    raise TypeError(
+      "Invalid compiled_kernel: missing asm['ttir'].\n"
+      "Fix: Return the object produced by a Triton kernel launch, e.g. `_compiled_kernel = my_kernel[grid](...)`."
+    ) from e
+  hash_object = hashlib.sha256(ttir_text.encode())
+  dir_name = hash_object.hexdigest()[:10]
+
+  if VERBOSE: print("dir_name: ", dir_name)
+
+  # 2) write fwd IR
+  os.makedirs(f"generated/{dir_name}", exist_ok=True)
+  with open(f"generated/{dir_name}/inp.ttir", "w") as f:
+    f.write(ttir_text)
+
+  # 3) autodiff -> writes out.ttir
+  run_mlir_pass(f"generated/{dir_name}")
+
+  # Return the generated backward TTIR as a string
+  out_path = f"generated/{dir_name}/out.ttir"
+  with open(out_path, "r") as f:
+    return f.read()
+
+
+
+
+
+
+"""
+# ir_code =
+
+# IRSource (created inside triton.compile) uses extension of the file to figure
+# out to call "ir.parse_mlir_module(self.path, context)""
+
+# with open("third_party/autodiff/test/kernel.ttir", "w") as f:
+#     f.write(ir_code)
+
+# Create a GPU target
+target = GPUTarget("cuda", arch=89, warp_size=32)
+
+# Compile the IR
+add_bwd_kernel = compile("third_party/autodiff/test/out.ttir", target=target)
+
+# The IRSource class handles parsing the IR file and setting up the compilation pipeline
+# The rest of the compilation process (from IR to PTX to cubin) remains the same as the normal workflow
+def add_bwd(upstream, BLOCK_SIZE=4):
+    # ...
+    _compiled_kernel = add_bwd_kernel[grid](a_grad, upstream) # BLOCK_SIZE
+    return a_grad, _compiled_kernel
+
+a_grad, _compiled_kernel = add_bwd(upstream)
+"""
+
+
+"""
+def stub(a, b):
+    ...
+    _compiled_kernel = kernel[grid](a, b, output) # BLOCK_SIZE=4
+    return output, _compiled_kernel
+
+output_triton, _compiled_kernel = stub(a, b)
+
+with open("inp.ttir", "w") as f:
+    f.write(_compiled_kernel.asm['ttir'])
+"""
