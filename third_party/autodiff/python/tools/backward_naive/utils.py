@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 
 import json
 import queue
 import threading
 
 
-def extract_request(text: str) -> Tuple[str, str]:
+def extract_request(text: str) -> Tuple[str, str, bool]:
     """
     Validate the JSON payload for the Triton backward tool.
 
@@ -15,7 +15,10 @@ def extract_request(text: str) -> Tuple[str, str]:
       - code:  str (Python module defining exactly one @triton.jit kernel)
       - setup: str (Python snippet that prepares inputs AND runs the kernel once)
 
-    Returns (code, setup).
+    Optional:
+      - json:  bool (default False). If True, return a small JSON pointer {digest, path}.
+
+    Returns (code, setup, as_json).
     """
     try:
         obj = json.loads(text)
@@ -26,7 +29,7 @@ def extract_request(text: str) -> Tuple[str, str]:
         raise ValueError("Invalid request: top-level JSON must be an object.")
 
     REQUIRED = {"code", "setup"}
-    ALLOWED = REQUIRED
+    ALLOWED = REQUIRED | {"json"}
 
     missing = sorted(REQUIRED - obj.keys())
     extra = sorted(set(obj.keys()) - ALLOWED)
@@ -47,7 +50,8 @@ def extract_request(text: str) -> Tuple[str, str]:
 
     code = obj["code"]
     setup = obj["setup"]
-    return code, setup
+    as_json = bool(obj.get("json", False))
+    return code, setup, as_json
 
 
 def run_with_timeout(fn, timeout_s: float):
@@ -115,4 +119,49 @@ def pick_compiled_kernel(ns: dict[str, Any]) -> Any:
     raise RuntimeError(
         "Multiple compiled kernels found. Assign the one you want to `_compiled_kernel` to disambiguate."
     )
+
+
+def try_make_slice_payload(text: str) -> Optional[str]:
+    """
+    Optional fast path for chunked reads of the generated TTIR file.
+
+    Input (text): JSON string possibly containing:
+      {"slice": {"digest": "<digest10|full>", "offset": int, "limit": int}}
+
+    On success: returns a JSON payload string with fields
+      {"digest", "path", "offset", "limit", "data"}
+    If the request is not a slice request, returns None.
+    Raises ValueError on malformed slice requests.
+    """
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return None
+
+    if not isinstance(obj, dict) or "slice" not in obj:
+        return None
+
+    s = obj["slice"] or {}
+    digest = str(s.get("digest", "")).strip()
+    if not digest:
+        raise ValueError("slice.digest is required")
+    digest10 = digest[:10]
+    offset = int(s.get("offset", 0))
+    limit = int(s.get("limit", 64 * 1024))
+    if offset < 0 or limit <= 0:
+        raise ValueError("slice.offset must be >= 0 and slice.limit must be > 0")
+
+    out_path = f"generated/{digest10}/out.ttir"
+    with open(out_path, "rb") as fh:
+        fh.seek(offset)
+        chunk = fh.read(limit)
+
+    payload = json.dumps({
+        "digest": digest10,
+        "path": out_path,
+        "offset": offset,
+        "limit": limit,
+        "data": chunk.decode("utf-8", "replace"),
+    })
+    return payload
 

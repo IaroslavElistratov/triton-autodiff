@@ -30,7 +30,7 @@ from openai_harmony import (
 )
 
 from ..tool import Tool
-from .utils import extract_request, run_with_timeout, pick_compiled_kernel
+from .utils import extract_request, run_with_timeout, pick_compiled_kernel, try_make_slice_payload
 from triton.runtime.jit import JITFunction
 
 
@@ -62,8 +62,8 @@ as a JSON object with fields:
                         - assign the compiled kernel object to `_compiled_kernel`
   - json  (optional): if true, return a small JSON pointer {digest, path} instead of the full TTIR string.
 
-The tool executes code, then runs setup and warmup to JIT-compile the kernel, obtains the compiled kernel,
-and returns the generated backward TTIR as a string.
+The tool executes `code`, then runs `setup` to JIT-compile the kernel, obtains the compiled kernel,
+and returns the generated backward TTIR as a string (or a tiny pointer when `json: true`).
 
 Example JSON request:
 ```
@@ -127,13 +127,19 @@ M = N = K = 32
 a = torch.randn((M, K), device='cuda', dtype=torch.float16)
 b = torch.randn((K, N), device='cuda', dtype=torch.float16)
 c, _compiled_kernel = stub(a, b)
-"""
+""",
+  "json": true
 }
 
 Contract:
 - The tool will execute `code`, then `setup`.
 - It discovers `_compiled_kernel` (or the only compiled kernel object in scope),
-  runs the autodiff pass, and returns the backward TTIR (or a JSON pointer).
+  runs the autodiff pass, and returns the backward TTIR (or a JSON pointer when `json: true`).
+
+Fetching large TTIR incrementally:
+- After receiving `{ "digest": "<digest10>", "path": "generated/<digest10>/out.ttir" }`,
+  call the tool later with:
+  { "slice": { "digest": "<digest10>", "offset": 0, "limit": 65536 } }
 ```
 
 What to provide:
@@ -166,7 +172,7 @@ What to provide:
             message = message.with_channel(channel)
         return message
 
-    def _extract_request(self, text: str) -> tuple[str, str]:
+    def _extract_request(self, text: str) -> tuple[str, str, bool]:
         # Delegate to shared utils for validation and extraction
         return extract_request(text)
 
@@ -217,7 +223,13 @@ What to provide:
         channel = message.channel
         text = message.content[0].text if message.content else ""
         try:
-            code, setup = self._extract_request(text)
+            # Optional fast path: slice read without recompilation
+            payload = try_make_slice_payload(text)
+            if payload is not None:
+                yield self.make_response(TextContent(text=payload), channel=channel)
+                return
+
+            code, setup, as_json = self._extract_request(text)
             local_ns, _ = self._load_function_from_code(code, None)
 
             # Required setup snippet (prepare tensors AND launch once)
@@ -236,7 +248,15 @@ What to provide:
             compiled_kernel = pick_compiled_kernel(local_ns)
 
             backward_code: str = generate_naive_backward(compiled_kernel)  # type: ignore
-            yield self.make_response(TextContent(text=backward_code), channel=channel)
+
+            if as_json:
+                fwd_ttir = compiled_kernel.asm["ttir"]
+                digest10 = hashlib.sha256(fwd_ttir.encode()).hexdigest()[:10]
+                path = f"generated/{digest10}/out.ttir"
+                payload = json.dumps({"digest": digest10, "path": path})
+                yield self.make_response(TextContent(text=payload), channel=channel)
+            else:
+                yield self.make_response(TextContent(text=backward_code), channel=channel)
         except Exception as e:
             err = f"Error generating backward pass: {e}"
             yield self.make_response(TextContent(text=err), channel=channel)

@@ -37,7 +37,7 @@ tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 #     env_path = os.getenv("TRITON_OPT_BIN")
 #     if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
 #         return env_path
-
+#
 #     # (2) local recursive search under provided checkout
 #     if base_dir:
 #         search_root = os.path.join(base_dir, "build")
@@ -45,12 +45,12 @@ tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 #             for root, _dirs, files in os.walk(search_root):
 #                 if "triton-opt" in files:
 #                     return os.path.join(root, "triton-opt")
-
+#
 #     # (3) PATH fallback
 #     which_path = shutil.which("triton-opt")
 #     if which_path:
 #         return which_path
-
+#
 #     raise FileNotFoundError(
 #         "Could not find `triton-opt`. Set TRITON_OPT_BIN to its full path, "
 #         "set TRITON_AUTODIFF_DIR to your checkout, or ensure it is on PATH."
