@@ -1,6 +1,6 @@
 import sys
 import os
-os.environ['TRITON_ALWAYS_COMPILE']='1'
+# os.environ['TRITON_ALWAYS_COMPILE']='1'
 import hashlib
 import inspect
 import subprocess

@@ -14,6 +14,7 @@
 from typing import Any, AsyncIterator, Callable, Optional
 
 import json
+import hashlib
 import os
 import torch
 import queue
@@ -29,7 +30,7 @@ from openai_harmony import (
 )
 
 from ..tool import Tool
-from .utils import extract_request, run_with_timeout
+from .utils import extract_request, run_with_timeout, pick_compiled_kernel
 from triton.runtime.jit import JITFunction
 
 
@@ -50,13 +51,16 @@ class TritonBackwardTool(Tool):
         return (
             '''
 
-Send Python code that defines and binds a Triton JITFunction (e.g., `@triton.jit`),
+Send Python code that defines exactly one Triton JITFunction (python function decorated with @triton.jit),
 as a JSON object with fields:
-  - code: required, Python module text defining and binding a JITFunction variable
-    NOTE: any for-loops MUST have static bounds
-  - setup: required, Python snippet executed after code (e.g., to create inputs)
-  - warmup_call: required, a single Python snippet to run the kernel once
-  - return shape: either return the compiled kernel directly, or return a tuple/list containing it
+  - code  (required): Python module text that defines ONE top-level @triton.jit kernel
+                        and any helper stubs it needs.
+                        NOTE: any for-loops inside the kernel MUST have static bounds
+  - setup (required): Python snippet executed after `code`. It must:
+                        - import torch & build CUDA tensors
+                        - launch the kernel ONCE to force JIT compilation
+                        - assign the compiled kernel object to `_compiled_kernel`
+  - json  (optional): if true, return a small JSON pointer {digest, path} instead of the full TTIR string.
 
 The tool executes code, then runs setup and warmup to JIT-compile the kernel, obtains the compiled kernel,
 and returns the generated backward TTIR as a string.
@@ -122,20 +126,20 @@ import torch
 M = N = K = 32
 a = torch.randn((M, K), device='cuda', dtype=torch.float16)
 b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-""",
-  "warmup_call": """
-stub(a, b)
+c, _compiled_kernel = stub(a, b)
 """
 }
+
+Contract:
+- The tool will execute `code`, then `setup`.
+- It discovers `_compiled_kernel` (or the only compiled kernel object in scope),
+  runs the autodiff pass, and returns the backward TTIR (or a JSON pointer).
 ```
 
 What to provide:
 - Expose exactly one top-level python function decorated with `@triton.jit` (the tool will pick it).
 - A stub that chooses an appropriate grid, launches the kernel, and returns the compiled kernel.
-  Accepted return shapes:
-  - `_compiled_kernel`
-  - `(output, _compiled_kernel)` or any tuple/list where one element is the compiled kernel (the tool scans from the end to find it)
-- Concrete pytorch tensor inputs (device=cuda) and a warmup call to the stub to compile the kernel.
+
 '''
         ).strip()
 
@@ -162,7 +166,7 @@ What to provide:
             message = message.with_channel(channel)
         return message
 
-    def _extract_request(self, text: str) -> tuple[str, list[str], None | str]:
+    def _extract_request(self, text: str) -> tuple[str, str]:
         # Delegate to shared utils for validation and extraction
         return extract_request(text)
 
@@ -179,7 +183,7 @@ What to provide:
 
         local_ns: dict[str, Any] = {}
         try:
-            run_with_timeout(lambda: exec(code, local_ns, local_ns), CODE_EXEC_TIMEOUT_S)
+            run_with_timeout(lambda: exec(code, local_ns, local_ns), self.CODE_EXEC_TIMEOUT_S)
         except Exception as e:
             raise RuntimeError(
                 "Failed to execute `code`. Ensure it is valid Python and defines a Triton kernel decorated with @triton.jit.\n"
@@ -208,68 +212,28 @@ What to provide:
 
     # Tunable limits (seconds)
     CODE_EXEC_TIMEOUT_S = 15.0     # for `exec(code)` and `exec(setup)`
-    WARMUP_TIMEOUT_S    = 30.0     # for `eval(warmup_call)`; compilation may take longer
 
     async def _process(self, message: Message) -> AsyncIterator[Message]:
         channel = message.channel
         text = message.content[0].text if message.content else ""
         try:
-            code, warmups, setup = self._extract_request(text)
-            local_ns, fn_obj = self._load_function_from_code(code, None)
+            code, setup = self._extract_request(text)
+            local_ns, _ = self._load_function_from_code(code, None)
 
-            # Required setup snippet (e.g., create inputs)
+            # Required setup snippet (prepare tensors AND launch once)
             try:
-                run_with_timeout(lambda: exec(setup, local_ns, local_ns), CODE_EXEC_TIMEOUT_S)
+                run_with_timeout(lambda: exec(setup, local_ns, local_ns), self.CODE_EXEC_TIMEOUT_S)
             except Exception as e:
                 raise RuntimeError(
-                    "Failed to execute `setup`.\n"
-                    "Ensure you import torch and create CUDA tensors with correct shapes/dtypes.\n"
+                    "Failed to execute `setup`. Ensure it creates CUDA tensors and launches the kernel once.\n"
                     f"Setup error: {e}"
                 ) from e
 
-            # Required warmup to trigger Triton JIT compilation (single call);
-            # capture the compiled kernel if the stub returns it
-            try:
-                result = run_with_timeout(lambda: eval(warmups[0], local_ns, local_ns), WARMUP_TIMEOUT_S)
-            except Exception as e:
-                raise RuntimeError(
-                    "Failed to execute `warmup_call`. It must run the kernel once and return the compiled kernel or (output, compiled_kernel).\n"
-                    "Example: out, _compiled_kernel = stub(...); return out, _compiled_kernel  OR  return _compiled_kernel\n"
-                    f"Warmup error: {e}"
-                ) from e
             # Lazy import to avoid hard dependency unless the tool is used
-            try:
-                from .core import generate_naive_backward  # type: ignore
-            except Exception:
-                try:
-                    from gpt_oss.tools.backward_naive.core import generate_naive_backward  # type: ignore
-                except Exception as e2:
-                    raise RuntimeError(
-                        "Could not import `generate_naive_backward`. Ensure the core implementation is available."
-                    ) from e2
+            from .core import generate_naive_backward  # type: ignore
 
-            # Extract the compiled kernel from result:
-            #   - the kernel itself, or
-            #   - a tuple/list containing the kernel (often last element)
-            def _is_compiled_kernel(x: Any) -> bool:
-                return hasattr(x, 'asm') and isinstance(getattr(x, 'asm'), dict) and 'ttir' in x.asm
-
-            compiled_kernel = None
-            if _is_compiled_kernel(result):
-                compiled_kernel = result
-            elif isinstance(result, (tuple, list)):
-                for elem in reversed(result):
-                    if _is_compiled_kernel(elem):
-                        compiled_kernel = elem
-                        break
-
-            if compiled_kernel is None:
-                raise RuntimeError(
-                    "Warmup did not yield a compiled kernel.\n"
-                    f"Got type: {type(result).__name__}. Expected a compiled kernel or a tuple containing one.\n"
-                    "Fix: Modify your stub to return the compiled kernel object. Example pattern:\n"
-                    "_compiled_kernel = my_kernel[grid](...); return out, _compiled_kernel"
-                )
+            # Find the compiled kernel in the namespace
+            compiled_kernel = pick_compiled_kernel(local_ns)
 
             backward_code: str = generate_naive_backward(compiled_kernel)  # type: ignore
             yield self.make_response(TextContent(text=backward_code), channel=channel)

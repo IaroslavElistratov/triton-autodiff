@@ -1,39 +1,32 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple, List
+from typing import Tuple, Any
 
 import json
 import queue
 import threading
 
 
-def extract_request(text: str) -> Tuple[str, List[str], Optional[str]]:
-
+def extract_request(text: str) -> Tuple[str, str]:
     """
     Validate the JSON payload for the Triton backward tool.
 
-    Required fields:
-      - code:        str (non-empty)
-      - setup:       str (non-empty)
-      - warmup_call: str (non-empty)
+    Required:
+      - code:  str (Python module defining exactly one @triton.jit kernel)
+      - setup: str (Python snippet that prepares inputs AND runs the kernel once)
 
-    Optional fields: none (kernel selection is automatic; exactly one @triton.jit kernel must be present).
-
-    Returns (code, [warmup_call], setup).
-    Raises ValueError with actionable messages on failure.
+    Returns (code, setup).
     """
-    REQUIRED = {"code", "setup", "warmup_call"}
-    ALLOWED = REQUIRED
-
     try:
         obj = json.loads(text)
     except Exception as e:
         raise ValueError(f"Invalid JSON: {e}")
 
     if not isinstance(obj, dict):
-        raise ValueError(
-            "Invalid request: top-level JSON must be an object with fields: code, setup, warmup_call, (optional) kernel_name."
-        )
+        raise ValueError("Invalid request: top-level JSON must be an object.")
+
+    REQUIRED = {"code", "setup"}
+    ALLOWED = REQUIRED
 
     missing = sorted(REQUIRED - obj.keys())
     extra = sorted(set(obj.keys()) - ALLOWED)
@@ -47,17 +40,14 @@ def extract_request(text: str) -> Tuple[str, List[str], Optional[str]]:
             "Invalid request. " + "; ".join(problems) + ". Allowed keys: " + ", ".join(sorted(ALLOWED))
         )
 
-    def _need_nonempty_str(k: str) -> str:
-        v = obj.get(k)
-        if not isinstance(v, str) or not v.strip():
-            raise ValueError(f"Field `{k}` must be a non-empty string.")
-        return v
+    if "code" not in obj or not isinstance(obj["code"], str) or not obj["code"].strip():
+        raise ValueError("Field `code` must be a non-empty string.")
+    if "setup" not in obj or not isinstance(obj["setup"], str) or not obj["setup"].strip():
+        raise ValueError("Field `setup` must be a non-empty string.")
 
-    code = _need_nonempty_str("code")
-    setup = _need_nonempty_str("setup")
-    warmup_call = _need_nonempty_str("warmup_call")
-
-    return code, [warmup_call], setup
+    code = obj["code"]
+    setup = obj["setup"]
+    return code, setup
 
 
 def run_with_timeout(fn, timeout_s: float):
@@ -86,4 +76,43 @@ def run_with_timeout(fn, timeout_s: float):
         return payload
     raise payload  # type: ignore[misc]
 
+
+def pick_compiled_kernel(ns: dict[str, Any]) -> Any:
+    """
+    Locate a compiled Triton kernel object in the given namespace.
+
+    Preference order:
+      1) `_compiled_kernel` if present and valid
+      2) Otherwise, search for exactly one compiled kernel among values and
+         shallow elements of tuples/lists.
+
+    Raises RuntimeError with an actionable message if none or multiple are found.
+    """
+    def _is_compiled_kernel(x: Any) -> bool:
+        return hasattr(x, "asm") and isinstance(getattr(x, "asm"), dict) and "ttir" in x.asm
+
+    # 1) prefer explicit `_compiled_kernel`
+    if "_compiled_kernel" in ns and _is_compiled_kernel(ns["_compiled_kernel"]):
+        return ns["_compiled_kernel"]
+
+    # 2) Otherwise, search namespace values (direct and shallow tuples/lists)
+    found: list[Any] = []
+    for v in ns.values():
+        if _is_compiled_kernel(v):
+            found.append(v)
+        elif isinstance(v, (tuple, list)):
+            for e in v:
+                if _is_compiled_kernel(e):
+                    found.append(e)
+
+    if len(found) == 1:
+        return found[0]
+    if len(found) == 0:
+        raise RuntimeError(
+            "Setup did not yield a compiled kernel. Fix: Modify your stub to return the compiled kernel object and assign it to `_compiled_kernel`, "
+            "e.g. `_compiled_kernel = my_kernel[grid](...)` or `_, _compiled_kernel = stub(...)`."
+        )
+    raise RuntimeError(
+        "Multiple compiled kernels found. Assign the one you want to `_compiled_kernel` to disambiguate."
+    )
 

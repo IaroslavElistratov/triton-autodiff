@@ -3,7 +3,7 @@ import hashlib
 import subprocess
 import os
 import shutil
-os.environ['TRITON_ALWAYS_COMPILE'] = '1'
+# os.environ['TRITON_ALWAYS_COMPILE'] = '1'
 
 import triton
 # from triton.compiler import compile
@@ -15,6 +15,9 @@ from typing import Callable, Optional, Any
 VERBOSE = int(os.environ.get('VERBOSE', 0))
 assert VERBOSE in [0, 1, 2]
 
+# timeout for triton-opt invocations (seconds)
+SUBPROCESS_TIMEOUT_S = float(os.environ.get("TRITON_OPT_TIMEOUT_S", "60"))
+
 dir = os.getenv("TRITON_AUTODIFF_DIR")
 if dir is None:
     raise ValueError("Please specify TRITON_AUTODIFF_DIR, see README.")
@@ -22,36 +25,44 @@ if dir is None:
 # todo: don't hardcode
 tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
-# Configurable timeout for triton-opt invocations (seconds)
-SUBPROCESS_TIMEOUT_S = float(os.environ.get("TRITON_OPT_TIMEOUT_S", "60"))
-
-# def _locate_triton_opt(base_dir: str) -> str:
+# def _locate_triton_opt(base_dir: str | None) -> str:
 #     """
-#     Locate `triton-opt`:
-#       1) Use TRITON_OPT_BIN if set and executable.
-#       2) Search under {base_dir}/build/**/triton-opt.
-#       3) Fallback to PATH.
+#     Locate `triton-opt` without hardcoding build subpaths.
+#     Resolution order:
+#       1) $TRITON_OPT_BIN (explicit override)
+#       2) <TRITON_AUTODIFF_DIR>/build/**/triton-opt (if TRITON_AUTODIFF_DIR is set)
+#       3) PATH (shutil.which)
 #     """
+#     # (1) explicit override
 #     env_path = os.getenv("TRITON_OPT_BIN")
 #     if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
 #         return env_path
 
-#     search_root = os.path.join(base_dir, "build")
-#     if os.path.isdir(search_root):
-#         for root, _dirs, files in os.walk(search_root):
-#             if "triton-opt" in files:
-#                 return os.path.join(root, "triton-opt")
+#     # (2) local recursive search under provided checkout
+#     if base_dir:
+#         search_root = os.path.join(base_dir, "build")
+#         if os.path.isdir(search_root):
+#             for root, _dirs, files in os.walk(search_root):
+#                 if "triton-opt" in files:
+#                     return os.path.join(root, "triton-opt")
 
+#     # (3) PATH fallback
 #     which_path = shutil.which("triton-opt")
 #     if which_path:
 #         return which_path
 
 #     raise FileNotFoundError(
-#         "Could not find `triton-opt`. Set TRITON_OPT_BIN to its full path or ensure it is on PATH."
+#         "Could not find `triton-opt`. Set TRITON_OPT_BIN to its full path, "
+#         "set TRITON_AUTODIFF_DIR to your checkout, or ensure it is on PATH."
 #     )
 
+# # Optional hint to your local triton-autodiff checkout
+# _BASE_DIR = os.getenv("TRITON_AUTODIFF_DIR")
 
-# tool = _locate_triton_opt(dir)
+# # Use the robust locator everywhere below
+# tool = _locate_triton_opt(_BASE_DIR)
+
+
 
 def run_mlir_pass(path):
 
