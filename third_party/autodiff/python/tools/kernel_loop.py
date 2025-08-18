@@ -143,37 +143,44 @@ def main(args):
     if getattr(args, "triton_backward", False):
         triton_backward_tool = TritonBackwardTool()
         system_message_content = system_message_content.with_tools(triton_backward_tool.tool_config)
+        # Sanity: ensure the tool exposes a callable function
+        tb_tools = [t.name for t in triton_backward_tool.tool_config.tools]
+        print("Triton Backward Tool enabled; functions:", tb_tools)
+        if "run" not in tb_tools:
+            raise RuntimeError("triton_backward tool is misconfigured (no 'run' function). Check the import path.")
 
     system_message = Message.from_role_and_content(Role.SYSTEM, system_message_content)
     messages = [system_message]
 
     # Always provide optimization instructions as a developer message
     tool_instruction_text = (
-        """
-You will be given a Triton forward kernel. Produce an efficient backward kernel for it.
-
-Workflow
-- First, call the triton_backward tool to generate a naive TTIR backward graph. This graph is correct but slow.
-- Use the generated TTIR as a ground-truth reference (it contains all differentiated ops). Do not invent tensors; only emit supported Triton ops.
-- Rewrite the backward kernel to be high-performance while remaining mathematically equivalent to the reference.
-
-Performance principles
-- Prioritize coalesced global loads/stores and vectorized IO; fuse reductions with pointwise ops to minimize DRAM round-trips.
-- Prefer FP32 accumulations for numerical stability. If shared-memory spills, reduce tile size or vector width, or adjust pipeline stages/warps.
-- Backprop reductions: use CTA‑persistent kernels with warp‑level reductions → shared memory → at most one atomic per CTA when unavoidable.
-- Avoid atomics unless a gradient scatter is required. Aggregate locally first and minimize global atomics.
-
-Problem context (attention‑style kernels)
-- The forward kernel tiles Q and streams over K and V.
-- The naive backward uses many atomics for dK/dV. Reorganize parallelization so each CTA has exclusive ownership of its slice of K and V, eliminating (or greatly reducing) atomics. For any remaining scatters, reduce within CTA and perform at most one atomic per CTA.
-
-Acceptance criteria
-- Accept only if gradient checks pass (grad_check.ok) and latency improves by ≥20% over both the naive TTIR implementation and a PyTorch baseline on all target shapes. Otherwise, emit a concise "Revise:" section with precise changes needed.
-
-Output policy
-- Obey the schema. Do not fabricate inputs/outputs or shapes. Keep reasoning succinct.
-- Steps: (1) call triton_backward to get naive TTIR; (2) analyze dataflow; (3) emit a faster backward kernel with improved tiling/threading/reductions/memory access; (4) explain how atomics are avoided for dK/dV via CTA‑exclusive ownership.
-        """
+        (
+            "When you need a naive backward graph, call triton_backward.run with JSON "
+            '{"code": <python module>, "setup": <python snippet>, "format": "json"}.\n'
+            "Always prefer format=json, then use triton_backward.slice to page TTIR in small windows.\n"
+            "Do not send free-form text; always use the function call.\n\n"
+        )
+        + "You will be given a Triton forward kernel. Produce an efficient backward kernel for it.\n\n"
+        + "Workflow\n"
+        + "- First, call the triton_backward tool to generate a naive TTIR backward graph (format=json). This graph is correct but slow.\n"
+        + "- If you need to inspect TTIR, call triton_backward.slice with {digest, offset, limit} to fetch windows (≤64KB).\n"
+        + "- Use the generated TTIR as a ground-truth reference (it contains all differentiated ops). Do not invent tensors; only emit supported Triton ops.\n"
+        + "- Rewrite the backward kernel to be high-performance while remaining mathematically equivalent to the reference.\n\n"
+        + "Performance principles\n"
+        + "- Prioritize coalesced global loads/stores and vectorized IO; fuse reductions with pointwise ops to minimize DRAM round-trips.\n"
+        + "- Prefer FP32 accumulations for numerical stability. If shared-memory spills, reduce tile size or vector width, or adjust pipeline stages/warps.\n"
+        + "- Backprop reductions: use CTA‑persistent kernels with warp‑level reductions → shared memory → at most one atomic per CTA when unavoidable.\n"
+        + "- Avoid atomics unless a gradient scatter is required. Aggregate locally first and minimize global atomics.\n\n"
+        + "Problem context (attention‑style kernels)\n"
+        + "- The forward kernel tiles Q and streams over K and V.\n"
+        + "- The naive backward uses many atomics for dK/dV. Reorganize parallelization so each CTA has exclusive ownership of its slice of K and V, eliminating (or greatly reducing) atomics. For any remaining scatters, reduce within CTA and perform at most one atomic per CTA.\n\n"
+        + "Acceptance criteria\n"
+        + "- Accept only if gradient checks pass (grad_check.ok) and latency improves by ≥20% over both the naive TTIR implementation and a PyTorch baseline on all target shapes. Otherwise, emit a concise \"Revise:\" section with precise changes needed.\n\n"
+        + "Output policy\n"
+        + "- Obey the schema. Prefer format=json and slice; use format=raw only for tiny graphs.\n"
+        + "- In setup, capture the **LAUNCH** object into COMPILED_KERNEL (has `.asm['ttir']`), not the binder.\n"
+        + "- Do not fabricate inputs/outputs or shapes. Keep reasoning succinct.\n"
+        + "- Steps: (1) call triton_backward to get naive TTIR; (2) analyze dataflow; (3) emit a faster backward kernel with improved tiling/threading/reductions/memory access; (4) explain how atomics are avoided for dK/dV via CTA‑exclusive ownership."
     ).strip()
 
     # Inject our optimization guidance as a developer message before any optional developer content
@@ -285,6 +292,9 @@ Output policy
             elif last_message.recipient.startswith("triton_backward"):
                 assert getattr(args, "triton_backward", False), "Triton backward tool is not enabled"
                 tool_name = "Triton Backward"
+                # Normalize accidental namespace-only calls to .run
+                if last_message.recipient == "triton_backward":
+                    last_message = last_message.with_recipient("triton_backward.run")
                 async def run_tool():
                     results = []
                     async for msg in triton_backward_tool.process(last_message):

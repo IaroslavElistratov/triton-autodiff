@@ -3,55 +3,78 @@ from __future__ import annotations
 from typing import Tuple, Any, Optional
 
 import json
+import re
 import queue
 import threading
 
 
-def extract_request(text: str) -> Tuple[str, str, bool]:
+def _unfence_json(text: str) -> Optional[str]:
+    m = re.search(r"```json\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _from_fenced_sections(text: str) -> Optional[dict]:
+    def grab(tag: str) -> Optional[str]:
+        m = re.search(rf"```{tag}\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        return m.group(1).strip() if m else None
+    code, setup = grab("code"), grab("setup")
+    if code and setup:
+        obj: dict[str, Any] = {"code": code, "setup": setup}
+        return obj
+    return None
+
+
+def extract_request(text: str) -> Tuple[str, str, str]:
     """
-    Validate the JSON payload for the Triton backward tool.
-
-    Required:
-      - code:  str (Python module defining exactly one @triton.jit kernel)
-      - setup: str (Python snippet that prepares inputs AND runs the kernel once)
-
-    Optional:
-      - json:  bool (default False). If True, return a small JSON pointer {digest, path}.
-
-    Returns (code, setup, as_json).
+    Returns: (code, setup, fmt) where fmt ∈ {"raw", "json"}.
+    Accepts:
+      - JSON with fields: code, setup, optional format ("raw"|"json") or json (bool)
+      - Fenced ```json ...```
+      - Fenced blocks: ```code```, ```setup```
     """
+    obj: Any = None
+    # 1) plain JSON
     try:
         obj = json.loads(text)
-    except Exception as e:
-        raise ValueError(f"Invalid JSON: {e}")
+    except Exception:
+        pass
+    # 2) fenced JSON
+    if obj is None:
+        fenced = _unfence_json(text)
+        if fenced:
+            try:
+                obj = json.loads(fenced)
+            except Exception:
+                pass
+    # 3) fenced sections
+    if obj is None:
+        obj = _from_fenced_sections(text)
 
     if not isinstance(obj, dict):
-        raise ValueError("Invalid request: top-level JSON must be an object.")
-
-    REQUIRED = {"code", "setup"}
-    ALLOWED = REQUIRED | {"json"}
-
-    missing = sorted(REQUIRED - obj.keys())
-    extra = sorted(set(obj.keys()) - ALLOWED)
-    if missing or extra:
-        problems: list[str] = []
-        if missing:
-            problems.append(f"missing={missing}")
-        if extra:
-            problems.append(f"unexpected={extra}")
         raise ValueError(
-            "Invalid request. " + "; ".join(problems) + ". Allowed keys: " + ", ".join(sorted(ALLOWED))
+            "Invalid request. Provide JSON ({code, setup, [format|json]}) "
+            "or fenced ```code``` and ```setup``` blocks."
         )
 
-    if "code" not in obj or not isinstance(obj["code"], str) or not obj["code"].strip():
+    # Required
+    code = obj.get("code", "")
+    setup = obj.get("setup", "")
+    if not isinstance(code, str) or not code.strip():
         raise ValueError("Field `code` must be a non-empty string.")
-    if "setup" not in obj or not isinstance(obj["setup"], str) or not obj["setup"].strip():
+    if not isinstance(setup, str) or not setup.strip():
         raise ValueError("Field `setup` must be a non-empty string.")
 
-    code = obj["code"]
-    setup = obj["setup"]
-    as_json = bool(obj.get("json", False))
-    return code, setup, as_json
+    # setup must perform any necessary compilation/calls
+
+    # Output format
+    fmt = obj.get("format", None)
+    if fmt is None:
+        # Default to JSON; honor legacy json: true/false knob if present
+        fmt = "json" if bool(obj.get("json", True)) else "raw"
+    if fmt not in ("raw", "json"):
+        raise ValueError("`format` must be 'raw' or 'json'.")
+
+    return code, setup, fmt
 
 
 def run_with_timeout(fn, timeout_s: float):
@@ -95,7 +118,9 @@ def pick_compiled_kernel(ns: dict[str, Any]) -> Any:
     def _is_compiled_kernel(x: Any) -> bool:
         return hasattr(x, "asm") and isinstance(getattr(x, "asm"), dict) and "ttir" in x.asm
 
-    # 1) prefer explicit `_compiled_kernel`
+    # 1) prefer explicit `COMPILED_KERNEL` / `_compiled_kernel`
+    if "COMPILED_KERNEL" in ns and _is_compiled_kernel(ns["COMPILED_KERNEL"]):
+        return ns["COMPILED_KERNEL"]
     if "_compiled_kernel" in ns and _is_compiled_kernel(ns["_compiled_kernel"]):
         return ns["_compiled_kernel"]
 
@@ -113,8 +138,8 @@ def pick_compiled_kernel(ns: dict[str, Any]) -> Any:
         return found[0]
     if len(found) == 0:
         raise RuntimeError(
-            "Setup did not yield a compiled kernel. Fix: Modify your stub to return the compiled kernel object and assign it to `_compiled_kernel`, "
-            "e.g. `_compiled_kernel = my_kernel[grid](...)` or `_, _compiled_kernel = stub(...)`."
+            "Setup did not yield a compiled kernel. Fix: Capture the LAUNCH object from a Triton call and assign it to COMPILED_KERNEL (or _compiled_kernel),\n"
+            "e.g. `COMPILED_KERNEL = my_kernel[(1,1,1)](a,b,c,o)` or `_, COMPILED_KERNEL = stub(a,b,c)`."
         )
     raise RuntimeError(
         "Multiple compiled kernels found. Assign the one you want to `_compiled_kernel` to disambiguate."
@@ -138,10 +163,17 @@ def try_make_slice_payload(text: str) -> Optional[str]:
     except Exception:
         return None
 
-    if not isinstance(obj, dict) or "slice" not in obj:
+    if not isinstance(obj, dict):
         return None
 
-    s = obj["slice"] or {}
+    # Support both legacy {"slice": {...}} and direct parameter objects used by the
+    # triton_backward.slice function-call interface.
+    if "slice" in obj:
+        s = obj["slice"] or {}
+    else:
+        # When called via function interface the JSON itself IS the slice payload.
+        s = obj
+
     digest = str(s.get("digest", "")).strip()
     if not digest:
         raise ValueError("slice.digest is required")

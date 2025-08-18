@@ -11,14 +11,12 @@
 """
 
 
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Optional
 
 import json
 import hashlib
 import os
-import torch
-import queue
-import threading
+import re
 
 from openai_harmony import (
     Author,
@@ -27,16 +25,27 @@ from openai_harmony import (
     Role,
     TextContent,
     ToolNamespaceConfig,
+    ToolDescription,
 )
 
 from ..tool import Tool
-from .utils import extract_request, run_with_timeout, pick_compiled_kernel, try_make_slice_payload
+from .utils import run_with_timeout, pick_compiled_kernel, extract_request, try_make_slice_payload
 from triton.runtime.jit import JITFunction
 
 
+
+def _is_compiled_kernel(candidate: Any) -> bool:
+    return hasattr(candidate, "asm") and isinstance(getattr(candidate, "asm"), dict) and "ttir" in candidate.asm
+
+
 class TritonBackwardTool(Tool):
-    def __init__(self) -> None:
+    def __init__(self, name: str | None = None) -> None:
         super().__init__()
+        if name is not None and name != "triton_backward":
+            raise ValueError("Tool name is fixed to 'triton_backward'")
+        
+        # Soft cap for raw text payloads to protect LLM context window
+        self.MAX_RAW_BYTES = int(os.environ.get("TB_MAX_RAW_BYTES", "65536"))
 
     @classmethod
     def get_tool_name(cls) -> str:
@@ -49,112 +58,72 @@ class TritonBackwardTool(Tool):
     @property
     def instruction(self) -> str:
         return (
-            '''
-
-Send Python code that defines exactly one Triton JITFunction (python function decorated with @triton.jit),
-as a JSON object with fields:
-  - code  (required): Python module text that defines ONE top-level @triton.jit kernel
-                        and any helper stubs it needs.
-                        NOTE: any for-loops inside the kernel MUST have static bounds
-  - setup (required): Python snippet executed after `code`. It must:
-                        - import torch & build CUDA tensors
-                        - launch the kernel ONCE to force JIT compilation
-                        - assign the compiled kernel object to `_compiled_kernel`
-  - json  (optional): if true, return a small JSON pointer {digest, path} instead of the full TTIR string.
-
-The tool executes `code`, then runs `setup` to JIT-compile the kernel, obtains the compiled kernel,
-and returns the generated backward TTIR as a string (or a tiny pointer when `json: true`).
-
-Example JSON request:
-```
-{
-  "code": """
-import triton
-import triton.language as tl
-
-@triton.jit
-def mm_kernel(
-    a_ptr, b_ptr, c_ptr,
-    M, N, K,
-    stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    grid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    pid_m = pid // grid_n
-    pid_n = pid % grid_n
-
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    # for-loops must have static bounds
-    for _ in range(0, 2):
-        a = tl.load(a_ptrs)
-        b = tl.load(b_ptrs)
-        acc = tl.dot(a, b, acc)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-
-    c = acc.to(tl.float16)
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    tl.store(c_ptrs, c)
-
-def stub(a, b, BLOCK_SIZE_M=16, BLOCK_SIZE_N=16, BLOCK_SIZE_K=16):
-    M, K = a.shape
-    K2, N = b.shape
-    assert K == K2
-    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
-    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-    _compiled_kernel = mm_kernel[grid](
-        a, b, c,
-        M, N, K,
-        a.stride(0), a.stride(1),
-        b.stride(0), b.stride(1),
-        c.stride(0), c.stride(1),
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-    )
-    return c, _compiled_kernel
-""",
-  "setup": """
-import torch
-M = N = K = 32
-a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-c, _compiled_kernel = stub(a, b)
-""",
-  "json": true
-}
-
-Contract:
-- The tool will execute `code`, then `setup`.
-- It discovers `_compiled_kernel` (or the only compiled kernel object in scope),
-  runs the autodiff pass, and returns the backward TTIR (or a JSON pointer when `json: true`).
-
-Fetching large TTIR incrementally:
-- After receiving `{ "digest": "<digest10>", "path": "generated/<digest10>/out.ttir" }`,
-  call the tool later with:
-  { "slice": { "digest": "<digest10>", "offset": 0, "limit": 65536 } }
-```
-
-What to provide:
-- Expose exactly one top-level python function decorated with `@triton.jit` (the tool will pick it).
-- A stub that chooses an appropriate grid, launches the kernel, and returns the compiled kernel.
-
-'''
-        ).strip()
+            "Call `triton_backward.run` with JSON: "
+            '{"code": "<python module>", "setup": "<python snippet>", '
+            '"format": "json|raw"}.\n'
+            "Rules:\n"
+            "- Define exactly one @triton.jit kernel. In `setup`, run your stub and assign the **LAUNCH** object (has `.asm['ttir']`) to COMPILED_KERNEL (or _compiled_kernel).\n"
+            "- Default output is JSON {digest, path}. Use `slice` to page TTIR. Use `format:'raw'` only for tiny graphs.\n"
+            "Any for-loops inside the kernel MUST have static bounds."
+            "Minimal valid example (\\n escaped):\n"
+            '{\n'
+            '  "code": "import triton\\nimport triton.language as tl\\nimport torch\\n@triton.jit\\n'
+            'def k(a_ptr,b_ptr,o_ptr):\\n  off=tl.arange(0,4)\\n  tl.store(o_ptr+off, tl.load(a_ptr+off)*tl.load(b_ptr+off))\\n\\n'
+            'def stub(a,b):\\n  o=torch.empty_like(a)\\n  launch = k[(1,1,1)](a,b,o)\\n  return o, launch\\n",\n'
+            '  "setup": "import torch\\na=torch.rand(4, device=\\"cuda\\"); b=torch.rand(4, device=\\"cuda\\")\\n_, COMPILED_KERNEL = stub(a,b)",\n'
+            '  "format": "json"\n'
+            '}\n'
+        )
 
     @property
     def tool_config(self) -> ToolNamespaceConfig:
         return ToolNamespaceConfig(
             name=self.get_tool_name(),
-            description=self.instruction,
-            tools=[],
+            description="Generate a naive backward TTIR from a compiled Triton kernel.",
+            tools=[
+                ToolDescription.new(
+                    name="run",
+                    description=(
+                        "Compile the provided Triton kernel and return its backward TTIR. "
+                        "Provide Python source for `code` and `setup`. "
+                        "In `setup`, bind COMPILED_KERNEL (or _compiled_kernel) to the **LAUNCH** object."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "description": "Python module defining exactly one @triton.jit kernel.",
+                            },
+                            "setup": {
+                                "type": "string",
+                                "description": "Python snippet that prepares inputs and assigns COMPILED_KERNEL (or _compiled_kernel) to the LAUNCH object.",
+                            },
+                            "format": {
+                                "type": "string",
+                                "enum": ["raw", "json"],
+                                "default": "json",
+                                "description": "Return compact JSON {digest, path} (default) or the raw TTIR text.",
+                            },
+                        },
+                        "required": ["code", "setup"],
+                    },
+                )
+                ,
+                ToolDescription.new(
+                    name="slice",
+                    description="Return a byte-range from the generated TTIR identified by digest.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "digest": {"type": "string", "description": "Digest (10+ hex chars) returned by run(format=json)."},
+                            "offset": {"type": "integer", "default": 0, "minimum": 0},
+                            "limit":  {"type": "integer", "default": 65536, "minimum": 1},
+                        },
+                        "required": ["digest"],
+                    },
+                )
+            ],
         )
 
     def make_response(
@@ -172,9 +141,9 @@ What to provide:
             message = message.with_channel(channel)
         return message
 
-    def _extract_request(self, text: str) -> tuple[str, str, bool]:
-        # Delegate to shared utils for validation and extraction
-        return extract_request(text)
+    def _extract_request(self, text: str) -> tuple[str, str, Optional[str]]:
+        code, setup, fmt = extract_request(text)
+        return code, setup, fmt
 
     def _load_function_from_code(self, code: str, function_name: str | None) -> tuple[dict[str, Any], Any]:
         """
@@ -189,6 +158,7 @@ What to provide:
 
         local_ns: dict[str, Any] = {}
         try:
+            # Directly execute user-provided code in an isolated namespace.
             run_with_timeout(lambda: exec(code, local_ns, local_ns), self.CODE_EXEC_TIMEOUT_S)
         except Exception as e:
             raise RuntimeError(
@@ -216,23 +186,25 @@ What to provide:
         selected_kernel = next(iter(kernels.values()))
         return local_ns, selected_kernel
 
-    # Tunable limits (seconds)
-    CODE_EXEC_TIMEOUT_S = 15.0     # for `exec(code)` and `exec(setup)`
+    # Tunable limits (seconds) — configurable via env
+    CODE_EXEC_TIMEOUT_S = float(os.environ.get("TB_CODE_TIMEOUT_S", "15"))
 
     async def _process(self, message: Message) -> AsyncIterator[Message]:
         channel = message.channel
         text = message.content[0].text if message.content else ""
         try:
-            # Optional fast path: slice read without recompilation
+            # Optional fast-path: slice read without recompilation
             payload = try_make_slice_payload(text)
             if payload is not None:
                 yield self.make_response(TextContent(text=payload), channel=channel)
                 return
 
-            code, setup, as_json = self._extract_request(text)
+            code, setup, fmt = extract_request(text)
+
+            # Execute code and require exactly one @triton.jit kernel to be present
             local_ns, _ = self._load_function_from_code(code, None)
 
-            # Required setup snippet (prepare tensors AND launch once)
+            # Execute setup (may set COMPILED_KERNEL or _compiled_kernel)
             try:
                 run_with_timeout(lambda: exec(setup, local_ns, local_ns), self.CODE_EXEC_TIMEOUT_S)
             except Exception as e:
@@ -241,19 +213,25 @@ What to provide:
                     f"Setup error: {e}"
                 ) from e
 
+            # Resolve compiled kernel
+            compiled_kernel = pick_compiled_kernel(local_ns)
+
             # Lazy import to avoid hard dependency unless the tool is used
             from .core import generate_naive_backward  # type: ignore
 
-            # Find the compiled kernel in the namespace
-            compiled_kernel = pick_compiled_kernel(local_ns)
-
             backward_code: str = generate_naive_backward(compiled_kernel)  # type: ignore
 
-            if as_json:
+            if fmt == "json" or (fmt == "raw" and len(backward_code.encode("utf-8")) > self.MAX_RAW_BYTES):
                 fwd_ttir = compiled_kernel.asm["ttir"]
                 digest10 = hashlib.sha256(fwd_ttir.encode()).hexdigest()[:10]
                 path = f"generated/{digest10}/out.ttir"
-                payload = json.dumps({"digest": digest10, "path": path})
+                payload_dict: dict[str, Any] = {"digest": digest10, "path": path}
+                if fmt == "raw":
+                    payload_dict["note"] = (
+                        f"raw TTIR exceeded {self.MAX_RAW_BYTES} bytes; returning json pointer instead. "
+                        "Use triton_backward.slice to read windows."
+                    )
+                payload = json.dumps(payload_dict)
                 yield self.make_response(TextContent(text=payload), channel=channel)
             else:
                 yield self.make_response(TextContent(text=backward_code), channel=channel)
