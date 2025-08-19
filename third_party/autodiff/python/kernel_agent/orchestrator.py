@@ -1,147 +1,172 @@
 from __future__ import annotations
-import os, time
-from .config import OptimizeConfig
-from .llm import PatchContext, PatchProvider
-from .state import Manifest, IterationRecord, code_id_for_file, copy_as_best, neg_key
-from .toolbox import Toolbox
-from .utils import (
-    ensure_dir, now_run_id, read_excerpt,
-    parse_grad_check_output, normalize_bench_metrics,
-    strictly_better, summarize_bench, summarize_profile_file,
-)
+from dataclasses import dataclass
+import os, re
 
+# --- repo patch tool (patch-text only) ---------------------------------------
+try:
+    from tools.apply_patch import apply_patch as repo_apply_patch  # OSS repo tool
+except Exception as e:
+    raise RuntimeError(
+        "Could not import tools.apply_patch.apply_patch from the OSS repo."
+    ) from e
+
+
+# --- tiny config --------------------------------------------------------------
+@dataclass
+class Config:
+    max_iters: int = 6
+    patience: int = 2
+    min_rel_improvement: float = 0.02  # require >= +2% throughput to accept
+    snippet_max_lines: int = 120        # bound context shown to the LLM
+
+
+# --- tiny LLM patch interface -------------------------------------------------
+class PatchProvider:
+    """
+    Protocol-like minimal interface. Provide an implementation that returns a
+    single apply_patch.md patch (no prose).
+    """
+    def propose_patch(self, *, phase: str, device: str, target_file: str,
+                      kernel_snippet: str, grad_summary: str,
+                      bench_summary: str, profile_hint: str) -> str:
+        raise NotImplementedError
+
+
+# --- helpers (keep tiny) ------------------------------------------------------
+_PASS_RX = re.compile(r"\b(pass|ok|success)\b", re.I)
+
+def _parse_fd(text: str) -> tuple[bool, str]:
+    """Heuristic FD pass/fail parser."""
+    msg = (text or "").strip()
+    return bool(_PASS_RX.search(msg)), msg
+
+def _norm_bench(x) -> dict[str, float]:
+    """Normalize benchmark() result to {'throughput': float} if possible."""
+    if isinstance(x, (int, float)):
+        return {"throughput": float(x)}
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            if isinstance(v, (int, float)):
+                out[k.lower()] = float(v)
+        return out
+    # last resort: loose parse from string
+    try:
+        return {"throughput": float(str(x).strip().split()[0])}
+    except Exception:
+        return {}
+
+def _better(new: dict[str, float], best: dict[str, float] | None, min_rel: float) -> bool:
+    """Strict improvement gate (relative throughput)."""
+    if not new: return False
+    if best is None or "throughput" not in best: return "throughput" in new
+    if "throughput" not in new: return False
+    base = best["throughput"]
+    return new["throughput"] >= base * (1.0 + min_rel)
+
+def _summ_bench(m: dict[str, float] | None) -> str:
+    if not m: return "no bench yet"
+    return ", ".join(f"{k}={v:.4g}" for k, v in m.items() if isinstance(v, (int, float)))
+
+def _read_snippet(path: str, max_lines: int) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        return "".join(lines[:max_lines])
+    except Exception as e:
+        return f"(snippet unavailable: {e})"
+
+
+# --- main orchestrator --------------------------------------------------------
 class KernelOptimizer:
     """
-    Deterministic loop (compile is implicit inside your tools):
-      boot: get_user_forwrad -> naive_grad
-      repeat:
-        gradient_check -> if fail: LLM fix (diff) -> apply -> continue
-        benchmark (+optional profile)
-        if not improved enough and not converged: LLM optimize (diff) -> apply -> continue
+    Deterministic controller:
+      init: get_user_forwrad() -> naive_grad()
+      loop:
+        - gradient_check() -> if FAIL: LLM 'fix' patch -> apply_patch -> continue
+        - benchmark()
+        - accept best-so-far only if >= min_rel_improvement
+        - LLM 'optimize' patch -> apply_patch
     """
-
-    def __init__(self, cfg: OptimizeConfig, tools: Toolbox, patcher: PatchProvider) -> None:
+    def __init__(self, cfg: Config, patcher: PatchProvider):
         self.cfg = cfg
-        self.t = tools
-        self.pp = patcher
-        self._deadline = (time.time() + cfg.time_budget_s) if cfg.time_budget_s else None
+        self.patcher = patcher
 
-    def run(self) -> Manifest:
-        # 0) prepare run
-        run_id = self.cfg.run_id or now_run_id()
-        record_dir = os.path.join(self.cfg.record_root, run_id)
-        ensure_dir(record_dir)
+    def run(self, *,
+            # black-box tools you already implemented
+            get_user_forwrad,
+            naive_grad,
+            gradient_check,
+            benchmark,
+            profile,
+            get_user_dvice_info,
+            ) -> dict:
+        # ---- bootstrap (outside the loop) ----
+        device = get_user_dvice_info()
+        fwd_fp = get_user_forwrad()
+        if not os.path.isfile(fwd_fp):
+            raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
-        # 1) bootstrap (outside the loop)
-        device_info = self.t.get_user_dvice_info()
-        forward_fp = self.t.get_user_forwrad()
-        backward_fp = self.t.naive_grad(forward_fp)
+        bwd_fp = naive_grad(fwd_fp)
+        if not os.path.isfile(bwd_fp):
+            raise FileNotFoundError(f"backward file not found: {bwd_fp}")
 
-        m = Manifest(
-            run_id=run_id,
-            record_dir=record_dir,
-            device_info=device_info,
-            forward_fp=forward_fp,
-            current_backward_fp=backward_fp,
-            best_backward_fp=backward_fp,
-            current_code_id=code_id_for_file(backward_fp),
-            best_code_id=code_id_for_file(backward_fp),
-        )
-        m.save(self.cfg.record_root)
+        best_metrics: dict[str, float] | None = None
+        best_path = bwd_fp
+        non_improve = 0
 
-        non_improving = 0
-        for i in range(self.cfg.max_iters):
-            if self._timed_out(): break
-
-            # 2.1 correctness (FD)
-            fd_msg = self.t.gradient_check(m.current_backward_fp)
-            fd_ok, fd_sum = parse_grad_check_output(fd_msg)
-            if not fd_ok:
-                # negative-cache repeated FD failure on this code hash
-                key = neg_key("fd", m.current_code_id)
-                if m.neg_cache.get(key) == (fd_sum or "")[:200]:
-                    # same failure signature on same code; bail early for this candidate
-                    m.history.append(IterationRecord(
-                        iter_idx=i, candidate_bwd_fp=m.current_backward_fp,
-                        grad_check_pass=False, grad_summary=fd_sum or "fd fail (repeat)"
-                    ))
-                    m.save(self.cfg.record_root)
-                    break
-                m.neg_cache[key] = (fd_sum or "")[:200]
-
-                # ask LLM to FIX correctness
-                patch = self._ask_patch(
-                    phase="fix", bwd_fp=m.current_backward_fp, device_info=m.device_info,
-                    grad_summary=fd_sum, bench_summary=summarize_bench(m.best_metrics),
-                    profile_hint="(skip; focusing on correctness)"
+        # ---- fixed optimization loop ----
+        for it in range(self.cfg.max_iters):
+            # 1) correctness gate
+            ok, fd_sum = _parse_fd(gradient_check(bwd_fp))
+            if not ok:
+                patch = self.patcher.propose_patch(
+                    phase="fix",
+                    device=device,
+                    target_file=bwd_fp,
+                    kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                    grad_summary=fd_sum,
+                    bench_summary=_summ_bench(best_metrics),
+                    profile_hint="(n/a, fix first)",
                 )
-                m.current_backward_fp = self.t.apply_patch_text(m.current_backward_fp, patch)
-                m.current_code_id = code_id_for_file(m.current_backward_fp)
-                m.history.append(IterationRecord(
-                    iter_idx=i, candidate_bwd_fp=m.current_backward_fp,
-                    grad_check_pass=False, grad_summary=fd_sum, notes="fix applied"
-                ))
-                m.save(self.cfg.record_root)
-                # back to start of loop
+                # Minimal assumption: repo apply_patch applies patch-text to files in-tree.
+                repo_apply_patch(patch)  # in-place; path presumed unchanged
+                # retry correctness in next iteration
                 continue
 
-            # 2.2 performance (correctness gated)
-            raw_bench = self.t.benchmark(m.current_backward_fp)
-            cand_metrics = normalize_bench_metrics(raw_bench)
-            prof_fp = self.t.profile(m.current_backward_fp) if self.cfg.save_profiles else None
+            # 2) performance
+            cand = _norm_bench(benchmark(bwd_fp))
+            # (optional) profile to get a hint—but don't depend on it
+            try:
+                prof_path = profile(bwd_fp)
+                prof_hint = f"profile: {os.path.basename(prof_path)}" if prof_path else "(no profile)"
+            except Exception:
+                prof_hint = "(no profile)"
 
-            improved = strictly_better(cand_metrics, m.best_metrics, self.cfg.min_rel_improvement)
-            m.history.append(IterationRecord(
-                iter_idx=i, candidate_bwd_fp=m.current_backward_fp,
-                grad_check_pass=True, grad_summary="OK",
-                bench_metrics=cand_metrics, profile_fp=prof_fp, improved=improved
-            ))
-
+            improved = _better(cand, best_metrics, self.cfg.min_rel_improvement)
             if improved:
-                m.best_metrics = cand_metrics
-                m.best_backward_fp = m.current_backward_fp
-                m.best_code_id = m.current_code_id
-                copy_as_best(m.current_backward_fp, m.record_dir)
-                non_improving = 0
+                best_metrics = cand
+                best_path = bwd_fp
+                non_improve = 0
             else:
-                non_improving += 1
+                non_improve += 1
+                if non_improve >= self.cfg.patience:
+                    break  # plateau
 
-            m.save(self.cfg.record_root)
-
-            # early-stop checks
-            if self.cfg.target_throughput and "throughput" in m.best_metrics:
-                if m.best_metrics["throughput"] >= self.cfg.target_throughput:
-                    break
-            if non_improving >= self.cfg.patience:
-                break
-
-            # 2.3 optimization: ask LLM for a perf patch
-            patch = self._ask_patch(
-                phase="optimize", bwd_fp=m.current_backward_fp, device_info=m.device_info,
-                grad_summary="OK", bench_summary=summarize_bench(m.best_metrics),
-                profile_hint=summarize_profile_file(prof_fp),
+            # 3) ask for an optimization patch and apply
+            patch = self.patcher.propose_patch(
+                phase="optimize",
+                device=device,
+                target_file=bwd_fp,
+                kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                grad_summary="OK",
+                bench_summary=_summ_bench(best_metrics),
+                profile_hint=prof_hint,
             )
-            m.current_backward_fp = self.t.apply_patch_text(m.current_backward_fp, patch)
-            m.current_code_id = code_id_for_file(m.current_backward_fp)
+            repo_apply_patch(patch)  # in-place; path presumed unchanged
 
-        m.status = "done"
-        m.save(self.cfg.record_root)
-        return m
-
-    # ------------------------- helpers -------------------------
-
-    def _ask_patch(self, *, phase: str, bwd_fp: str, device_info: str,
-                   grad_summary: str, bench_summary: str, profile_hint: str) -> str:
-        ctx = PatchContext(
-            device_info=device_info,
-            kernel_snippet=read_excerpt(bwd_fp),
-            grad_check_summary=grad_summary,
-            benchmark_summary=bench_summary,
-            profile_hint=profile_hint,
-            target_file_path=bwd_fp,
-            phase=phase,
-        )
-        return self.pp.propose_patch(ctx)
-
-    def _timed_out(self) -> bool:
-        return self._deadline is not None and time.time() > self._deadline
+        return {
+            "best_metrics": best_metrics or {},
+            "best_backward_fp": best_path,
+            "device_info": device,
+        }
