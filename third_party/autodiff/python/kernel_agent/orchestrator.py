@@ -73,7 +73,13 @@ class KernelOptimizer:
                 # 1) correctness gate
                 bwd_kernel = compile_kernel(bwd_fp)
 
-                ok, grad_discrepancy = gradient_check(bwd_kernel)
+                ok, stats = gradient_check(
+                    forward_fn=fwd_kernel,
+                    backward_fn=lambda *inp_up: bwd_kernel(*inp_up),
+                    inputs=(A, B),
+                    mode="coord",
+                )
+
                 if not ok:
                     patch = self.patcher.propose_patch(
                         phase="fix",
