@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import os, re
 
 from gpt_oss.tools.apply_patch import apply_patch
+from .utils import compile_kernel, _read_snippet
 
 
 @dataclass
@@ -24,7 +25,7 @@ class KernelOptimizer:
         - accept best-so-far only if >= min_rel_improvement
         - LLM 'optimize' patch -> apply_patch
     """
-    def __init__(self, cfg: Config, patcher: PatchProvider):
+    def __init__(self, cfg: Config, patcher):
         self.cfg = cfg
         self.patcher = patcher
 
@@ -43,17 +44,17 @@ class KernelOptimizer:
         try:
             fwd_kernel = compile_kernel(fwd_fp)
         except Exception as e:
-            raise e("kernel malformed, provide a well-fromed kernel")
+            raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
 
         try:
             # todo-now: currently problem is that my sysytem retuns TTIR (not trtion-lang) thus output of my system cannot be used direcrly for downstream
             # bwd_fp = naive_grad(fwd_kernel)
             naive_bwd_fp = naive_grad(fwd_kernel)
             # temporary hack, in future "naive_grad" should prodice a triton-lang and output its file path
-            bwd_fp = naive_bwd_fp.split("/out.ttir")[0] + "/backward.py"
-            assert os.path.isfile(bwd_fp)
+            bwd_dir = naive_bwd_fp.split("/out.ttir")[0]
+            bwd_fp = os.path.join(bwd_dir, "backward.py")
         except Exception as e:
-            raise e("naive autograd failed")
+            raise RuntimeError("naive autograd failed") from e
 
         # best_metrics: dict[str, float] | None = None
         device = get_user_dvice_info()
@@ -79,7 +80,7 @@ class KernelOptimizer:
                         target_file=bwd_fp,
                         naive_kernel=_read_snippet(naive_bwd_fp, self.cfg.snippet_max_lines),
                         kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
-                        grad_summary=grad_discrepancy,
+                        grad_summary=stats,
                         # bench_summary=_summ_bench(best_metrics),
                         # profile_hint="(n/a, fix first)",
                     )
@@ -109,11 +110,13 @@ class KernelOptimizer:
             #         break  # plateau
 
             # 3) ask for an optimization patch and apply
+            kernel_snippet = _read_snippet(bwd_fp, self.cfg.snippet_max_lines) if os.path.isfile(bwd_fp) else ""
+            phase = "optimize" if kernel_snippet else "init"
             patch = self.patcher.propose_patch(
-                phase="optimize",
+                phase=phase,
                 target_file=bwd_fp,
                 naive_kernel=_read_snippet(naive_bwd_fp, self.cfg.snippet_max_lines),
-                kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                kernel_snippet=kernel_snippet,
                 grad_summary="OK",
                 # bench_summary=_summ_bench(best_metrics),
                 # profile_hint=prof_hint,

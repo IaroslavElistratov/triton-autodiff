@@ -24,9 +24,8 @@ def main() -> None:
     ap.add_argument("--backend", type=str, default="triton", choices=["triton", "torch", "vllm"], help="Inference backend for local sampler")
     ap.add_argument("--checkpoint", metavar="FILE", type=str, default="", help="Path to the SafeTensors checkpoint")
 
-    # todo-now: use the below args
-    ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=32768, help="Max context length (unused in minimal agent)")
-    ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="low", choices=["high", "medium", "low"], help="Reasoning effort (unused in minimal agent)")
+    ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=32768, help="Max context length (tokens)")
+    ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="high", choices=["high", "medium", "low"], help="Reasoning effort")
     args = ap.parse_args()
 
     # Map selected backend options into environment for the local sampler
@@ -37,18 +36,25 @@ def main() -> None:
 
     cfg = Config(max_iters=args.max_iters, patience=args.patience,
                  min_rel_improvement=args.min_rel_impr)
-    llm = MinimalLLMPatchProvider()
+    llm = MinimalLLMPatchProvider(
+        temperature=0.7,
+        # todo-low: rm
+        max_tokens=1536,
+        reasoning_effort=args.reasoning_effort,
+        context=args.context,
+    )
     agent = KernelOptimizer(cfg, llm)
 
     out = agent.run(
-        args.file_path,
+        fwd_fp=args.file_path,
         naive_grad=naive_grad,
         # gradient_check=gradient_check,
         # benchmark=benchmark,
         # profile=profile,
-        get_user_dvice_info=get_user_dvice_info,
+        # todo:
+        get_user_dvice_info=(lambda: "N/A"),
     )
-    print("Best metrics:", out["best_metrics"])
+    print("Best metrics:", out.get("best_metrics", {}))
     print("Best backward kernel:", out["best_backward_fp"])
     print("Device:", out["device_info"])
 

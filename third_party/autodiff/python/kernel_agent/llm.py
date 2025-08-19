@@ -128,6 +128,7 @@ class _GenerateSampler:
                 raise ValueError(f"Invalid backend: {self.backend}")
 
 
+    # todo-low: simplfiy
     def __call__(self, message_list: list[dict[str, str]]) -> SamplerResponse:
         """ uses Harmony encoding for single-response generation """
 
