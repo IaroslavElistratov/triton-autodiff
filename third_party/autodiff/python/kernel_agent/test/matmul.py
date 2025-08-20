@@ -1,3 +1,4 @@
+import torch
 import triton
 import triton.language as tl
 
@@ -54,10 +55,26 @@ def stub(a, b, BLOCK_SIZE_M=16, BLOCK_SIZE_N=16, BLOCK_SIZE_K=16):
     )
     return c
 
+
+
+
+SWEEP = [
+    {"M": size, "N": size, "K": 32}
+    for size in (256, 512, 1024, 2048)
+]
+
+def make_args(dims, device="cuda", dtype=torch.float16):
+    M, N, K = dims["M"], dims["N"], dims["K"]
+    a = torch.randn((M, K), device=device, dtype=dtype)
+    b = torch.randn((K, N), device=device, dtype=dtype)
+    return (a, b), {}
+
 def setup():
-  import torch
-  M = N = K = 32
-  a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-  b = torch.randn((K, N), device='cuda', dtype=torch.float16)
+  a, b = make_args(SWEEP[0])
   c = stub(a, b)
 
+
+# optional, for benchmarking
+def flops(dims, mode):
+    M, N, K = dims["M"], dims["N"], dims["K"]
+    return 2.0 * M * N * K
