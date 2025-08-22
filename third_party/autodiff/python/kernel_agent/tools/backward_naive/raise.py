@@ -1,12 +1,8 @@
 # raise.py
-# Minimal, robust TTIR -> Triton-language raiser.
-# - No use of op.str_nodebug() (that exists on OpState, not operation).
-# - Names for SSA values come from ir.value_best_name(v) via utils.build_value_name_hints.
-#
-# Note: Attribute access for integers/enums is limited in the current pybind
-# (operation exposes get_name/operands/results/regions but not generic int attrs).
-# Where an integer/enum attr would be required (e.g., cmp predicate, axis, orders),
-# we fall back to sensible defaults and emit a clear TODO comment instead of crashing.
+# Minimal, robust TTIR -> Triton-language raiser using the new operation bindings.
+# Uses: operation.mnemonic, operation.str_nodebug(), operation.get_attr_text(),
+#       operation.get_int_attr(), operation.get_i64_array_attr(),
+#       operation.get_reduce_combiner() to avoid brittle regex fallbacks.
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -31,15 +27,11 @@ class RaiserOptions:
 # ----------------------------- Type helpers ----------------------------------
 
 def _dtype_expr_from_type_string(t: str) -> Optional[str]:
-    # quick-and-robust from MLIR type string
     if "bf16" in t: return "tl.bfloat16"
     if "f16"  in t: return "tl.float16"
     if "f32"  in t: return "tl.float32"
     if "f64"  in t: return "tl.float64"
     if "i1"   in t: return "tl.int1"
-    m = None
-    # i8/i16/i32/i64 anywhere typical
-    import re
     m = re.search(r"(?:^|[x<,])i(8|16|32|64)(?:[>x,]|$)", t)
     if m:
         return {"8":"tl.int8","16":"tl.int16","32":"tl.int32","64":"tl.int64"}[m.group(1)]
@@ -47,8 +39,7 @@ def _dtype_expr_from_type_string(t: str) -> Optional[str]:
 
 
 def _shape_from_tensor_type_string(t: str) -> Optional[List[int]]:
-    # "tensor<128x64xf16>" -> [128,64]
-    import re
+    # "tensor<128x64xf16>" -> [128, 64]
     m = re.search(r"tensor<([^>]+)>", t)
     if not m:
         return None
@@ -65,10 +56,8 @@ def _typed_zero(dst_ty: mlir.type) -> str:
     shp = _shape_from_tensor_type_string(t)
     dty = _dtype_expr_from_type_string(t) or "None"
     if shp:
-        # (dim,) tuple rendering
         tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
         return f"tl.zeros({tup}, dtype={dty})"
-    # scalar
     if dty.startswith("tl.float") or dty == "tl.bfloat16":
         return "0.0"
     if dty == "tl.int1":
@@ -76,7 +65,21 @@ def _typed_zero(dst_ty: mlir.type) -> str:
     return "0"
 
 
-# ----------------------------- Attr helpers ------------------------------------
+# ----------------------------- Attr helpers ----------------------------------
+
+def _text_attr(op, name: str) -> Optional[str]:
+    """Return textual attr value with quotes stripped, or None."""
+    try:
+        txt = op.get_attr_text(name)
+        if txt is None:
+            return None
+        s = str(txt)
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+            return s[1:-1]
+        return s
+    except Exception:
+        return None
+
 
 class Attr:
     @staticmethod
@@ -92,12 +95,12 @@ class Attr:
 
     @staticmethod
     def bool_attr(op, name, default=False):
-        try:
-            b = op.get_bool_attr(name)
-            if b is not None:
-                return bool(b)
-        except Exception:
-            pass
+        # Prefer textual attr; falls back to generic print
+        s = _text_attr(op, name)
+        if s is not None:
+            s = s.strip().lower()
+            if s in ("true", "false"):
+                return s == "true"
         m = re.search(rf"\b{name}\s*=\s*(true|false)\b", op.str_nodebug())
         return {"true": True, "false": False}.get(m.group(1), default) if m else default
 
@@ -123,16 +126,9 @@ class Attr:
               if re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()) else None)
     ))
 
-    # Load/store enums → Triton strings
     @staticmethod
     def cache_modifier(op):
-        # accepts textual forms seen in TTIR; normalize to tl.load/store spellings
-        txt = None
-        try:
-            txt = op.get_attr_text("cache_modifier")
-        except Exception:
-            pass
-        s = (txt or op.str_nodebug()).lower()
+        s = (_text_attr(op, "cache_modifier") or op.str_nodebug()).lower()
         if ".ca" in s or " cache_modifier = ca" in s or "cache_modifier=ca" in s: return ".ca"
         if ".cg" in s or " cache_modifier = cg" in s or "cache_modifier=cg" in s: return ".cg"
         if ".cs" in s or " cache_modifier = cs" in s or "cache_modifier=cs" in s: return ".cs"
@@ -143,32 +139,21 @@ class Attr:
 
     @staticmethod
     def eviction_policy(op):
-        s = None
-        try:
-            s = op.get_attr_text("eviction_policy")
-        except Exception:
-            pass
-        s = (s or op.str_nodebug()).lower()
+        s = (_text_attr(op, "eviction_policy") or op.str_nodebug()).lower()
         for k in ("evict_last", "evict_first"):
             if k in s: return k
         return ""
 
     @staticmethod
     def padding_option(op):
-        txt = None
-        try:
-            txt = op.get_attr_text("padding_option")
-        except Exception:
-            pass
-        s = (txt or op.str_nodebug()).lower()
+        s = (_text_attr(op, "padding_option") or op.str_nodebug()).lower()
         if "nan" in s:  return "nan"
         if "zero" in s: return "zero"
         return ""
 
-    # Detect per-result reduce combiners by inspecting the region
     @staticmethod
     def reduce_kinds(op, module):
-        # Prefer the C++ helper if available
+        # Prefer the direct helper.
         try:
             comb = op.get_reduce_combiner()
         except Exception:
@@ -176,22 +161,20 @@ class Attr:
         if comb:
             return [str(comb)] * max(1, op.get_num_results())
 
+        # Fallback: walk the reduce region to infer the combiner.
         reg = op.get_region(0); target_rid = reg.id()
         val_owner = {}
         reduce_ret = None
 
         def visit(inner):
-            # keep only ops in this region
             b = inner.get_block(); r = b.get_parent() if b is not None else None
             if b is None:
                 return
             while r:
                 if r.id() == target_rid:
-                    # record defs
                     for i in range(inner.get_num_results()):
                         v = inner.get_result(i)
                         val_owner[int(v.id())] = inner.get_name()
-                    # find tt.reduce.return
                     if inner.get_name().endswith("reduce.return"):
                         nonlocal reduce_ret; reduce_ret = inner
                     break
@@ -211,6 +194,7 @@ class Attr:
                 kinds.append(MAP.get(val_owner.get(vid, ""), "custom"))
         return kinds
 
+
 # ----------------------------- Raiser ----------------------------------------
 
 class Raiser:
@@ -220,21 +204,9 @@ class Raiser:
         self.opts = opts or RaiserOptions()
         self.lines: List[str] = []
         self._n = 0
-        # Names for values (results + args), derived from value_best_name
         self._hints: Dict[int, str] = build_value_name_hints(self.m)
-        # Final env: value-id -> bound variable
         self.env: Dict[int, str] = {}
         self.registry = self._build_registry()
-
-        # # module-level constants (best-effort)
-        # self._nctx_value = None
-        # try:
-        #     v = self.m.get_int_attr("N_CTX")
-        #     if v is not None:
-        #         self._nctx_value = int(v)
-        # except Exception:
-        #     self._nctx_value = None
-        # self._nctx_name = "N_CTX" if self._nctx_value is not None else None
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -250,7 +222,6 @@ class Raiser:
         if vid in self.env:
             return self.env[vid]
         if name is None:
-            # prefer hint; if absent, mint
             name = self._hints.get(vid, self._fresh("v"))
         self.env[vid] = name
         return name
@@ -263,12 +234,6 @@ class Raiser:
 
     # ---- emission helpers
     def _arith(self, a: str, b: str, sym: str, fn: str) -> str:
-        # # Peephole: fix N_CTX path like (pid * 0) -> (pid * N_CTX)
-        # if sym == "*" and self._nctx_name is not None:
-        #     if ("tl.program_id(axis=" in a and b.strip() in ("0", "0.0")):
-        #         return f"({a} * {self._nctx_name})"
-        #     if ("tl.program_id(axis=" in b and a.strip() in ("0", "0.0")):
-        #         return f"({b} * {self._nctx_name})"
         return f"({a} {sym} {b})" if self.opts.infix_arith else f"tl.{fn}({a}, {b})"
 
     def _cast(self, x: str, dst_ty: mlir.type) -> str:
@@ -283,27 +248,21 @@ class Raiser:
     def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
         R: Dict[str, Callable[[mlir.operation], Optional[str]]] = {}
 
-        # --- arith constant: read real value attribute when available
+        # --- arith.constant
         def emit_constant(op: mlir.operation) -> str:
             ty = op.get_result(0).get_type() if op.get_num_results() else None
-            txt = None
-            try:
-                txt = op.get_attr_text("value")
-            except Exception:
-                txt = None
-            if txt:
-                s = str(txt)
-                # number literal
-                m = re.fullmatch(r"[-+]?(?:\d+\.?\d*|\d*\.?\d+)(?:[eE][-+]?\d+)?", s)
+            s = _text_attr(op, "value")
+            if s:
+                # Accept a bare literal, optionally followed by ": type"
+                m = re.match(r"^\s*([-+]?(?:\d+\.?\d*|\d*\.?\d+)(?:[eE][-+]?\d+)?)\s*(?::.*)?$", s)
                 if m:
-                    return m.group(0)
-                # dense splat: dense<42> : tensor<...>
+                    return m.group(1)
+                # dense<42> : tensor<...>
                 ms = re.search(r"dense<\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*>", s)
                 shp = _shape_from_tensor_type_string(str(ty))
                 dty = _dtype_expr_from_type_string(str(ty)) or "tl.float32"
                 if ms and shp:
                     return f"tl.full({tuple(shp)}, {ms.group(1)}, dtype={dty})"
-            # Fallback: typed zero
             return _typed_zero(ty) if ty is not None else "0"
         R["arith.constant"] = emit_constant
 
@@ -315,31 +274,35 @@ class Raiser:
             ("arith.addf", "+", "add"), ("arith.addi", "+", "add"),
             ("arith.subf", "-", "sub"), ("arith.subi", "-", "sub"),
             ("arith.mulf", "*", "mul"), ("arith.muli", "*", "mul"),
-            ("arith.divf", "/", "fdiv"),  # integer div variants omitted for now
+            ("arith.divf", "/", "fdiv"),
         ):
             R[k] = (lambda op, s=sym, f=fn: bin2(op, s, f))
 
+        # --- integer division & remainder
+        R["arith.divsi"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv")
+        R["arith.divui"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv")
+        R["arith.remsi"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "%", "mod")
+        R["arith.remui"] = R["arith.remsi"]
+
         # --- casts
-        R["arith.extf"]   = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.truncf"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.fptosi"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.fptoui"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.sitofp"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.uitofp"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.extf"]    = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.truncf"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.fptosi"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.fptoui"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.sitofp"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.uitofp"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
         R["arith.bitcast"] = lambda op: self._bitcast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        # integer width casts
+        for _k in ("arith.extsi", "arith.extui", "arith.trunci"):
+            R[_k] = (lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type()))
 
         # --- select (ternary)
         R["arith.select"] = lambda op: f"tl.where({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))}, {self._get(op.get_operand(2))})"
 
-        # --- compares with predicate decoding via op.get_attr_text("predicate")
-        def _emit_cmp_with_pred(op: mlir.operation, is_int: bool) -> str:
+        # --- compares with predicate decoding via get_attr_text("predicate")
+        def _emit_cmp_with_pred(op: mlir.operation) -> str:
             a = self._get(op.get_operand(0)); b = self._get(op.get_operand(1))
-            pred_txt = None
-            try:
-                pred_txt = op.get_attr_text("predicate")
-            except Exception:
-                pred_txt = None
-            s = (pred_txt or op.str_nodebug()).lower()
+            s = (_text_attr(op, "predicate") or op.str_nodebug()).lower()
             table = {
                 "eq":"==","oeq":"==","ueq":"==",
                 "ne":"!=","one":"!=","une":"!=",
@@ -348,14 +311,13 @@ class Raiser:
                 "sgt":">","ugt":">","ogt":">",
                 "sge":">=","uge":">=","oge":">=",
             }
-            # pick the first key that appears in the predicate text
             order = ("oeq","ueq","one","une","olt","ole","ogt","oge",
                      "eq","ne","slt","sle","sgt","sge","ult","ule","ugt","uge")
             key = next((k for k in order if k in s), None)
             op_sym = table.get(key, "==")
             return f"({a} {op_sym} {b})"
-        R["arith.cmpf"] = lambda op: _emit_cmp_with_pred(op, is_int=False)
-        R["arith.cmpi"] = lambda op: _emit_cmp_with_pred(op, is_int=True)
+        R["arith.cmpf"] = _emit_cmp_with_pred
+        R["arith.cmpi"] = _emit_cmp_with_pred
 
         # --- math unary
         R["math.cos"]   = lambda op: f"tl.cos({self._get(op.get_operand(0))})"
@@ -367,228 +329,15 @@ class Raiser:
         R["math.sqrt"]  = lambda op: f"tl.sqrt({self._get(op.get_operand(0))})"
         R["math.rsqrt"] = lambda op: f"tl.rsqrt({self._get(op.get_operand(0))})"
         R["math.absf"]  = lambda op: f"tl.abs({self._get(op.get_operand(0))})"
+        # elementwise min/max with *num semantics* (from Answer 2)
+        R["arith.maxnumf"] = lambda op: f"tl.maximum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
+        R["arith.minnumf"] = lambda op: f"tl.minimum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
 
-        # --- Triton builtins (use axis attr)
-        R["tt.get_program_id"]   = lambda op: f"tl.program_id(axis={max(0, min(2, Attr.int_attr(op, 'axis', 0)))})"
-        R["tt.get_num_programs"] = lambda op: f"tl.num_programs(axis={max(0, min(2, Attr.int_attr(op, 'axis', 0)))})"
-
-        # --- memory
-        def emit_load(op: mlir.operation) -> str:
-            # tt.load(ptr [, mask [, other]])
-            argc = op.get_num_operands()
-            ptr = self._get(op.get_operand(0)) if argc >= 1 else "ptr"
-            args = [ptr]
-            if argc >= 2:
-                args.append(f"mask={self._get(op.get_operand(1))}")
-            if argc >= 3:
-                args.append(f"other={self._get(op.get_operand(2))}")
-            return f"tl.load({', '.join(args)})"
-        R["tt.load"] = emit_load
-
-        def emit_store(op: mlir.operation) -> Optional[str]:
-            # tt.store(ptr, value [, mask])
-            argc = op.get_num_operands()
-            if argc < 2:
-                return "pass  # malformed store"
-            ptr = self._get(op.get_operand(0))
-            val = self._get(op.get_operand(1))
-            if argc >= 3:
-                m = self._get(op.get_operand(2))
-                return f"tl.store({ptr}, {val}, mask={m})"
-            return f"tl.store({ptr}, {val})"
-        R["tt.store"] = emit_store
-
-        # --- atomic read-modify-write
-        def emit_atomic_rmw(op: mlir.operation) -> str:
-            # tt.atomic_rmw <op>, <sem>, <scope>, %ptr, %val
-            txt = op.str_nodebug()
-            m = re.search(r"atomic_rmw\s+([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)", txt)
-            opc, sem, scope = (m.group(1), m.group(2), m.group(3)) if m else ("add","relaxed","gpu")
-            MAP = {
-                "fadd":"atomic_add", "add":"atomic_add",
-                "fmax":"atomic_max", "max":"atomic_max",
-                "fmin":"atomic_min", "min":"atomic_min",
-                "umin":"atomic_min", "umax":"atomic_max",
-                "and":"atomic_and", "or":"atomic_or", "xor":"atomic_xor",
-                "xchg":"atomic_xchg", "exchange":"atomic_xchg",
-            }
-            fn = MAP.get(opc, "atomic_add")
-            # In TTIR signature order is ptr, val
-            ptr = self._get(op.get_operand(0))
-            val = self._get(op.get_operand(1))
-            return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
-        R["tt.atomic_rmw"] = emit_atomic_rmw
-
-
-        # def emit_atomic_rmw(op: mlir.operation) -> str:
-        #     # tt.atomic_rmw <op>, <sem>, <scope>, %ptr, %val
-        #     txt = op.str_nodebug()
-        #     m = re.search(r"atomic_rmw\s+([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)", txt)
-        #     opc, sem, scope = (m.group(1), m.group(2), m.group(3)) if m else ("add","relaxed","gpu")
-        #     MAP = {
-        #         "fadd":"atomic_add", "add":"atomic_add",
-        #         "fmax":"atomic_max", "max":"atomic_max",
-        #         "fmin":"atomic_min", "min":"atomic_min",
-        #         "umin":"atomic_min", "umax":"atomic_max",
-        #         "and":"atomic_and", "or":"atomic_or", "xor":"atomic_xor",
-        #         "xchg":"atomic_xchg", "exchange":"atomic_xchg",
-        #     }
-        #     fn = MAP.get(opc, "atomic_add")
-        #     # In TTIR signature order is ptr, val
-        #     ptr = self._get(op.get_operand(0))
-        #     val = self._get(op.get_operand(1))
-        #     return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
-        # R["tt.atomic_rmw"] = emit_atomic_rmw
-
-
-        # --- simple shape ops (derive shape from result type string)
-        def emit_reshape(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
-            if shp:
-                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-                return f"tl.reshape({x}, {tup})"
-            return f"tl.reshape({x}, None)  # TODO: dynamic shape"
-        R["tt.reshape"] = emit_reshape
-
-        def emit_expand_dims(op: mlir.operation) -> str:
-            # axis attr not readable -> default axis=0
-            x = self._get(op.get_operand(0))
-            return f"tl.expand_dims({x}, axis=0)  # TODO: axis"
-        R["tt.expand_dims"] = emit_expand_dims
-
-        def emit_broadcast(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
-            if shp:
-                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-                return f"tl.broadcast({x}, {tup})"
-            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
-        R["tt.broadcast"] = emit_broadcast
-
-        # You can keep appending handlers here…
-
-        # --- integer division & remainder (signed/unsigned)
-        R["arith.divsi"] = lambda op: self._arith(
-            self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv"
-        )
-        R["arith.divui"] = lambda op: self._arith(
-            self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv"
-        )
-        R["arith.remsi"] = lambda op: self._arith(
-            self._get(op.get_operand(0)), self._get(op.get_operand(1)), "%", "mod"
-        )
-        R["arith.remui"] = R["arith.remsi"]
-
-        # --- sign/zero extend and truncate (use tl.cast to the result type)
-        for _k in ("arith.extsi", "arith.extui", "arith.trunci"):
-            R[_k] = (lambda op: self._cast(self._get(op.get_operand(0)),
-                                           op.get_result(0).get_type()))
-
-        # --- elementwise min/max with "num" semantics
-        R["arith.maxnumf"] = lambda op: (
-            f"tl.maximum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
-        )
-        R["arith.minnumf"] = lambda op: (
-            f"tl.minimum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
-        )
-
-        # --- common math (already present for some; harmless to overwrite)
-        R["math.exp2"] = lambda op: f"tl.exp2({self._get(op.get_operand(0))})"
-        R["math.log2"] = lambda op: f"tl.log2({self._get(op.get_operand(0))})"
-
-        # --- pointer arith / address calc
-        def emit_addptr(op: mlir.operation) -> str:
-            # tt.addptr(ptr, off[, off2, ...]) -> ptr + off (+ off2 ...)
-            terms = [self._get(op.get_operand(i)) for i in range(op.get_num_operands())]
-            base, offs = terms[0], terms[1:]
-            return f"({base} " + " + ".join([""] + offs) + ")"
-        R["tt.addptr"] = emit_addptr
-
-        # --- splat: scalar -> block tensor
-        def emit_splat(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
-            if shp:
-                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-                return f"tl.broadcast({x}, {tup})"
-            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
-        R["tt.splat"] = emit_splat
-
-        # --- make_range: 0..N-1
-        def emit_make_range(op: mlir.operation) -> str:
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
-            n = shp[0] if len(shp) >= 1 else 0
-            return f"tl.arange(0, {n})" + ("  # TODO: dynamic shape" if n == 0 else "")
-        R["tt.make_range"] = emit_make_range
-
-        # --- linear algebra
-        def emit_dot(op: mlir.operation) -> str:
-            a = self._get(op.get_operand(0))
-            b = self._get(op.get_operand(1))
-            if op.get_num_operands() >= 3:
-                c = self._get(op.get_operand(2))
-                return f"(tl.dot({a}, {b}) + {c})"
-            return f"tl.dot({a}, {b})"
-        R["tt.dot"] = emit_dot
-
-        # --- trans / permute using order attr when available
-        def emit_trans(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            ord = Attr.order(op)
-            if ord is not None:
-                # # identity -> no-op; 2D swap -> tl.trans; otherwise permute
-                # try:
-                #     dims = len(ord)
-                #     if ord == list(range(dims)):
-                #         return x
-                #     if dims == 2 and ord in ([1,0], (1,0)):
-                #         return f"tl.trans({x})"
-                #     return f"tl.permute({x}, tuple({ord}))"
-                # except Exception:
-                return f"tl.permute({x}, tuple({ord}))"
-            return f"tl.trans({x})  # TODO: order"
-        R["tt.trans"] = emit_trans
-
-        # --- reductions (use get_reduce_combiner when available)
-        def emit_reduce(op: mlir.operation) -> str:
-            axis = Attr.axis(op, 0)
-            kind = None
-            try:
-                kind = op.get_reduce_combiner()
-            except Exception:
-                kind = None
-            if not kind:
-                kinds = Attr.reduce_kinds(op, self.m)
-                kind = kinds[0] if kinds else "sum"
-            x = self._get(op.get_operand(0))
-            return {
-                "sum": f"tl.sum({x}, axis={axis})",
-                "max": f"tl.max({x}, axis={axis})",
-                "min": f"tl.min({x}, axis={axis})",
-                "and": f"tl.and_reduce({x}, axis={axis})",
-                "or":  f"tl.or_reduce({x}, axis={axis})",
-                "xor": f"tl.xor_reduce({x}, axis={axis})",
-            }.get(str(kind), f"{x}  # TODO: custom reduce")
-        R["tt.reduce"] = emit_reduce
-        R["tt.reduce.return"] = lambda op: None
-
-        # --- function return
-        def emit_return(op: mlir.operation) -> Optional[str]:
-            if op.get_num_operands() == 0:
-                return "return"
-            vals = ", ".join(self._get(op.get_operand(i)) for i in range(op.get_num_operands()))
-            return f"return {vals}"
-        R["tt.return"] = emit_return
-
-        # --- override: program id / num programs (axis)
+        # --- Triton builtins (axis attr)
         R["tt.get_program_id"]   = lambda op: f"tl.program_id(axis={max(0, min(2, Attr.axis(op, 0)))})"
         R["tt.get_num_programs"] = lambda op: f"tl.num_programs(axis={max(0, min(2, Attr.axis(op, 0)))})"
 
-        # --- override: expand_dims(axis)
-        R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
-
-        # --- override: load/store with cache/evict/padding/boundary_check
+        # --- memory: load/store with cache/evict/padding/boundary_check
         def emit_load(op: mlir.operation) -> str:
             ptr = self._get(op.get_operand(0))
             args: List[str] = [f"{ptr}"]
@@ -626,22 +375,145 @@ class Raiser:
             return f"tl.store({', '.join(args)})"
         R["tt.store"] = emit_store
 
-        # --- override: make_range(start, end) with fallback to shape-based
-        def emit_make_range2(op: mlir.operation) -> str:
+        # --- atomic read-modify-write (merge of A1 + A3)
+        def _enum_from_attrs(op, names: List[str], fallback: Optional[str]) -> Optional[str]:
+            for nm in names:
+                s = _text_attr(op, nm)
+                if s:
+                    # e.g., "acq_rel" or "gpu"
+                    toks = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", s)
+                    if toks:
+                        return toks[-1].lower()
+            return fallback
+
+        def emit_atomic_rmw(op: mlir.operation) -> str:
+            opc = _enum_from_attrs(op, ["op", "operation", "atomic_op"], None)
+            sem = _enum_from_attrs(op, ["sem", "semantics", "memory_semantics", "ordering"], "relaxed")
+            scope = _enum_from_attrs(op, ["scope", "mem_scope", "memory_scope"], "gpu")
+            if opc is None:
+                # Fallback: parse generic print
+                txt = op.str_nodebug()
+                m = re.search(r"atomic_rmw\s+([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)", txt)
+                opc, sem, scope = (m.group(1), m.group(2), m.group(3)) if m else ("add","relaxed","gpu")
+
+            MAP = {
+                "fadd":"atomic_add", "add":"atomic_add",
+                "fmax":"atomic_max", "max":"atomic_max",
+                "fmin":"atomic_min", "min":"atomic_min",
+                "umin":"atomic_min", "umax":"atomic_max",
+                "and":"atomic_and", "or":"atomic_or", "xor":"atomic_xor",
+                "xchg":"atomic_xchg", "exchange":"atomic_xchg",
+            }
+            fn = MAP.get(opc, "atomic_add")
+            ptr = self._get(op.get_operand(0))
+            val = self._get(op.get_operand(1))
+            return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
+        R["tt.atomic_rmw"] = emit_atomic_rmw
+
+        # --- simple shape ops
+        def emit_reshape(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            if shp:
+                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+                return f"tl.reshape({x}, {tup})"
+            return f"tl.reshape({x}, None)  # TODO: dynamic shape"
+        R["tt.reshape"] = emit_reshape
+
+        R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
+
+        def emit_broadcast(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            if shp:
+                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+                return f"tl.broadcast({x}, {tup})"
+            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
+        R["tt.broadcast"] = emit_broadcast
+
+        # --- pointer arith
+        def emit_addptr(op: mlir.operation) -> str:
+            terms = [self._get(op.get_operand(i)) for i in range(op.get_num_operands())]
+            base, offs = terms[0], terms[1:]
+            if offs:
+                return "(" + " + ".join([base] + offs) + ")"
+            return base
+        R["tt.addptr"] = emit_addptr
+
+        # --- splat: scalar -> block tensor
+        def emit_splat(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            if shp:
+                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+                return f"tl.broadcast({x}, {tup})"
+            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
+        R["tt.splat"] = emit_splat
+
+        # --- make_range: prefer explicit start/end
+        def emit_make_range(op: mlir.operation) -> str:
             se = Attr.start_end(op)
             if se:
                 return f"tl.arange({se[0]}, {se[1]})"
             shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
             n = shp[0] if len(shp) >= 1 else 0
             return f"tl.arange(0, {n})" + ("  # TODO: dynamic shape" if n == 0 else "")
-        R["tt.make_range"] = emit_make_range2
+        R["tt.make_range"] = emit_make_range
+
+        # --- linear algebra
+        def emit_dot(op: mlir.operation) -> str:
+            a = self._get(op.get_operand(0))
+            b = self._get(op.get_operand(1))
+            if op.get_num_operands() >= 3:
+                c = self._get(op.get_operand(2))
+                return f"(tl.dot({a}, {b}) + {c})"
+            return f"tl.dot({a}, {b})"
+        R["tt.dot"] = emit_dot
+
+        # --- trans / permute
+        def emit_trans(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            ord = Attr.order(op)
+            if ord is not None:
+                return f"tl.permute({x}, tuple({ord}))"
+            return f"tl.trans({x})  # TODO: order"
+        R["tt.trans"] = emit_trans
+
+        # --- reductions
+        def emit_reduce(op: mlir.operation) -> str:
+            axis = Attr.axis(op, 0)
+            try:
+                kind = op.get_reduce_combiner()
+            except Exception:
+                kind = None
+            if not kind:
+                kinds = Attr.reduce_kinds(op, self.m)
+                kind = kinds[0] if kinds else "sum"
+            x = self._get(op.get_operand(0))
+            return {
+                "sum": f"tl.sum({x}, axis={axis})",
+                "max": f"tl.max({x}, axis={axis})",
+                "min": f"tl.min({x}, axis={axis})",
+                "and": f"tl.and_reduce({x}, axis={axis})",
+                "or":  f"tl.or_reduce({x}, axis={axis})",
+                "xor": f"tl.xor_reduce({x}, axis={axis})",
+            }.get(str(kind), f"{x}  # TODO: custom reduce")
+        R["tt.reduce"] = emit_reduce
+        R["tt.reduce.return"] = lambda op: None
+
+        # --- return
+        def emit_return(op: mlir.operation) -> Optional[str]:
+            if op.get_num_operands() == 0:
+                return "return"
+            vals = ", ".join(self._get(op.get_operand(i)) for i in range(op.get_num_operands()))
+            return f"return {vals}"
+        R["tt.return"] = emit_return
 
         return R
 
     # ---- emit a single op
     def _emit_op(self, op: mlir.operation):
-        # Prefer mnemonic if available (new binding), fallback to get_name()
-        name = getattr(op, "mnemonic", op.get_name())
+        name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
         if name in ("module", "builtin.module", "tt.func", "func.func"):
             return
         if name.startswith(("scf.", "cf.")):
@@ -652,7 +524,12 @@ class Raiser:
         res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
         emit = self.registry.get(name)
         if emit is None:
-            self.lines.append(f"    # TODO: raise {name}")
+            # Include attribute names to ease future handler additions
+            try:
+                attrs = list(op.get_attr_names())
+                self.lines.append(f"    # TODO: raise {name} (attrs: {attrs})")
+            except Exception:
+                self.lines.append(f"    # TODO: raise {name}")
             return
 
         rhs = emit(op)
@@ -669,7 +546,6 @@ class Raiser:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
         self.lines.append("")
-        # Bind entry args if present (names were already hinted in utils)
         func = self.m.get_function(self.func_name) if self.m.has_function(self.func_name) else None
         arg_names: List[str] = []
         if func:
@@ -693,7 +569,6 @@ class Raiser:
                 target_region_id = None
         body_started = False
         for op in ops:
-            # filter by entry region if known
             if target_region_id is not None:
                 try:
                     blk = op.get_block()
@@ -702,7 +577,7 @@ class Raiser:
                         continue
                 except Exception:
                     pass
-            oname = getattr(op, "mnemonic", op.get_name())
+            oname = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
             if not body_started and any(oname.startswith(p) for p in ("arith.","math.","tt.","scf.","cf.","triton.")):
                 body_started = True
             if oname.startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
@@ -730,8 +605,8 @@ def raise_from_file(ttir_path: str, *, func_name: Optional[str] = None, options:
 # ----------------------------- Demo / CLI ------------------------------------
 
 if __name__ == "__main__":
-    # Adjust the path if you want to test on a different TTIR file.
+    # Adjust the path to your TTIR file if needed.
     print(raise_from_file(
-        "/root/triton-autodiff/third_party/autodiff/test/flash_attention_v2/generated/annotated/out.ttir",
+        "/root/triton-autodiff/generated/1b763f2bf2/out.ttir",
         options=RaiserOptions(infix_arith=True)
     ))
