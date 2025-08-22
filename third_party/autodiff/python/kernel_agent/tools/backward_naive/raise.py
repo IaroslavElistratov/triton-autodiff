@@ -237,6 +237,79 @@ class Raiser:
 
         # You can keep appending handlers here…
 
+        # --- integer division & remainder (signed/unsigned)
+        R["arith.divsi"] = lambda op: self._arith(
+            self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv"
+        )
+        R["arith.divui"] = lambda op: self._arith(
+            self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv"
+        )
+        R["arith.remsi"] = lambda op: self._arith(
+            self._get(op.get_operand(0)), self._get(op.get_operand(1)), "%", "mod"
+        )
+        R["arith.remui"] = R["arith.remsi"]
+
+        # --- sign/zero extend and truncate (use tl.cast to the result type)
+        for _k in ("arith.extsi", "arith.extui", "arith.trunci"):
+            R[_k] = (lambda op: self._cast(self._get(op.get_operand(0)),
+                                           op.get_result(0).get_type()))
+
+        # --- elementwise min/max with "num" semantics
+        R["arith.maxnumf"] = lambda op: (
+            f"tl.maximum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
+        )
+        R["arith.minnumf"] = lambda op: (
+            f"tl.minimum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
+        )
+
+        # --- common math (already present for some; harmless to overwrite)
+        R["math.exp2"] = lambda op: f"tl.exp2({self._get(op.get_operand(0))})"
+        R["math.log2"] = lambda op: f"tl.log2({self._get(op.get_operand(0))})"
+
+        # --- pointer arith / address calc
+        def emit_addptr(op: mlir.operation) -> str:
+            # tt.addptr(ptr, off[, off2, ...]) -> ptr + off (+ off2 ...)
+            terms = [self._get(op.get_operand(i)) for i in range(op.get_num_operands())]
+            base, offs = terms[0], terms[1:]
+            return f"({base} " + " + ".join([""] + offs) + ")"
+        R["tt.addptr"] = emit_addptr
+
+        # --- splat: scalar -> block tensor
+        def emit_splat(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            if shp:
+                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+                return f"tl.broadcast({x}, {tup})"
+            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
+        R["tt.splat"] = emit_splat
+
+        # --- make_range: 0..N-1
+        def emit_make_range(op: mlir.operation) -> str:
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
+            n = shp[0] if len(shp) >= 1 else 0
+            return f"tl.arange(0, {n})" + ("  # TODO: dynamic shape" if n == 0 else "")
+        R["tt.make_range"] = emit_make_range
+
+        # --- linear algebra
+        def emit_dot(op: mlir.operation) -> str:
+            a = self._get(op.get_operand(0))
+            b = self._get(op.get_operand(1))
+            if op.get_num_operands() >= 3:
+                c = self._get(op.get_operand(2))
+                return f"(tl.dot({a}, {b}) + {c})"
+            return f"tl.dot({a}, {b})"
+        R["tt.dot"] = emit_dot
+
+        R["tt.trans"] = lambda op: f"tl.trans({self._get(op.get_operand(0))})"
+
+        # --- reductions (best-effort; can’t inspect combiner/axis robustly here)
+        def emit_reduce(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            return f"tl.sum({x}, axis=0)  # TODO: combiner/axis"
+        R["tt.reduce"] = emit_reduce
+        R["tt.reduce.return"] = lambda op: None
+
         return R
 
     # ---- emit a single op
@@ -316,6 +389,6 @@ def raise_from_file(ttir_path: str, *, func_name: Optional[str] = None, options:
 if __name__ == "__main__":
     # Adjust the path if you want to test on a different TTIR file.
     print(raise_from_file(
-        "/root/triton-autodiff/third_party/autodiff/test/flash_attention_v2/generated/annotated/inp.ttir",
+        "/root/triton-autodiff/third_party/autodiff/test/flash_attention_v2/generated/annotated/out.ttir",
         options=RaiserOptions(infix_arith=True)
     ))
