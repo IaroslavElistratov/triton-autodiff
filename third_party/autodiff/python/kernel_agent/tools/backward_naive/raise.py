@@ -81,16 +81,34 @@ def _typed_zero(dst_ty: mlir.type) -> str:
 class Attr:
     @staticmethod
     def int_attr(op, name, default=None):
+        try:
+            v = op.get_int_attr(name)
+            if v is not None:
+                return int(v)
+        except Exception:
+            pass
         m = re.search(rf"\b{name}\s*=\s*(-?\d+)\b", op.str_nodebug())
         return int(m.group(1)) if m else default
 
     @staticmethod
     def bool_attr(op, name, default=False):
+        try:
+            b = op.get_bool_attr(name)
+            if b is not None:
+                return bool(b)
+        except Exception:
+            pass
         m = re.search(rf"\b{name}\s*=\s*(true|false)\b", op.str_nodebug())
         return {"true": True, "false": False}.get(m.group(1), default) if m else default
 
     @staticmethod
     def list_int_attr(op, name):
+        try:
+            arr = op.get_i64_array_attr(name)
+            if arr is not None:
+                return [int(x) for x in arr]
+        except Exception:
+            pass
         m = re.search(rf"\b{name}\s*=\s*\[([0-9,\s-]+)\]", op.str_nodebug())
         return [int(x) for x in m.group(1).replace(" ", "").split(",")] if m else None
 
@@ -98,36 +116,66 @@ class Attr:
     axis        = staticmethod(lambda op, default=0: Attr.int_attr(op, "axis", default))
     order       = staticmethod(lambda op: Attr.list_int_attr(op, "order"))
     boundary_ck = staticmethod(lambda op: Attr.list_int_attr(op, "boundary_check"))
-    start_end   = staticmethod(lambda op: tuple(map(int, re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()).groups())) if re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()) else None)
+    start_end   = staticmethod(lambda op: (
+        (Attr.int_attr(op, "start"), Attr.int_attr(op, "end"))
+        if (Attr.int_attr(op, "start") is not None and Attr.int_attr(op, "end") is not None)
+        else (tuple(map(int, re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()).groups()))
+              if re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()) else None)
+    ))
 
     # Load/store enums → Triton strings
     @staticmethod
     def cache_modifier(op):
         # accepts textual forms seen in TTIR; normalize to tl.load/store spellings
-        txt = op.str_nodebug()
-        if ".ca" in txt: return ".ca"
-        if ".cg" in txt: return ".cg"
-        if ".cs" in txt: return ".cs"
-        if ".wb" in txt: return ".wb"
-        if ".wt" in txt: return ".wt"
-        if ".cv" in txt: return ".cv"
+        txt = None
+        try:
+            txt = op.get_attr_text("cache_modifier")
+        except Exception:
+            pass
+        s = (txt or op.str_nodebug()).lower()
+        if ".ca" in s or " cache_modifier = ca" in s or "cache_modifier=ca" in s: return ".ca"
+        if ".cg" in s or " cache_modifier = cg" in s or "cache_modifier=cg" in s: return ".cg"
+        if ".cs" in s or " cache_modifier = cs" in s or "cache_modifier=cs" in s: return ".cs"
+        if ".wb" in s or " cache_modifier = wb" in s or "cache_modifier=wb" in s: return ".wb"
+        if ".wt" in s or " cache_modifier = wt" in s or "cache_modifier=wt" in s: return ".wt"
+        if ".cv" in s or " cache_modifier = cv" in s or "cache_modifier=cv" in s: return ".cv"
         return ""
 
     @staticmethod
     def eviction_policy(op):
+        s = None
+        try:
+            s = op.get_attr_text("eviction_policy")
+        except Exception:
+            pass
+        s = (s or op.str_nodebug()).lower()
         for k in ("evict_last", "evict_first"):
-            if k in op.str_nodebug(): return k
+            if k in s: return k
         return ""
 
     @staticmethod
     def padding_option(op):
-        if "padding_option = nan" in op.str_nodebug():  return "nan"
-        if "padding_option = zero" in op.str_nodebug(): return "zero"
+        txt = None
+        try:
+            txt = op.get_attr_text("padding_option")
+        except Exception:
+            pass
+        s = (txt or op.str_nodebug()).lower()
+        if "nan" in s:  return "nan"
+        if "zero" in s: return "zero"
         return ""
 
     # Detect per-result reduce combiners by inspecting the region
     @staticmethod
     def reduce_kinds(op, module):
+        # Prefer the C++ helper if available
+        try:
+            comb = op.get_reduce_combiner()
+        except Exception:
+            comb = None
+        if comb:
+            return [str(comb)] * max(1, op.get_num_results())
+
         reg = op.get_region(0); target_rid = reg.id()
         val_owner = {}
         reduce_ret = None
@@ -249,13 +297,31 @@ class Raiser:
         # --- select (ternary)
         R["arith.select"] = lambda op: f"tl.where({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))}, {self._get(op.get_operand(2))})"
 
-        # --- compares (predicate not accessible -> placeholder to avoid crash)
-        def _cmp_placeholder(op: mlir.operation) -> str:
+        # --- compares with predicate decoding via op.get_attr_text("predicate")
+        def _emit_cmp_with_pred(op: mlir.operation, is_int: bool) -> str:
             a = self._get(op.get_operand(0)); b = self._get(op.get_operand(1))
-            # Emit equality as a benign default; keep a TODO to invite filling in later.
-            return f"({a} == {b})  # TODO: refine predicate"
-        R["arith.cmpi"] = _cmp_placeholder
-        R["arith.cmpf"] = _cmp_placeholder
+            pred_txt = None
+            try:
+                pred_txt = op.get_attr_text("predicate")
+            except Exception:
+                pred_txt = None
+            s = (pred_txt or op.str_nodebug()).lower()
+            table = {
+                "eq":"==","oeq":"==","ueq":"==",
+                "ne":"!=","one":"!=","une":"!=",
+                "slt":"<","ult":"<","olt":"<",
+                "sle":"<=","ule":"<=","ole":"<=",
+                "sgt":">","ugt":">","ogt":">",
+                "sge":">=","uge":">=","oge":">=",
+            }
+            # pick the first key that appears in the predicate text
+            order = ("oeq","ueq","one","une","olt","ole","ogt","oge",
+                     "eq","ne","slt","sle","sgt","sge","ult","ule","ugt","uge")
+            key = next((k for k in order if k in s), None)
+            op_sym = table.get(key, "==")
+            return f"({a} {op_sym} {b})"
+        R["arith.cmpf"] = lambda op: _emit_cmp_with_pred(op, is_int=False)
+        R["arith.cmpi"] = lambda op: _emit_cmp_with_pred(op, is_int=True)
 
         # --- math unary
         R["math.cos"]   = lambda op: f"tl.cos({self._get(op.get_operand(0))})"
@@ -479,7 +545,8 @@ class Raiser:
 
     # ---- emit a single op
     def _emit_op(self, op: mlir.operation):
-        name = op.get_name()
+        # Prefer mnemonic if available (new binding), fallback to get_name()
+        name = getattr(op, "mnemonic", op.get_name())
         if name in ("module", "builtin.module", "tt.func", "func.func"):
             return
         if name.startswith(("scf.", "cf.")):
@@ -525,9 +592,10 @@ class Raiser:
         self.m.walk(lambda o: ops.append(o))
         body_started = False
         for op in ops:
-            if not body_started and any(op.get_name().startswith(p) for p in ("arith.","math.","tt.","scf.","cf.","triton.")):
+            oname = getattr(op, "mnemonic", op.get_name())
+            if not body_started and any(oname.startswith(p) for p in ("arith.","math.","tt.","scf.","cf.","triton.")):
                 body_started = True
-            if op.get_name().startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
+            if oname.startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
                 self._emit_op(op)
         if not body_started:
             self.lines.append("    pass")

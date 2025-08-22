@@ -583,6 +583,175 @@ void init_triton_ir(py::module &&m) {
              llvm::StringRef opName = self.getName().getStringRef();
              return opName.str();
            })
+
+
+      // --- begin: new helpers on `operation` ---
+
+      /*
+      * **`mnemonic`** → returns the op’s name (e.g., `"tt.reduce"`, `"arith.addi"`).
+        *Why:* quick dispatch key for your emitter registry without string-slicing or extra MLIR calls.;
+
+      * **`str_nodebug()`** → generic print of the op without debug/loc noise.
+        *Why:* previously only had `OpState.str_nodebug`; adding the same on `operation` fixes the `"operation" has no attribute 'str_nodebug'` error and gives clean text for logs/tests.;
+
+      * **`get_attr_names()`** → lists all attribute names on the op.
+        *Why:* lightweight introspection to see what attrs are present before targeted reads—handy across dialects.;
+
+      * **`get_attr_text(name)`** → returns the MLIR textual form of an attribute.
+        *Why:* covers enums/predicates/etc. when you don’t have a typed getter (e.g., `arith.cmpi` predicate), so you can directly map to `tl.*` choices.;
+
+      * **`get_int_attr(name)`** → reads `IntegerAttr` (≤64‑bit) as a Python `int`.
+        *Why:* decodes simple scalars like `axis`, `pack`, unroll factors, etc., removing “TODO: axis” placeholders.;
+
+      * **`get_i64_array_attr(name)`** → reads `ArrayAttr<IntegerAttr>` **or** `DenseIntElementsAttr` into a Python list of ints.
+        *Why:* for vector-valued attrs such as `order` in transposes/block-pointers, boundary-check dims, etc.;
+
+      * **`get_reduce_combiner()`** → peeks into region(0), follows the yielded def, and returns a normalized combiner: `"sum" | "prod" | "min" | "max" | "and" | "or" | "xor"` (else raw op name).
+        *Why:* lets the raiser emit `tl.sum/min/max(...)` correctly without pattern-matching arbitrary region bodies. Complements Triton’s reduction semantics that expect a combiner+axis.
+
+      **Why on `operation`?**
+      That’s exactly where you already bind generic getters like `get_str_attr/get_bool_attr`, so this is a surgical extension that doesn’t touch SCF/CF/Builder bindings and works on any walked op in `module.walk(...)`.;
+
+      */
+      .def_property_readonly(
+        "mnemonic",
+        [](Operation &self) {
+          return self.getName().getStringRef().str();
+        },
+        "Operation mnemonic, e.g. 'tt.reduce'")
+
+      .def(
+        "str_nodebug",
+        [](Operation &self) {
+          std::string s;
+          llvm::raw_string_ostream os(s);
+          mlir::OpPrintingFlags flags;
+          flags.elideLargeElementsAttrs();
+          self.print(os, flags);
+          return os.str();
+        },
+        "Return generic textual form without debug/location noise")
+
+      .def(
+        "get_attr_names",
+        [](Operation &self) {
+          py::list out;
+          for (auto na : self.getAttrs())
+            out.append(py::str(na.getName().str()));
+          return out;
+        },
+        "List attribute names present on this op")
+
+      .def(
+        "get_attr_text",
+        [](Operation &self, const std::string &name) -> py::object {
+          if (Attribute a = self.getAttr(name)) {
+            std::string s;
+            llvm::raw_string_ostream os(s);
+            a.print(os);
+            return py::str(os.str());
+          }
+          return py::none();
+        },
+        "Textual form of an attribute (handy for enums/predicates)")
+
+      .def(
+        "get_int_attr",
+        [](Operation &self, const std::string &name) -> py::object {
+          if (auto ia = self.getAttrOfType<IntegerAttr>(name)) {
+            unsigned bw = ia.getType().getIntOrFloatBitWidth();
+            if (bw <= 64)
+              return py::int_(ia.getValue().getSExtValue());
+            return py::none(); // wider than 64b -> skip
+          }
+          return py::none();
+        },
+        "Read IntegerAttr as Python int (<=64b); else None")
+
+      .def(
+        "get_i64_array_attr",
+        [](Operation &self, const std::string &name) -> py::object {
+          // ArrayAttr of IntegerAttr
+          if (auto arr = self.getAttrOfType<ArrayAttr>(name)) {
+            py::list out;
+            for (Attribute a : arr) {
+              auto ia = llvm::dyn_cast<IntegerAttr>(a);
+              if (!ia) return py::none();
+              unsigned bw = ia.getType().getIntOrFloatBitWidth();
+              if (bw > 64) return py::none();
+              out.append(py::int_(ia.getValue().getSExtValue()));
+            }
+            return out;
+          }
+          // DenseIntElementsAttr (including splats)
+          if (auto dense = self.getAttrOfType<DenseIntElementsAttr>(name)) {
+            auto elemTy = dyn_cast<IntegerType>(dense.getElementType());
+            if (!elemTy || elemTy.getWidth() > 64)
+              return py::none();
+            py::list out;
+            if (dense.isSplat()) {
+              int64_t v = dense.getSplatValue<APInt>().getSExtValue();
+              for (auto i = 0u; i < dense.getNumElements(); ++i) out.append(py::int_(v));
+            } else {
+              for (APInt ap : dense.getValues<APInt>())
+                out.append(py::int_(ap.getSExtValue()));
+            }
+            return out;
+          }
+          return py::none();
+        },
+        "Read ArrayAttr/DenseIntElementsAttr of <=64b ints as Python list")
+
+      .def(
+        "get_reduce_combiner",
+        [](Operation &self) -> py::object {
+          // Combiner usually sits in region(0):  %acc' = arith.addf %acc, %x ; yield %acc'
+          if (self.getNumRegions() == 0 || self.getRegion(0).empty())
+            return py::none();
+
+          Block &body = self.getRegion(0).front();
+          Operation *term = body.getTerminator(); // e.g., tt.reduce.return
+          if (!term || term->getNumOperands() == 0)
+            return py::none();
+
+          Operation *def = term->getOperand(0).getDefiningOp();
+          if (!def) return py::none();
+
+          std::string name = def->getName().getStringRef().str();
+          auto has = [&](std::string_view s){ return name.find(s) != std::string::npos; };
+
+          if (has(".add")) return py::str("sum");
+          if (has(".mul")) return py::str("prod");
+          if (has(".max")) return py::str("max");
+          if (has(".min")) return py::str("min");
+          if (has(".and")) return py::str("and");
+          if (has(".or"))  return py::str("or");
+          if (has(".xor")) return py::str("xor");
+
+          // Heuristic: select(cmp, a, b) -> min/max by predicate
+          if (has(".select") && def->getNumOperands() >= 1) {
+            if (Operation *cmp = def->getOperand(0).getDefiningOp()) {
+              std::string cmpName = cmp->getName().getStringRef().str();
+              auto cHas = [&](std::string_view s){ return cmpName.find(s) != std::string::npos; };
+              if (cHas("cmp") || cHas("compare")) {
+                std::string predTxt;
+                if (Attribute p = cmp->getAttr("predicate")) {
+                  std::string s; llvm::raw_string_ostream os(s); p.print(os); predTxt = os.str();
+                }
+                auto pHas = [&](std::string_view t){ return predTxt.find(t) != std::string::npos; };
+                if (pHas("gt") || pHas("ge")) return py::str("max");
+                if (pHas("lt") || pHas("le")) return py::str("min");
+              }
+            }
+          }
+          // Fallback: raw callee mnemonic (lets Python decide)
+          return py::str(name);
+        },
+        "Decode reduction combiner: 'sum|prod|min|max|and|or|xor' or raw op name")
+
+      // --- end: new helpers on `operation` ---
+
+
       .def("get_num_operands", &Operation::getNumOperands)
       .def("get_operand", &Operation::getOperand)
       .def("get_num_results", &Operation::getNumResults)
