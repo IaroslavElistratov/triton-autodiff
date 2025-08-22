@@ -226,15 +226,15 @@ class Raiser:
         self.env: Dict[int, str] = {}
         self.registry = self._build_registry()
 
-        # module-level constants (best-effort)
-        self._nctx_value = None
-        try:
-            v = self.m.get_int_attr("N_CTX")
-            if v is not None:
-                self._nctx_value = int(v)
-        except Exception:
-            self._nctx_value = None
-        self._nctx_name = "N_CTX" if self._nctx_value is not None else None
+        # # module-level constants (best-effort)
+        # self._nctx_value = None
+        # try:
+        #     v = self.m.get_int_attr("N_CTX")
+        #     if v is not None:
+        #         self._nctx_value = int(v)
+        # except Exception:
+        #     self._nctx_value = None
+        # self._nctx_name = "N_CTX" if self._nctx_value is not None else None
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -263,12 +263,12 @@ class Raiser:
 
     # ---- emission helpers
     def _arith(self, a: str, b: str, sym: str, fn: str) -> str:
-        # Peephole: fix N_CTX path like (pid * 0) -> (pid * N_CTX)
-        if sym == "*" and self._nctx_name is not None:
-            if ("tl.program_id(axis=" in a and b.strip() in ("0", "0.0")):
-                return f"({a} * {self._nctx_name})"
-            if ("tl.program_id(axis=" in b and a.strip() in ("0", "0.0")):
-                return f"({b} * {self._nctx_name})"
+        # # Peephole: fix N_CTX path like (pid * 0) -> (pid * N_CTX)
+        # if sym == "*" and self._nctx_name is not None:
+        #     if ("tl.program_id(axis=" in a and b.strip() in ("0", "0.0")):
+        #         return f"({a} * {self._nctx_name})"
+        #     if ("tl.program_id(axis=" in b and a.strip() in ("0", "0.0")):
+        #         return f"({b} * {self._nctx_name})"
         return f"({a} {sym} {b})" if self.opts.infix_arith else f"tl.{fn}({a}, {b})"
 
     def _cast(self, x: str, dst_ty: mlir.type) -> str:
@@ -303,6 +303,7 @@ class Raiser:
                 dty = _dtype_expr_from_type_string(str(ty)) or "tl.float32"
                 if ms and shp:
                     return f"tl.full({tuple(shp)}, {ms.group(1)}, dtype={dty})"
+            # Fallback: typed zero
             return _typed_zero(ty) if ty is not None else "0"
         R["arith.constant"] = emit_constant
 
@@ -396,49 +397,48 @@ class Raiser:
                 return f"tl.store({ptr}, {val}, mask={m})"
             return f"tl.store({ptr}, {val})"
         R["tt.store"] = emit_store
-        # --- atomics: tt.atomic_rmw op, sem, scope -> tl.atomic_*
+
+        # --- atomic read-modify-write
         def emit_atomic_rmw(op: mlir.operation) -> str:
-            # operands: ptr, val, (optional mask or indices)
-            ptr = self._get(op.get_operand(0)) if op.get_num_operands() >= 1 else "ptr"
-            val = self._get(op.get_operand(1)) if op.get_num_operands() >= 2 else "val"
-            # try to find mask operand by type (i1)
-            mask_kw = ""
-            try:
-                for i in range(2, op.get_num_operands()):
-                    ty = str(op.get_operand(i).get_type())
-                    if "i1" in ty:
-                        mask_kw = f", mask={self._get(op.get_operand(i))}"
-                        break
-            except Exception:
-                pass
-            # decode op/sem/scope from textual form (robust to both attr and inline enum)
-            txt = ""
-            try:
-                txt = op.str_nodebug()
-            except Exception:
-                txt = ""
-            m = re.search(r"tt\.atomic_rmw\s+([A-Za-z_]+)\s*,\s*([A-Za-z_]+)\s*,\s*([A-Za-z_]+)", txt)
-            kind = (m.group(1).lower() if m else (str(getattr(op, 'get_attr_text', lambda n: None)('op') or '')).lower())
-            sem  = (m.group(2).lower() if m else "")
-            scope= (m.group(3).lower() if m else "")
-            op_map = {
-                'add': 'atomic_add', 'fadd': 'atomic_add',
-                'max': 'atomic_max', 'fmax': 'atomic_max',
-                'min': 'atomic_min', 'fmin': 'atomic_min',
-                'and': 'atomic_and', 'or': 'atomic_or', 'xor': 'atomic_xor',
-                'xchg': 'atomic_xchg', 'swap': 'atomic_xchg', 'exchange': 'atomic_xchg',
+            # tt.atomic_rmw <op>, <sem>, <scope>, %ptr, %val
+            txt = op.str_nodebug()
+            m = re.search(r"atomic_rmw\s+([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)", txt)
+            opc, sem, scope = (m.group(1), m.group(2), m.group(3)) if m else ("add","relaxed","gpu")
+            MAP = {
+                "fadd":"atomic_add", "add":"atomic_add",
+                "fmax":"atomic_max", "max":"atomic_max",
+                "fmin":"atomic_min", "min":"atomic_min",
+                "umin":"atomic_min", "umax":"atomic_max",
+                "and":"atomic_and", "or":"atomic_or", "xor":"atomic_xor",
+                "xchg":"atomic_xchg", "exchange":"atomic_xchg",
             }
-            fn = op_map.get(kind, None)
-            kw = []
-            if sem:
-                kw.append(f"sem='{sem}'")
-            if scope:
-                kw.append(f"scope='{scope}'")
-            kw_s = (', ' + ', '.join(kw)) if kw else ''
-            if fn is None:
-                return f"# TODO: atomic_rmw({kind or 'unknown'}) on {ptr}, {val}{mask_kw}{kw_s}"
-            return f"tl.{fn}({ptr}, {val}{mask_kw}{kw_s})"
+            fn = MAP.get(opc, "atomic_add")
+            # In TTIR signature order is ptr, val
+            ptr = self._get(op.get_operand(0))
+            val = self._get(op.get_operand(1))
+            return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
         R["tt.atomic_rmw"] = emit_atomic_rmw
+
+
+        # def emit_atomic_rmw(op: mlir.operation) -> str:
+        #     # tt.atomic_rmw <op>, <sem>, <scope>, %ptr, %val
+        #     txt = op.str_nodebug()
+        #     m = re.search(r"atomic_rmw\s+([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)\s*,\s*([a-zA-Z0-9_]+)", txt)
+        #     opc, sem, scope = (m.group(1), m.group(2), m.group(3)) if m else ("add","relaxed","gpu")
+        #     MAP = {
+        #         "fadd":"atomic_add", "add":"atomic_add",
+        #         "fmax":"atomic_max", "max":"atomic_max",
+        #         "fmin":"atomic_min", "min":"atomic_min",
+        #         "umin":"atomic_min", "umax":"atomic_max",
+        #         "and":"atomic_and", "or":"atomic_or", "xor":"atomic_xor",
+        #         "xchg":"atomic_xchg", "exchange":"atomic_xchg",
+        #     }
+        #     fn = MAP.get(opc, "atomic_add")
+        #     # In TTIR signature order is ptr, val
+        #     ptr = self._get(op.get_operand(0))
+        #     val = self._get(op.get_operand(1))
+        #     return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
+        # R["tt.atomic_rmw"] = emit_atomic_rmw
 
 
         # --- simple shape ops (derive shape from result type string)
@@ -681,10 +681,6 @@ class Raiser:
         self.lines.append("@triton.jit")
         self.lines.append(f"def {self.func_name}({', '.join(arg_names)}):")
         self.lines.append("    # Raised from TTIR (best-effort).")
-
-        # Inject known module constants
-        if self._nctx_value is not None:
-            self.lines.append(f"    {self._nctx_name} = {self._nctx_value}  # from module attr")
 
         # Walk & emit only operations belonging to the kernel entry region
         ops: List[mlir.operation] = []
