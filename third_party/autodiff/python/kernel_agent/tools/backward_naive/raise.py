@@ -507,10 +507,15 @@ class Raiser:
         # --- trans / permute
         def emit_trans(op: mlir.operation) -> str:
             x = self._get(op.get_operand(0))
-            ord = Attr.order(op)
-            if ord is not None:
-                return f"tl.permute({x}, tuple({ord}))"
-            return f"tl.trans({x})  # TODO: order"
+            ord = Attr.order(op)  # via operation.get_i64_array_attr("order")
+            if ord is None:
+                return f"tl.trans({x})  # TODO: order"
+            if ord == [0, 1]:
+                return x
+            if ord == [1, 0]:
+                return f"tl.trans({x})"
+            # For >2D, if it ever appears later, keep a fallback comment
+            return f"{x}  # TODO: unsupported permute {tuple(ord)}"
         R["tt.trans"] = emit_trans
 
         # --- reductions
