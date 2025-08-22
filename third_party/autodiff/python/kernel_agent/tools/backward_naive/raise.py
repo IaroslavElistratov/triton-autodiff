@@ -1,5 +1,12 @@
-# raise.py -- End-to-end TTIR -> Triton-language raiser using MLIR bindings.
-# Uses value names derived from MLIR locations via ir.value_best_name (no regex).
+# raise.py
+# Minimal, robust TTIR -> Triton-language raiser.
+# - No use of op.str_nodebug() (that exists on OpState, not operation).
+# - Names for SSA values come from ir.value_best_name(v) via utils.build_value_name_hints.
+#
+# Note: Attribute access for integers/enums is limited in the current pybind
+# (operation exposes get_name/operands/results/regions but not generic int attrs).
+# Where an integer/enum attr would be required (e.g., cmp predicate, axis, orders),
+# we fall back to sensible defaults and emit a clear TODO comment instead of crashing.
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -9,176 +16,288 @@ import triton
 import triton.language as tl
 from triton._C.libtriton import ir as mlir
 
-from utils import ValueNamer, build_value_name_map
+from utils import build_value_name_hints
+
+
+# ----------------------------- Options ---------------------------------------
 
 @dataclass
 class RaiserOptions:
-    # If True, print a+b instead of tl.add(a,b)
+    # If True, print arith with symbols (a+b) instead of tl.add(a,b)
     infix_arith: bool = True
+
+
+# ----------------------------- Type helpers ----------------------------------
+
+def _dtype_expr_from_type_string(t: str) -> Optional[str]:
+    # quick-and-robust from MLIR type string
+    if "bf16" in t: return "tl.bfloat16"
+    if "f16"  in t: return "tl.float16"
+    if "f32"  in t: return "tl.float32"
+    if "f64"  in t: return "tl.float64"
+    if "i1"   in t: return "tl.int1"
+    m = None
+    # i8/i16/i32/i64 anywhere typical
+    import re
+    m = re.search(r"(?:^|[x<,])i(8|16|32|64)(?:[>x,]|$)", t)
+    if m:
+        return {"8":"tl.int8","16":"tl.int16","32":"tl.int32","64":"tl.int64"}[m.group(1)]
+    return None
+
+
+def _shape_from_tensor_type_string(t: str) -> Optional[List[int]]:
+    # "tensor<128x64xf16>" -> [128,64]
+    import re
+    m = re.search(r"tensor<([^>]+)>", t)
+    if not m:
+        return None
+    parts = m.group(1).split("x")
+    try:
+        return [int(d) for d in parts[:-1]]
+    except ValueError:
+        return None  # dynamic dims -> give up
+
+
+def _typed_zero(dst_ty: mlir.type) -> str:
+    """Emit a neutral literal or zeros tensor matching the type."""
+    t = str(dst_ty)
+    shp = _shape_from_tensor_type_string(t)
+    dty = _dtype_expr_from_type_string(t) or "None"
+    if shp:
+        # (dim,) tuple rendering
+        tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+        return f"tl.zeros({tup}, dtype={dty})"
+    # scalar
+    if dty.startswith("tl.float") or dty == "tl.bfloat16":
+        return "0.0"
+    if dty == "tl.int1":
+        return "False"
+    return "0"
+
+
+# ----------------------------- Raiser ----------------------------------------
 
 class Raiser:
     def __init__(self, module: mlir.module, func_name: Optional[str], *, opts: Optional[RaiserOptions] = None):
         self.m = module
         self.func_name = func_name or self.m.get_entry_func_name() or "raised_kernel"
         self.opts = opts or RaiserOptions()
-        # Names: prebind from NameLoc to ensure deterministic, meaningful ids
-        self.namer = ValueNamer()
-        self.namer.prebind_module(self.m)
         self.lines: List[str] = []
+        self._n = 0
+        # Names for values (results + args), derived from value_best_name
+        self._hints: Dict[int, str] = build_value_name_hints(self.m)
+        # Final env: value-id -> bound variable
+        self.env: Dict[int, str] = {}
         self.registry = self._build_registry()
 
-    # --------------- Utils ---------------
-    def _name(self, v: mlir.value) -> str:
-        return self.namer.name(v)
+    # ---- small utils
+    def _fresh(self, base="v") -> str:
+        self._n += 1
+        return f"{base}{self._n}"
 
+    @staticmethod
+    def _vid(v: mlir.value) -> int:
+        return int(v.id())
+
+    def _bind(self, v: mlir.value, name: Optional[str] = None) -> str:
+        vid = self._vid(v)
+        if vid in self.env:
+            return self.env[vid]
+        if name is None:
+            # prefer hint; if absent, mint
+            name = self._hints.get(vid, self._fresh("v"))
+        self.env[vid] = name
+        return name
+
+    def _get(self, v: mlir.value, hint: str = "v") -> str:
+        vid = self._vid(v)
+        if vid not in self.env:
+            self._bind(v, self._hints.get(vid, self._fresh(hint)))
+        return self.env[vid]
+
+    # ---- emission helpers
     def _arith(self, a: str, b: str, sym: str, fn: str) -> str:
         return f"({a} {sym} {b})" if self.opts.infix_arith else f"tl.{fn}({a}, {b})"
 
-    def _dtype_expr_from_type_string(self, t: str) -> Optional[str]:
-        # Minimal map for common types
-        if "bf16" in t: return "tl.bfloat16"
-        if "f16"  in t: return "tl.float16"
-        if "f32"  in t: return "tl.float32"
-        if "f64"  in t: return "tl.float64"
-        if "i1"   in t: return "tl.int1"
-        if "i8"   in t: return "tl.int8"
-        if "i16"  in t: return "tl.int16"
-        if "i32"  in t: return "tl.int32"
-        if "i64"  in t: return "tl.int64"
-        return None
+    def _cast(self, x: str, dst_ty: mlir.type) -> str:
+        dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
+        return f"tl.cast({x}, {dty})"
 
-    # --------------- Registry ---------------
-    def _build_registry(self) -> Dict[str, Callable[[mlir.operation], str]]:
-        R: Dict[str, Callable[[mlir.operation], str]] = {}
+    def _bitcast(self, x: str, dst_ty: mlir.type) -> str:
+        dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
+        return f"tl.bitcast({x}, {dty})"
 
-        # Binary arith
+    # ---- registry
+    def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
+        R: Dict[str, Callable[[mlir.operation], Optional[str]]] = {}
+
+        # --- arith constant (no text parse; typed zero if value not available)
+        def emit_constant(op: mlir.operation) -> str:
+            ty = op.get_result(0).get_type() if op.get_num_results() else None
+            return _typed_zero(ty) if ty is not None else "0"
+        R["arith.constant"] = emit_constant
+
+        # --- binary arithmetic
         def bin2(op, sym, fn):
-            return self._arith(self._name(op.get_operand(0)), self._name(op.get_operand(1)), sym, fn)
+            return self._arith(self._get(op.get_operand(0)),
+                               self._get(op.get_operand(1)), sym, fn)
         for k, sym, fn in (
             ("arith.addf", "+", "add"), ("arith.addi", "+", "add"),
             ("arith.subf", "-", "sub"), ("arith.subi", "-", "sub"),
             ("arith.mulf", "*", "mul"), ("arith.muli", "*", "mul"),
+            ("arith.divf", "/", "fdiv"),  # integer div variants omitted for now
         ):
             R[k] = (lambda op, s=sym, f=fn: bin2(op, s, f))
 
-        # Div/mod (float div is special in Triton)
-        R["arith.divf"]  = lambda op: f"tl.fdiv({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))}, False)"
-        R["arith.divsi"] = lambda op: f"tl.floordiv({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))})"
-        R["arith.divui"] = R["arith.divsi"]
-        R["arith.remf"]  = lambda op: f"tl.mod({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))})"
-        R["arith.remsi"] = R["arith.remf"]; R["arith.remui"] = R["arith.remf"]
+        # --- casts
+        R["arith.extf"]   = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.truncf"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.fptosi"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.fptoui"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.sitofp"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.uitofp"] = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        R["arith.bitcast"] = lambda op: self._bitcast(self._get(op.get_operand(0)), op.get_result(0).get_type())
 
-        # Bitwise
-        R["arith.andi"] = lambda op: self._arith(self._name(op.get_operand(0)), self._name(op.get_operand(1)), "&", "and_")
-        R["arith.ori"]  = lambda op: self._arith(self._name(op.get_operand(0)), self._name(op.get_operand(1)), "|", "or_")
-        R["arith.xori"] = lambda op: self._arith(self._name(op.get_operand(0)), self._name(op.get_operand(1)), "^", "xor_")
+        # --- select (ternary)
+        R["arith.select"] = lambda op: f"tl.where({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))}, {self._get(op.get_operand(2))})"
 
-        # Casts (best-effort)
-        R["arith.truncf"] = lambda op: f"tl.cast({self._name(op.get_operand(0))}, {self._dtype_expr_from_type_string(str(op.get_result(0).get_type())) or 'None'})"
-        R["arith.extf"]   = R["arith.truncf"]
-        R["arith.sitofp"] = R["arith.truncf"]
-        R["arith.uitofp"] = R["arith.truncf"]
-        R["arith.fptosi"] = R["arith.truncf"]
-        R["arith.fptoui"] = R["arith.truncf"]
-        R["arith.bitcast"]= lambda op: f"tl.bitcast({self._name(op.get_operand(0))}, {self._dtype_expr_from_type_string(str(op.get_result(0).get_type())) or 'None'})"
-        R["tt.bitcast"]   = R["arith.bitcast"]
+        # --- compares (predicate not accessible -> placeholder to avoid crash)
+        def _cmp_placeholder(op: mlir.operation) -> str:
+            a = self._get(op.get_operand(0)); b = self._get(op.get_operand(1))
+            # Emit equality as a benign default; keep a TODO to invite filling in later.
+            return f"({a} == {b})  # TODO: refine predicate"
+        R["arith.cmpi"] = _cmp_placeholder
+        R["arith.cmpf"] = _cmp_placeholder
 
-        # Compare & select (predicate best-effort)
-        R["arith.select"] = lambda op: f"tl.where({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))}, {self._name(op.get_operand(2))})"
-        R["arith.cmpf"]   = lambda op: f"/*cmpf*/ tl.equal({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))})"
-        R["arith.cmpi"]   = lambda op: f"/*cmpi*/ tl.equal({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))})"
+        # --- math unary
+        R["math.cos"]   = lambda op: f"tl.cos({self._get(op.get_operand(0))})"
+        R["math.sin"]   = lambda op: f"tl.sin({self._get(op.get_operand(0))})"
+        R["math.exp"]   = lambda op: f"tl.exp({self._get(op.get_operand(0))})"
+        R["math.exp2"]  = lambda op: f"tl.exp2({self._get(op.get_operand(0))})"
+        R["math.log"]   = lambda op: f"tl.log({self._get(op.get_operand(0))})"
+        R["math.log2"]  = lambda op: f"tl.log2({self._get(op.get_operand(0))})"
+        R["math.sqrt"]  = lambda op: f"tl.sqrt({self._get(op.get_operand(0))})"
+        R["math.rsqrt"] = lambda op: f"tl.rsqrt({self._get(op.get_operand(0))})"
+        R["math.absf"]  = lambda op: f"tl.abs({self._get(op.get_operand(0))})"
 
-        # Elementary math
-        for m in ("floor","ceil","exp","exp2","cos","sin","log","log2","erf","sqrt","rsqrt","abs"):
-            R[f"math.{m}"] = (lambda op, mm=m: f"tl.{mm}({self._name(op.get_operand(0))})")
+        # --- Triton builtins (axis not readable -> default axis=0, keep TODO)
+        R["tt.get_program_id"]   = lambda op: "tl.program_id(axis=0)  # TODO: axis"
+        R["tt.get_num_programs"] = lambda op: "tl.num_programs(axis=0)  # TODO: axis"
 
-        # Programming model (axis defaults to 0; op int attrs aren't exposed here)
-        R["tt.get_program_id"]   = lambda op: f"tl.program_id(0)"
-        R["tt.get_num_programs"] = lambda op: f"tl.num_programs(0)"
-
-        # Memory
+        # --- memory
         def emit_load(op: mlir.operation) -> str:
-            n = op.get_num_operands()
-            if n == 1:
-                return f"tl.load({self._name(op.get_operand(0))})"
-            if n == 3:
-                return f"tl.load({self._name(op.get_operand(0))}, mask={self._name(op.get_operand(1))}, other={self._name(op.get_operand(2))})"
-            args = ", ".join(self._name(op.get_operand(i)) for i in range(n))
-            return f"tl.load({args})"
+            # tt.load(ptr [, mask [, other]])
+            argc = op.get_num_operands()
+            ptr = self._get(op.get_operand(0)) if argc >= 1 else "ptr"
+            args = [ptr]
+            if argc >= 2:
+                args.append(f"mask={self._get(op.get_operand(1))}")
+            if argc >= 3:
+                args.append(f"other={self._get(op.get_operand(2))}")
+            return f"tl.load({', '.join(args)})"
         R["tt.load"] = emit_load
 
-        def emit_store(op: mlir.operation) -> str:
-            n = op.get_num_operands()
-            if n == 2:
-                return f"tl.store({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))})"
-            if n == 3:
-                return f"tl.store({self._name(op.get_operand(0))}, {self._name(op.get_operand(1))}, mask={self._name(op.get_operand(2))})"
-            args = ", ".join(self._name(op.get_operand(i)) for i in range(n))
-            return f"tl.store({args})"
+        def emit_store(op: mlir.operation) -> Optional[str]:
+            # tt.store(ptr, value [, mask])
+            argc = op.get_num_operands()
+            if argc < 2:
+                return "pass  # malformed store"
+            ptr = self._get(op.get_operand(0))
+            val = self._get(op.get_operand(1))
+            if argc >= 3:
+                m = self._get(op.get_operand(2))
+                return f"tl.store({ptr}, {val}, mask={m})"
+            return f"tl.store({ptr}, {val})"
         R["tt.store"] = emit_store
 
-        # Pointers / shape
-        R["tt.addptr"]      = lambda op: f"({self._name(op.get_operand(0))} + {self._name(op.get_operand(1))})"
-        R["tt.make_range"]  = lambda op: f"tl.arange(0, 0)  # TODO: fill start,end if available"
-        R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._name(op.get_operand(0))}, 0)  # axis=0 (unknown)"
-        R["tt.reshape"]     = lambda op: f"tl.reshape({self._name(op.get_operand(0))}, /*shape*/None, can_reorder=False)"
-        R["tt.trans"]       = lambda op: f"/* tl.permute(x, order) */ {self._name(op.get_operand(0))}"
+        # --- simple shape ops (derive shape from result type string)
+        def emit_reshape(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            if shp:
+                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+                return f"tl.reshape({x}, {tup})"
+            return f"tl.reshape({x}, None)  # TODO: dynamic shape"
+        R["tt.reshape"] = emit_reshape
 
-        # Constants: emit a typed zero as placeholder (attribute getter not exposed on Operation)
-        R["arith.constant"] = lambda op: "0"
+        def emit_expand_dims(op: mlir.operation) -> str:
+            # axis attr not readable -> default axis=0
+            x = self._get(op.get_operand(0))
+            return f"tl.expand_dims({x}, axis=0)  # TODO: axis"
+        R["tt.expand_dims"] = emit_expand_dims
+
+        def emit_broadcast(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            if shp:
+                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+                return f"tl.broadcast({x}, {tup})"
+            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
+        R["tt.broadcast"] = emit_broadcast
+
+        # You can keep appending handlers here…
 
         return R
 
-    # --------------- Emit one op ---------------
+    # ---- emit a single op
     def _emit_op(self, op: mlir.operation):
         name = op.get_name()
-        # skip module/func wrappers
         if name in ("module", "builtin.module", "tt.func", "func.func"):
             return
-        emit = self.registry.get(name)
-        # Result LHS (use prebound names)
-        lhs_vars = [self._name(op.get_result(i)) for i in range(op.get_num_results())]
-        if emit:
-            rhs = emit(op)
-            if lhs_vars:
-                lhs = ", ".join(lhs_vars) if len(lhs_vars) > 1 else lhs_vars[0]
-                self.lines.append(f"    {lhs} = {rhs}")
-            else:
-                self.lines.append(f"    {rhs}")
-        else:
-            # Unknown op: keep as comment
-            self.lines.append(f"    # TODO raise {name}")
+        if name.startswith(("scf.", "cf.")):
+            self.lines.append(f"    # TODO: raise structured control-flow: {name}")
+            return
 
-    # --------------- Kernel top-level ---------------
+        # Pre-bind results with friendly names (or minted as fallback)
+        res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
+        emit = self.registry.get(name)
+        if emit is None:
+            self.lines.append(f"    # TODO: raise {name}")
+            return
+
+        rhs = emit(op)
+        if rhs is None:
+            return
+        if res_vars:
+            lhs = ", ".join(res_vars) if len(res_vars) > 1 else res_vars[0]
+            self.lines.append(f"    {lhs} = {rhs}")
+        else:
+            self.lines.append(f"    {rhs}")
+
+    # ---- kernel top level
     def raise_kernel(self) -> str:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
         self.lines.append("")
-
-        # Entry function + args
+        # Bind entry args if present (names were already hinted in utils)
         func = self.m.get_function(self.func_name) if self.m.has_function(self.func_name) else None
         arg_names: List[str] = []
         if func:
             for i in range(func.get_num_args()):
                 v = func.args(i)
-                arg_names.append(self._name(v))
+                nm = self._hints.get(self._vid(v), f"arg{i}")
+                arg_names.append(self._bind(v, nm))
 
         self.lines.append("@triton.jit")
         self.lines.append(f"def {self.func_name}({', '.join(arg_names)}):")
         self.lines.append("    # Raised from TTIR (best-effort).")
 
-        # Walk and emit
+        # Walk & emit
         ops: List[mlir.operation] = []
-        self.m.walk(lambda op_ptr: ops.append(op_ptr))
+        self.m.walk(lambda o: ops.append(o))
+        body_started = False
         for op in ops:
-            if any(op.get_name().startswith(p) for p in ("arith.", "math.", "tt.")):
+            if not body_started and any(op.get_name().startswith(p) for p in ("arith.","math.","tt.","scf.","cf.","triton.")):
+                body_started = True
+            if op.get_name().startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
                 self._emit_op(op)
-
-        if self.lines[-1].endswith("):"):  # empty body guard
+        if not body_started:
             self.lines.append("    pass")
         return "\n".join(self.lines)
 
-# --------------- Convenience API ---------------
+
+# ----------------------------- Convenience API -------------------------------
+
 def raise_from_module(module: mlir.module, func_name: Optional[str] = None, *, options: Optional[RaiserOptions] = None) -> str:
     return Raiser(module, func_name, opts=options).raise_kernel()
 
@@ -191,6 +310,12 @@ def raise_from_file(ttir_path: str, *, func_name: Optional[str] = None, options:
     finally:
         del mod
 
+
+# ----------------------------- Demo / CLI ------------------------------------
+
 if __name__ == "__main__":
-    # Example usage
-    print(raise_from_file("/root/triton-autodiff/third_party/autodiff/test/flash_attention_v2/generated/annotated/inp.ttir", options=RaiserOptions(infix_arith=True)))
+    # Adjust the path if you want to test on a different TTIR file.
+    print(raise_from_file(
+        "/root/triton-autodiff/third_party/autodiff/test/flash_attention_v2/generated/annotated/inp.ttir",
+        options=RaiserOptions(infix_arith=True)
+    ))
