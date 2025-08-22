@@ -11,6 +11,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
+import re
 
 import triton
 import triton.language as tl
@@ -74,6 +75,93 @@ def _typed_zero(dst_ty: mlir.type) -> str:
         return "False"
     return "0"
 
+
+# ----------------------------- Attr helpers ------------------------------------
+
+class Attr:
+    @staticmethod
+    def int_attr(op, name, default=None):
+        m = re.search(rf"\b{name}\s*=\s*(-?\d+)\b", op.str_nodebug())
+        return int(m.group(1)) if m else default
+
+    @staticmethod
+    def bool_attr(op, name, default=False):
+        m = re.search(rf"\b{name}\s*=\s*(true|false)\b", op.str_nodebug())
+        return {"true": True, "false": False}.get(m.group(1), default) if m else default
+
+    @staticmethod
+    def list_int_attr(op, name):
+        m = re.search(rf"\b{name}\s*=\s*\[([0-9,\s-]+)\]", op.str_nodebug())
+        return [int(x) for x in m.group(1).replace(" ", "").split(",")] if m else None
+
+    # Common shorthands
+    axis        = staticmethod(lambda op, default=0: Attr.int_attr(op, "axis", default))
+    order       = staticmethod(lambda op: Attr.list_int_attr(op, "order"))
+    boundary_ck = staticmethod(lambda op: Attr.list_int_attr(op, "boundary_check"))
+    start_end   = staticmethod(lambda op: tuple(map(int, re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()).groups())) if re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()) else None)
+
+    # Load/store enums → Triton strings
+    @staticmethod
+    def cache_modifier(op):
+        # accepts textual forms seen in TTIR; normalize to tl.load/store spellings
+        txt = op.str_nodebug()
+        if ".ca" in txt: return ".ca"
+        if ".cg" in txt: return ".cg"
+        if ".cs" in txt: return ".cs"
+        if ".wb" in txt: return ".wb"
+        if ".wt" in txt: return ".wt"
+        if ".cv" in txt: return ".cv"
+        return ""
+
+    @staticmethod
+    def eviction_policy(op):
+        for k in ("evict_last", "evict_first"):
+            if k in op.str_nodebug(): return k
+        return ""
+
+    @staticmethod
+    def padding_option(op):
+        if "padding_option = nan" in op.str_nodebug():  return "nan"
+        if "padding_option = zero" in op.str_nodebug(): return "zero"
+        return ""
+
+    # Detect per-result reduce combiners by inspecting the region
+    @staticmethod
+    def reduce_kinds(op, module):
+        reg = op.get_region(0); target_rid = reg.id()
+        val_owner = {}
+        reduce_ret = None
+
+        def visit(inner):
+            # keep only ops in this region
+            b = inner.get_block(); r = b.get_parent() if b is not None else None
+            if b is None:
+                return
+            while r:
+                if r.id() == target_rid:
+                    # record defs
+                    for i in range(inner.get_num_results()):
+                        v = inner.get_result(i)
+                        val_owner[int(v.id())] = inner.get_name()
+                    # find tt.reduce.return
+                    if inner.get_name().endswith("reduce.return"):
+                        nonlocal reduce_ret; reduce_ret = inner
+                    break
+                r = r.get_parent_region()
+        module.walk(visit)
+
+        kinds = []
+        if reduce_ret:
+            MAP = {
+                "arith.addi":"sum","arith.addf":"sum",
+                "arith.maxsi":"max","arith.maxui":"max","arith.maximumf":"max","arith.maxnumf":"max",
+                "arith.minsi":"min","arith.minui":"min","arith.minimumf":"min","arith.minnumf":"min",
+                "arith.andi":"and","arith.ori":"or","arith.xori":"xor",
+            }
+            for i in range(reduce_ret.get_num_operands()):
+                vid = int(reduce_ret.get_operand(i).id())
+                kinds.append(MAP.get(val_owner.get(vid, ""), "custom"))
+        return kinds
 
 # ----------------------------- Raiser ----------------------------------------
 
@@ -301,14 +389,91 @@ class Raiser:
             return f"tl.dot({a}, {b})"
         R["tt.dot"] = emit_dot
 
-        R["tt.trans"] = lambda op: f"tl.trans({self._get(op.get_operand(0))})"
+        # --- trans / permute using order attr when available
+        def emit_trans(op: mlir.operation) -> str:
+            x = self._get(op.get_operand(0))
+            ord = Attr.order(op)
+            if ord is not None:
+                return f"tl.permute({x}, tuple({ord}))"
+            return f"tl.trans({x})  # TODO: order"
+        R["tt.trans"] = emit_trans
 
         # --- reductions (best-effort; can’t inspect combiner/axis robustly here)
         def emit_reduce(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            return f"tl.sum({x}, axis=0)  # TODO: combiner/axis"
+            axis = Attr.axis(op, 0)
+            kinds = Attr.reduce_kinds(op, self.m)
+            xs = [self._get(op.get_operand(i)) for i in range(op.get_num_operands())]
+            x = xs[0] if len(xs) == 1 else f"({', '.join(xs)})"
+            outs: List[str] = []
+            for k in kinds:
+                if k == "sum":
+                    outs.append(f"tl.sum({x}, axis={axis})")
+                elif k == "max":
+                    outs.append(f"tl.max({x}, axis={axis})")
+                elif k == "min":
+                    outs.append(f"tl.min({x}, axis={axis})")
+                elif k in {"and", "or", "xor"}:
+                    outs.append(f"tl.{k}_reduce({x}, axis={axis})")
+                else:
+                    outs.append(f"{x}  # TODO: custom reduce")
+            return (", ".join(outs)) if len(outs) > 1 else outs[0]
         R["tt.reduce"] = emit_reduce
         R["tt.reduce.return"] = lambda op: None
+
+        # --- override: program id / num programs (axis)
+        R["tt.get_program_id"]   = lambda op: f"tl.program_id(axis={max(0, min(2, Attr.axis(op, 0)))})"
+        R["tt.get_num_programs"] = lambda op: f"tl.num_programs(axis={max(0, min(2, Attr.axis(op, 0)))})"
+
+        # --- override: expand_dims(axis)
+        R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
+
+        # --- override: load/store with cache/evict/padding/boundary_check
+        def emit_load(op: mlir.operation) -> str:
+            ptr = self._get(op.get_operand(0))
+            args: List[str] = [f"{ptr}"]
+            if op.get_num_operands() >= 2:
+                args.append(f"mask={self._get(op.get_operand(1))}")
+            if op.get_num_operands() >= 3:
+                args.append(f"other={self._get(op.get_operand(2))}")
+            bc = Attr.boundary_ck(op)
+            pad = Attr.padding_option(op)
+            cm = Attr.cache_modifier(op)
+            ev = Attr.eviction_policy(op)
+            if bc:
+                args.append(f"boundary_check={tuple(bc)}")
+            if pad:
+                args.append(f"padding_option='{pad}'")
+            if cm:
+                args.append(f"cache_modifier='{cm}'")
+            if ev:
+                args.append(f"eviction_policy='{ev}'")
+            return f"tl.load({', '.join(args)})"
+        R["tt.load"] = emit_load
+
+        def emit_store(op: mlir.operation) -> str:
+            ptr = self._get(op.get_operand(0))
+            val = self._get(op.get_operand(1))
+            args: List[str] = [f"{ptr}", f"{val}"]
+            if op.get_num_operands() >= 3:
+                args.append(f"mask={self._get(op.get_operand(2))}")
+            cm = Attr.cache_modifier(op)
+            ev = Attr.eviction_policy(op)
+            if cm:
+                args.append(f"cache_modifier='{cm}'")
+            if ev:
+                args.append(f"eviction_policy='{ev}'")
+            return f"tl.store({', '.join(args)})"
+        R["tt.store"] = emit_store
+
+        # --- override: make_range(start, end) with fallback to shape-based
+        def emit_make_range2(op: mlir.operation) -> str:
+            se = Attr.start_end(op)
+            if se:
+                return f"tl.arange({se[0]}, {se[1]})"
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
+            n = shp[0] if len(shp) >= 1 else 0
+            return f"tl.arange(0, {n})" + ("  # TODO: dynamic shape" if n == 0 else "")
+        R["tt.make_range"] = emit_make_range2
 
         return R
 
