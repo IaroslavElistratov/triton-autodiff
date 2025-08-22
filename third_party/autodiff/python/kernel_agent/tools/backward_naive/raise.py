@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 import re
+import struct
 
 import triton
 import triton.language as tl
@@ -48,6 +49,27 @@ def _shape_from_tensor_type_string(t: str) -> Optional[List[int]]:
         return [int(d) for d in parts[:-1]]
     except ValueError:
         return None  # dynamic dims -> give up
+
+
+def _hex_to_float(bits: int, width: int) -> float:
+    """Decode hex bitpatterns for floating types (f16/f32/f64).
+
+    - f16: handle +/-inf and NaN explicitly; otherwise return 0.0 as pragmatic fallback
+    - f32/f64: decode via struct pack/unpack preserving exact bit patterns
+    """
+    if width == 16:
+        if bits in (0x7C00,):
+            return float('inf')
+        if bits in (0xFC00,):
+            return float('-inf')
+        if 0x7C01 <= bits <= 0x7FFF:
+            return float('nan')
+        return 0.0
+    if width == 32:
+        return struct.unpack('!f', struct.pack('!I', bits))[0]
+    if width == 64:
+        return struct.unpack('!d', struct.pack('!Q', bits))[0]
+    return 0.0
 
 
 def _typed_zero(dst_ty: mlir.type) -> str:
@@ -263,6 +285,18 @@ class Raiser:
                 dty = _dtype_expr_from_type_string(str(ty)) or "tl.float32"
                 if ms and shp:
                     return f"tl.full({tuple(shp)}, {ms.group(1)}, dtype={dty})"
+                # hex splat like: dense<0xFF800000> : tensor<...xf32>
+                mhex = re.search(r"dense<\s*(0x[0-9A-Fa-f]+)\s*>", s)
+                if mhex and ty is not None:
+                    bits = int(mhex.group(1), 16)
+                    ty_str = str(ty)
+                    width = 32 if "f32" in ty_str else 64 if "f64" in ty_str else 16 if ("f16" in ty_str or "bf16" in ty_str) else 32
+                    val = _hex_to_float(bits, width)
+                    shp2 = _shape_from_tensor_type_string(ty_str)
+                    dty2 = _dtype_expr_from_type_string(ty_str) or "tl.float32"
+                    if shp2:
+                        return f"tl.full({tuple(shp2)}, {repr(val)}, dtype={dty2})"
+                    return repr(val)
             return _typed_zero(ty) if ty is not None else "0"
         R["arith.constant"] = emit_constant
 
