@@ -155,6 +155,36 @@ OpPrintingFlags getOpPrintingFlags() {
   return printingFlags;
 }
 
+
+// recursively walks the location tree:
+//  * `NameLoc`: visit its `getChildLoc()` and keep going.
+//  * `FusedLoc`: iterate over all sub‑locs.
+//  * `CallSiteLoc`: visit both callee and caller.
+
+// It stops at `UnknownLoc`/`FileLineCol`. `loc_best_name` returns the first `NameLoc` it sees (outer/prefix), while `loc_name_chain` collects the whole outer→inner chain.
+
+
+// Prefer the outermost NameLoc's name; walk into child/callee/fused pieces.
+static std::optional<std::string> bestVarNameFromLoc(mlir::Location loc) {
+  if (auto n = dyn_cast<NameLoc>(loc)) {
+    auto s = n.getName().str();
+    if (!s.empty()) return s;                  // keep the first (outermost)
+    auto child = n.getChildLoc();
+    if (!llvm::isa<UnknownLoc>(child))
+      if (auto t = bestVarNameFromLoc(child)) return t;
+    return std::nullopt;
+  }
+  if (auto c = dyn_cast<CallSiteLoc>(loc)) {
+    if (auto t = bestVarNameFromLoc(c.getCallee())) return t;
+    return bestVarNameFromLoc(c.getCaller());
+  }
+  if (auto f = dyn_cast<FusedLoc>(loc)) {
+    for (mlir::Location sub : f.getLocations())
+      if (auto t = bestVarNameFromLoc(sub)) return t;
+  }
+  return std::nullopt;
+}
+
 py::list getTensorDescMetadata(ModuleOp &mod) {
   py::list result;
   triton::FuncOp kernelFunc;
@@ -201,6 +231,16 @@ py::list getTensorDescMetadata(ModuleOp &mod) {
 void init_triton_ir(py::module &&m) {
   using ret = py::return_value_policy;
   using namespace pybind11::literals;
+
+  // Expose to Python (keep API tiny).
+  m.def("loc_best_name", [](mlir::Location loc) -> py::object {
+    if (auto s = bestVarNameFromLoc(loc)) return py::str(*s);
+    return py::none();
+  });
+  m.def("value_best_name", [](mlir::Value v) -> py::object {
+    if (auto s = bestVarNameFromLoc(v.getLoc())) return py::str(*s);
+    return py::none();
+  });
 
   py::enum_<PaddingOption>(m, "PADDING_OPTION", py::module_local())
       .value("PAD_ZERO", PaddingOption::PAD_ZERO)
