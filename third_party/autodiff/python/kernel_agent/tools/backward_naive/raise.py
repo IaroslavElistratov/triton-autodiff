@@ -51,6 +51,13 @@ def _shape_from_tensor_type_string(t: str) -> Optional[List[int]]:
         return None  # dynamic dims -> give up
 
 
+# Helper: format a Python tuple literal for a static block shape, e.g. [16, 16] -> "(16, 16)"
+def _fmt_shape(shp): return "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
+# Helper: best-effort pointer type detection from MLIR type text
+# We must not broadcast pointers (doing so loses pointer-ness and breaks tl.load/tl.store)
+def _is_ptr_type(ty) -> bool: return "ptr<" in str(ty)
+
+
 def _typed_zero(dst_ty: mlir.type) -> str:
     """Emit a neutral literal or zeros tensor matching the type."""
     t = str(dst_ty)
@@ -374,20 +381,33 @@ class Raiser:
             return f"tl.load({', '.join(args)})"
         R["tt.load"] = emit_load
 
-        def emit_store(op: mlir.operation) -> str:
+        # tt.store: shape-match value to pointer; keep pointer untouched
+        # Why: Broadcasting/reshaping the pointer erases pointer-ness and breaks tl.store.
+        def emit_store(op):
             ptr = self._get(op.get_operand(0))
             val = self._get(op.get_operand(1))
-            args: List[str] = [f"{ptr}", f"{val}"]
+
+            ptr_sh = _shape_from_tensor_type_string(str(op.get_operand(0).get_type())) or []
+            val_sh = _shape_from_tensor_type_string(str(op.get_operand(1).get_type())) or []
+
+            # Make value conform to pointer shape (keep pointer untouched).
+            if ptr_sh and val_sh and ptr_sh != val_sh:
+                if math.prod(ptr_sh) == math.prod(val_sh):
+                    val = f"tl.reshape({val}, {_fmt_shape(ptr_sh)})"
+                elif len(val_sh) <= len(ptr_sh) and all(
+                    (b == 1 or a == b) for a, b in zip(ptr_sh, val_sh + [1]*(len(ptr_sh)-len(val_sh)))
+                ):
+                    val = f"tl.broadcast_to({val}, {_fmt_shape(ptr_sh)})"
+
+            args = [ptr, val]
             if op.get_num_operands() >= 3:
                 args.append(f"mask={self._get(op.get_operand(2))}")
-            cm = Attr.cache_modifier(op)
-            ev = Attr.eviction_policy(op)
-            if cm:
-                args.append(f"cache_modifier='{cm}'")
-            if ev:
-                args.append(f"eviction_policy='{ev}'")
+            cm = Attr.cache_modifier(op); ev = Attr.eviction_policy(op)
+            if cm: args.append(f"cache_modifier='{cm}'")
+            if ev: args.append(f"eviction_policy='{ev}'")
             return f"tl.store({', '.join(args)})"
         R["tt.store"] = emit_store
+
 
         # --- atomic read-modify-write (merge of A1 + A3)
         def _enum_from_attrs(op, names: List[str], fallback: Optional[str]) -> Optional[str]:
@@ -443,22 +463,47 @@ class Raiser:
 
         R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
 
-        def emit_broadcast(op: mlir.operation) -> str:
-            return self._get(op.get_operand(0))
+        # Rationale: tl.broadcast returns a PAIR (lhs, rhs) and can accidentally feed a Python tuple
+        # into pointer math/memory ops, leading to tuple_type errors. tl.broadcast_to returns a single
+        # tensor of the target shape.
+        # Also: never broadcast pointers here, because broadcasting
+        # a pointer strips pointer-ness (becomes a block of values), which breaks tl.load/tl.store.
+        # Instead, widen pointers only via broadcasting OFFSETS inside tt.addptr.
+        # Why: Broadcasting a pointer strips pointer-ness; use tl.broadcast_to for values.
+        def emit_broadcast(op):
+            x = self._get(op.get_operand(0))
+            if "ptr<" in str(op.get_operand(0).get_type()):  # keep pointer scalar
+                return x
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
+            return f"tl.broadcast_to({x}, {_fmt_shape(shp)})" if shp else x
         R["tt.broadcast"] = emit_broadcast
 
-        # --- pointer arith
-        def emit_addptr(op: mlir.operation) -> str:
-            terms = [self._get(op.get_operand(i)) for i in range(op.get_num_operands())]
-            base, offs = terms[0], terms[1:]
-            if offs:
-                return "(" + " + ".join([base] + offs) + ")"
-            return base
+
+        # --- tt.addptr: keep base scalar; broadcast int64 offsets to the result shape
+        # tt.addptr: keep base pointer scalar; broadcast int64 offsets to result shape
+        # Why: Widen pointers via offsets; matches Triton pointer arithmetic expectations.
+        def emit_addptr(op):
+            base = self._get(op.get_operand(0))  # scalar ptr
+            shp  = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
+            shp_txt = _fmt_shape(shp) if shp else None
+            offs = []
+            for i in range(1, op.get_num_operands()):
+                o = f"tl.cast({self._get(op.get_operand(i))}, tl.int64)"
+                if shp_txt: o = f"tl.broadcast_to({o}, {shp_txt})"
+                offs.append(o)
+            return base if not offs else f"({base} + {' + '.join(offs)})"
         R["tt.addptr"] = emit_addptr
 
-        # --- splat: scalar -> block tensor
-        def emit_splat(op: mlir.operation) -> str:
-            return self._get(op.get_operand(0))
+
+        # tt.splat: scalar -> block tensor
+        # Why: For pointers, make a grid of pointers using base + zeros(int64) offsets.
+        def emit_splat(op):
+            x = self._get(op.get_operand(0))
+            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
+            if not shp: return x
+            if _is_ptr_type(op.get_operand(0).get_type()) or _is_ptr_type(op.get_result(0).get_type()):
+                return f"({x} + tl.zeros({_fmt_shape(shp)}, dtype=tl.int64))"
+            return f"tl.broadcast_to({x}, {_fmt_shape(shp)})"
         R["tt.splat"] = emit_splat
 
         # --- make_range: prefer explicit start/end
@@ -659,6 +704,10 @@ def raise_from_file(ttir_path: str, *, func_name: Optional[str] = None, options:
 if __name__ == "__main__":
     # Adjust the path to your TTIR file if needed.
     print(raise_from_file(
-        "/root/triton-autodiff/generated/1b763f2bf2/out.ttir",
+        # "/root/triton-autodiff/generated/1b763f2bf2/out.ttir",
+        "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/N_CTX/minimal.ttir",
+        # "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/pointerness/minimal.ttir",
+        # "/root/triton-autodiff/generated/repro/out.ttir",
+        # "/root/triton-autodiff/third_party/autodiff/test/add-mul-div/generated/f7fc96a11c/out.ttir",
         options=RaiserOptions(infix_arith=True)
     ))
