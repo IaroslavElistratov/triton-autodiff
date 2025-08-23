@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 import re
 import struct
+import math
 
 import triton
 import triton.language as tl
@@ -38,7 +39,6 @@ def _dtype_expr_from_type_string(t: str) -> Optional[str]:
         return {"8":"tl.int8","16":"tl.int16","32":"tl.int32","64":"tl.int64"}[m.group(1)]
     return None
 
-
 def _shape_from_tensor_type_string(t: str) -> Optional[List[int]]:
     # "tensor<128x64xf16>" -> [128, 64]
     m = re.search(r"tensor<([^>]+)>", t)
@@ -49,27 +49,6 @@ def _shape_from_tensor_type_string(t: str) -> Optional[List[int]]:
         return [int(d) for d in parts[:-1]]
     except ValueError:
         return None  # dynamic dims -> give up
-
-
-def _hex_to_float(bits: int, width: int) -> float:
-    """Decode hex bitpatterns for floating types (f16/f32/f64).
-
-    - f16: handle +/-inf and NaN explicitly; otherwise return 0.0 as pragmatic fallback
-    - f32/f64: decode via struct pack/unpack preserving exact bit patterns
-    """
-    if width == 16:
-        if bits in (0x7C00,):
-            return float('inf')
-        if bits in (0xFC00,):
-            return float('-inf')
-        if 0x7C01 <= bits <= 0x7FFF:
-            return float('nan')
-        return 0.0
-    if width == 32:
-        return struct.unpack('!f', struct.pack('!I', bits))[0]
-    if width == 64:
-        return struct.unpack('!d', struct.pack('!Q', bits))[0]
-    return 0.0
 
 
 def _typed_zero(dst_ty: mlir.type) -> str:
@@ -273,31 +252,31 @@ class Raiser:
         # --- arith.constant
         def emit_constant(op: mlir.operation) -> str:
             ty = op.get_result(0).get_type() if op.get_num_results() else None
-            s = _text_attr(op, "value")
-            if s:
-                # Accept a bare literal, optionally followed by ": type"
-                m = re.match(r"^\s*([-+]?(?:\d+\.?\d*|\d*\.?\d+)(?:[eE][-+]?\d+)?)\s*(?::.*)?$", s)
-                if m:
-                    return m.group(1)
-                # dense<42> : tensor<...>
-                ms = re.search(r"dense<\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*>", s)
-                shp = _shape_from_tensor_type_string(str(ty))
-                dty = _dtype_expr_from_type_string(str(ty)) or "tl.float32"
-                if ms and shp:
-                    return f"tl.full({tuple(shp)}, {ms.group(1)}, dtype={dty})"
-                # hex splat like: dense<0xFF800000> : tensor<...xf32>
-                mhex = re.search(r"dense<\s*(0x[0-9A-Fa-f]+)\s*>", s)
-                if mhex and ty is not None:
-                    bits = int(mhex.group(1), 16)
-                    ty_str = str(ty)
-                    width = 32 if "f32" in ty_str else 64 if "f64" in ty_str else 16 if ("f16" in ty_str or "bf16" in ty_str) else 32
-                    val = _hex_to_float(bits, width)
-                    shp2 = _shape_from_tensor_type_string(ty_str)
-                    dty2 = _dtype_expr_from_type_string(ty_str) or "tl.float32"
-                    if shp2:
-                        return f"tl.full({tuple(shp2)}, {repr(val)}, dtype={dty2})"
-                    return repr(val)
-            return _typed_zero(ty) if ty is not None else "0"
+            ty_str = str(ty) if ty else ""
+            shp = _shape_from_tensor_type_string(ty_str) or []
+            dty = _dtype_expr_from_type_string(ty_str) or "tl.float32"
+
+            v = None
+            try:
+                v = op.get_splat_value("value")
+            except Exception:
+                v = None
+
+            if v is None:
+                return _typed_zero(ty) if ty else "0"
+
+            def _lit(x):
+                if isinstance(x, float):
+                    if math.isnan(x):
+                        return "float('nan')"
+                    if math.isinf(x):
+                        return "float('inf')" if x > 0 else "float('-inf')"
+                    return repr(x)
+                if isinstance(x, bool):
+                    return "True" if x else "False"
+                return str(int(x))
+
+            return (f"tl.full({tuple(shp)}, {_lit(v)}, dtype={dty})" if shp else _lit(v))
         R["arith.constant"] = emit_constant
 
         # --- binary arithmetic
@@ -313,9 +292,10 @@ class Raiser:
             R[k] = (lambda op, s=sym, f=fn: bin2(op, s, f))
 
         # --- integer division & remainder
-        R["arith.divsi"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv")
+        # MLIR divsi/remsi are trunc‑toward‑zero; Python `//`/`%` are floor‑based for negatives
+        R["arith.divsi"] = lambda op: f"({self._get(op.get_operand(0))} // {self._get(op.get_operand(1))})  # assumes non-negative"
         R["arith.divui"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv")
-        R["arith.remsi"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "%", "mod")
+        R["arith.remsi"] = lambda op: f"({self._get(op.get_operand(0))} %  {self._get(op.get_operand(1))})  # assumes non-negative"
         R["arith.remui"] = R["arith.remsi"]
 
         # --- casts
@@ -441,6 +421,13 @@ class Raiser:
             fn = MAP.get(opc, "atomic_add")
             ptr = self._get(op.get_operand(0))
             val = self._get(op.get_operand(1))
+            # # cast val to pointee type if we can infer it
+            # try:
+            #     pty = _dtype_expr_from_type_string(str(op.get_operand(0).get_type()))
+            #     if pty:
+            #         val = f"tl.cast({val}, {pty})"
+            # except Exception:
+            #     pass
             return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
         R["tt.atomic_rmw"] = emit_atomic_rmw
 
@@ -457,12 +444,7 @@ class Raiser:
         R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
 
         def emit_broadcast(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
-            if shp:
-                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-                return f"tl.broadcast({x}, {tup})"
-            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
+            return self._get(op.get_operand(0))
         R["tt.broadcast"] = emit_broadcast
 
         # --- pointer arith
@@ -476,12 +458,7 @@ class Raiser:
 
         # --- splat: scalar -> block tensor
         def emit_splat(op: mlir.operation) -> str:
-            x = self._get(op.get_operand(0))
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
-            if shp:
-                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-                return f"tl.broadcast({x}, {tup})"
-            return f"tl.broadcast({x}, None)  # TODO: dynamic shape"
+            return self._get(op.get_operand(0))
         R["tt.splat"] = emit_splat
 
         # --- make_range: prefer explicit start/end
@@ -505,16 +482,30 @@ class Raiser:
         R["tt.dot"] = emit_dot
 
         # --- trans / permute
-        def emit_trans(op: mlir.operation) -> str:
+        def emit_trans(op):
             x = self._get(op.get_operand(0))
-            ord = Attr.order(op)  # via operation.get_i64_array_attr("order")
+
+            # Result rank (best-effort from the result type)
+            out_ty = op.get_result(0).get_type() if op.get_num_results() else None
+            shp = _shape_from_tensor_type_string(str(out_ty)) or []
+            rank = len(shp) if shp else None
+
+            # Preferred path: explicit 'order' attribute (list of ints)
+            ord = Attr.order(op)  # uses operation.get_i64_array_attr("order")
             if ord is None:
-                return f"tl.trans({x})  # TODO: order"
-            if ord == [0, 1]:
+                # No 'order' in TTIR. If this is a 2-D transpose, assume the canonical swap.
+                # Otherwise, we can't safely guess; keep the value and leave a TODO.
+                return f"tl.trans({x})" if rank == 2 else f"{x}  # TODO: missing 'order' attr"
+
+            # Identity permutation -> no-op
+            if rank is not None and ord == list(range(rank)):
                 return x
-            if ord == [1, 0]:
+
+            # 2-D swap -> emit the idiomatic tl.trans
+            if (rank == 2 and ord in ([1, 0], (1, 0))) or (ord == [1, 0] and (rank is None or rank == 2)):
                 return f"tl.trans({x})"
-            # For >2D, if it ever appears later, keep a fallback comment
+
+            # Fallback if Triton doesn't expose tl.permute in your build
             return f"{x}  # TODO: unsupported permute {tuple(ord)}"
         R["tt.trans"] = emit_trans
 
@@ -624,6 +615,28 @@ class Raiser:
         if not body_started:
             self.lines.append("    pass")
         return "\n".join(self.lines)
+
+
+
+
+# # in _build_registry()
+# # Add a tiny helper `self._emit_region(...)` that walks the region’s ops and, when it sees `scf.yield`, assigns `iter_out[i] = <yield_i>`.
+
+# def emit_scf_for(op):
+#     lb  = self._get(op.get_operand(0)); ub = self._get(op.get_operand(1)); st = self._get(op.get_operand(2))
+#     # Bind iter_args -> Python vars
+#     iter_in  = [self._get(op.get_operand(i)) for i in range(3, op.get_num_operands())]
+#     iter_out = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
+#     # Hoist initial values
+#     for dst, src in zip(iter_out, iter_in): self.lines.append(f"    {dst} = {src}")
+#     self.lines.append(f"    for {self._fresh('k')} in range({lb}, {ub}, {st}):")
+#     # Emit region body; capture last scf.yield operands into iter_out
+#     reg = op.get_region(0)
+#     self._emit_region(reg, indent=8, yield_targets=iter_out)
+#     return None
+# R["scf.for"] = emit_scf_for
+
+
 
 
 # ----------------------------- Convenience API -------------------------------

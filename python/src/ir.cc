@@ -703,6 +703,42 @@ void init_triton_ir(py::module &&m) {
         "Read ArrayAttr/DenseIntElementsAttr of <=64b ints as Python list")
 
       .def(
+        "get_splat_value",
+        [](Operation &self, const std::string &name) -> py::object {
+          Attribute a = self.getAttr(name);
+          if (!a)
+            return py::none();
+
+          // Scalar floats
+          if (auto fa = dyn_cast<FloatAttr>(a))
+            return py::float_(fa.getValueAsDouble());
+
+          // Scalar ints / bools
+          if (auto ia = dyn_cast<IntegerAttr>(a)) {
+            auto ty = ia.getType();
+            if (ty.isInteger(1))
+              return py::bool_(ia.getInt() != 0);
+            return py::int_(ia.getValue().getSExtValue());
+          }
+
+          // Dense splats (fp / int / i1)
+          if (auto d = dyn_cast<DenseElementsAttr>(a)) {
+            if (!d.isSplat())
+              return py::none();
+            if (auto dfp = dyn_cast<DenseFPElementsAttr>(a))
+              return py::float_(dfp.getSplatValue<APFloat>().convertToDouble());
+            if (auto di = dyn_cast<DenseIntElementsAttr>(a)) {
+              auto et = di.getElementType();
+              if (et.isInteger(1))
+                return py::bool_(di.getSplatValue<bool>());
+              return py::int_(di.getSplatValue<APInt>().getSExtValue());
+            }
+          }
+          return py::none();
+        },
+        "Return scalar or dense-splat constant as Python value; else None")
+
+      .def(
         "get_reduce_combiner",
         [](Operation &self) -> py::object {
           // Combiner usually sits in region(0):  %acc' = arith.addf %acc, %x ; yield %acc'
