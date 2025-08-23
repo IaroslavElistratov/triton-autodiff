@@ -152,48 +152,48 @@ class Attr:
         if "zero" in s: return "zero"
         return ""
 
-    @staticmethod
-    def reduce_kinds(op, module):
-        # Prefer the direct helper.
-        try:
-            comb = op.get_reduce_combiner()
-        except Exception:
-            comb = None
-        if comb:
-            return [str(comb)] * max(1, op.get_num_results())
+    # @staticmethod
+    # def reduce_kinds(op, module):
+    #     # Prefer the direct helper.
+    #     try:
+    #         comb = op.get_reduce_combiner()
+    #     except Exception:
+    #         comb = None
+    #     if comb:
+    #         return [str(comb)] * max(1, op.get_num_results())
 
-        # Fallback: walk the reduce region to infer the combiner.
-        reg = op.get_region(0); target_rid = reg.id()
-        val_owner = {}
-        reduce_ret = None
+    #     # Fallback: walk the reduce region to infer the combiner.
+    #     reg = op.get_region(0); target_rid = reg.id()
+    #     val_owner = {}
+    #     reduce_ret = None
 
-        def visit(inner):
-            b = inner.get_block(); r = b.get_parent() if b is not None else None
-            if b is None:
-                return
-            while r:
-                if r.id() == target_rid:
-                    for i in range(inner.get_num_results()):
-                        v = inner.get_result(i)
-                        val_owner[int(v.id())] = inner.get_name()
-                    if inner.get_name().endswith("reduce.return"):
-                        nonlocal reduce_ret; reduce_ret = inner
-                    break
-                r = r.get_parent_region()
-        module.walk(visit)
+    #     def visit(inner):
+    #         b = inner.get_block(); r = b.get_parent() if b is not None else None
+    #         if b is None:
+    #             return
+    #         while r:
+    #             if r.id() == target_rid:
+    #                 for i in range(inner.get_num_results()):
+    #                     v = inner.get_result(i)
+    #                     val_owner[int(v.id())] = inner.get_name()
+    #                 if inner.get_name().endswith("reduce.return"):
+    #                     nonlocal reduce_ret; reduce_ret = inner
+    #                 break
+    #             r = r.get_parent_region()
+    #     module.walk(visit)
 
-        kinds = []
-        if reduce_ret:
-            MAP = {
-                "arith.addi":"sum","arith.addf":"sum",
-                "arith.maxsi":"max","arith.maxui":"max","arith.maximumf":"max","arith.maxnumf":"max",
-                "arith.minsi":"min","arith.minui":"min","arith.minimumf":"min","arith.minnumf":"min",
-                "arith.andi":"and","arith.ori":"or","arith.xori":"xor",
-            }
-            for i in range(reduce_ret.get_num_operands()):
-                vid = int(reduce_ret.get_operand(i).id())
-                kinds.append(MAP.get(val_owner.get(vid, ""), "custom"))
-        return kinds
+    #     kinds = []
+    #     if reduce_ret:
+    #         MAP = {
+    #             "arith.addi":"sum","arith.addf":"sum",
+    #             "arith.maxsi":"max","arith.maxui":"max","arith.maximumf":"max","arith.maxnumf":"max",
+    #             "arith.minsi":"min","arith.minui":"min","arith.minimumf":"min","arith.minnumf":"min",
+    #             "arith.andi":"and","arith.ori":"or","arith.xori":"xor",
+    #         }
+    #         for i in range(reduce_ret.get_num_operands()):
+    #             vid = int(reduce_ret.get_operand(i).id())
+    #             kinds.append(MAP.get(val_owner.get(vid, ""), "custom"))
+    #     return kinds
 
 
 # ----------------------------- Raiser ----------------------------------------
@@ -421,13 +421,13 @@ class Raiser:
             fn = MAP.get(opc, "atomic_add")
             ptr = self._get(op.get_operand(0))
             val = self._get(op.get_operand(1))
-            # # cast val to pointee type if we can infer it
-            # try:
-            #     pty = _dtype_expr_from_type_string(str(op.get_operand(0).get_type()))
-            #     if pty:
-            #         val = f"tl.cast({val}, {pty})"
-            # except Exception:
-            #     pass
+            # cast val to pointee type if we can infer it
+            try:
+                pty = _dtype_expr_from_type_string(str(op.get_operand(0).get_type()))
+                if pty:
+                    val = f"tl.cast({val}, {pty})"
+            except Exception:
+                pass
             return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
         R["tt.atomic_rmw"] = emit_atomic_rmw
 
@@ -516,9 +516,9 @@ class Raiser:
                 kind = op.get_reduce_combiner()
             except Exception:
                 kind = None
-            if not kind:
-                kinds = Attr.reduce_kinds(op, self.m)
-                kind = kinds[0] if kinds else "sum"
+            # if not kind:
+            #     kinds = Attr.reduce_kinds(op, self.m)
+            #     kind = kinds[0] if kinds else "sum"
             x = self._get(op.get_operand(0))
             return {
                 "sum": f"tl.sum({x}, axis={axis})",
