@@ -242,7 +242,7 @@ class Raiser:
 
     # ---- emission helpers
     def _arith(self, a: str, b: str, sym: str, fn: str) -> str:
-        return f"({a} {sym} {b})" if self.opts.infix_arith else f"tl.{fn}({a}, {b})"
+        return f"{a} {sym} {b}" if self.opts.infix_arith else f"tl.{fn}({a}, {b})"
 
     def _cast(self, x: str, dst_ty: mlir.type) -> str:
         dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
@@ -300,9 +300,9 @@ class Raiser:
 
         # --- integer division & remainder
         # MLIR divsi/remsi are trunc‑toward‑zero; Python `//`/`%` are floor‑based for negatives
-        R["arith.divsi"] = lambda op: f"({self._get(op.get_operand(0))} // {self._get(op.get_operand(1))})  # assumes non-negative"
+        R["arith.divsi"] = lambda op: f"{self._get(op.get_operand(0))} // {self._get(op.get_operand(1))}  # assumes non-negative"
         R["arith.divui"] = lambda op: self._arith(self._get(op.get_operand(0)), self._get(op.get_operand(1)), "//", "floordiv")
-        R["arith.remsi"] = lambda op: f"({self._get(op.get_operand(0))} %  {self._get(op.get_operand(1))})  # assumes non-negative"
+        R["arith.remsi"] = lambda op: f"{self._get(op.get_operand(0))} % {self._get(op.get_operand(1))}  # assumes non-negative"
         R["arith.remui"] = R["arith.remsi"]
 
         # --- casts
@@ -336,7 +336,7 @@ class Raiser:
                      "eq","ne","slt","sle","sgt","sge","ult","ule","ugt","uge")
             key = next((k for k in order if k in s), None)
             op_sym = table.get(key, "==")
-            return f"({a} {op_sym} {b})"
+            return f"{a} {op_sym} {b}"
         R["arith.cmpf"] = _emit_cmp_with_pred
         R["arith.cmpi"] = _emit_cmp_with_pred
 
@@ -491,7 +491,7 @@ class Raiser:
                 o = f"tl.cast({self._get(op.get_operand(i))}, tl.int64)"
                 if shp_txt: o = f"tl.broadcast_to({o}, {shp_txt})"
                 offs.append(o)
-            return base if not offs else f"({base} + {' + '.join(offs)})"
+            return base if not offs else f"{base} + {' + '.join(offs)}"
         R["tt.addptr"] = emit_addptr
 
 
@@ -502,7 +502,7 @@ class Raiser:
             shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
             if not shp: return x
             if _is_ptr_type(op.get_operand(0).get_type()) or _is_ptr_type(op.get_result(0).get_type()):
-                return f"({x} + tl.zeros({_fmt_shape(shp)}, dtype=tl.int64))"
+                return f"{x} + tl.zeros({_fmt_shape(shp)}, dtype=tl.int64)"
             return f"tl.broadcast_to({x}, {_fmt_shape(shp)})"
         R["tt.splat"] = emit_splat
 
@@ -522,7 +522,7 @@ class Raiser:
             b = self._get(op.get_operand(1))
             if op.get_num_operands() >= 3:
                 c = self._get(op.get_operand(2))
-                return f"(tl.dot({a}, {b}) + {c})"
+                return f"tl.dot({a}, {b}) + {c}"
             return f"tl.dot({a}, {b})"
         R["tt.dot"] = emit_dot
 
@@ -578,10 +578,11 @@ class Raiser:
 
         # --- return
         def emit_return(op: mlir.operation) -> Optional[str]:
-            if op.get_num_operands() == 0:
-                return "return"
-            vals = ", ".join(self._get(op.get_operand(i)) for i in range(op.get_num_operands()))
-            return f"return {vals}"
+            return
+            # if op.get_num_operands() == 0:
+            #     return None
+            # vals = ", ".join(self._get(op.get_operand(i)) for i in range(op.get_num_operands()))
+            # return f"return {vals}"
         R["tt.return"] = emit_return
 
         return R
@@ -631,7 +632,6 @@ class Raiser:
 
         self.lines.append("@triton.jit")
         self.lines.append(f"def {self.func_name}({', '.join(arg_names)}):")
-        self.lines.append("    # Raised from TTIR (best-effort).")
 
         # Walk & emit only operations belonging to the kernel entry region
         ops: List[mlir.operation] = []
