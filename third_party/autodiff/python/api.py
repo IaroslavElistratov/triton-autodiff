@@ -84,6 +84,20 @@ def run_mlir_pass(path):
       draw_dot(path, mode="bwd")
 
 
+def raise_to_triton_lang(ttir_path):
+  # Run raiser and write the resulting Triton code to raised.py in the same directory
+  out_dir = os.path.dirname(ttir_path)
+  os.makedirs(out_dir, exist_ok=True)
+  raise_py = os.path.join(dir, "third_party/autodiff/python/kernel_agent/tools/backward_naive/raise.py")
+  proc = subprocess.run([sys.executable, raise_py, ttir_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+  if proc.returncode != 0:
+    print(proc.stderr)
+    raise RuntimeError(f"raise.py failed on {ttir_path}")
+  with open(os.path.join(out_dir, "raised.py"), "w") as f:
+    f.write(proc.stdout)
+  return os.path.join(out_dir, "raised.py")
+
+
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
     def remove_constexpr(jit_fn, bwd_jit_fn, key):
@@ -231,6 +245,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         # 3) autodiff
         run_mlir_pass(f"generated/{dir_name}")
+
+        raise_to_triton_lang(f"generated/{dir_name}/out.ttir")
 
         # 4) create callable python fn for bwd
 
