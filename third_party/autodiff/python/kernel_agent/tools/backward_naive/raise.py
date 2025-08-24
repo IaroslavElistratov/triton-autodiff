@@ -704,8 +704,8 @@ def raise_from_file(ttir_path: str, *, func_name: Optional[str] = None, options:
 if __name__ == "__main__":
     # Adjust the path to your TTIR file if needed.
     print(raise_from_file(
-        # "/root/triton-autodiff/generated/1b763f2bf2/out.ttir",
-        "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/N_CTX/minimal.ttir",
+        "/root/triton-autodiff/generated/1b763f2bf2/out.ttir",
+        # "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/N_CTX/minimal.ttir",
         # "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/pointerness/minimal.ttir",
         # "/root/triton-autodiff/generated/repro/out.ttir",
         # "/root/triton-autodiff/third_party/autodiff/test/add-mul-div/generated/f7fc96a11c/out.ttir",
