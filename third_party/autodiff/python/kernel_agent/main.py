@@ -8,7 +8,7 @@ from .llm import MinimalLLMPatchProvider
 
 from .tools import (  # type: ignore
     naive_grad,
-    # gradient_check,
+    gradient_check,
     # benchmark,
     # profile,
     # get_user_dvice_info,
@@ -48,7 +48,7 @@ def main() -> None:
     out = agent.run(
         fwd_fp=args.file_path,
         naive_grad=naive_grad,
-        # gradient_check=gradient_check,
+        gradient_check=gradient_check,
         # benchmark=benchmark,
         # profile=profile,
         # todo:

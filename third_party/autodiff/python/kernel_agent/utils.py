@@ -1,7 +1,8 @@
 import os
 import queue
 import threading
-from typing import Any
+from typing import Any, Callable
+from triton.runtime.jit import JITFunction
 
 # def _norm_bench(x) -> dict[str, float]:
 #     """Normalize benchmark() result to {'throughput': float} if possible."""
@@ -33,11 +34,11 @@ from typing import Any
 
 
 
-def compile_kernel(file_path):
+def compile_kernel(file_path: str, return_ns:bool = False) -> Callable[..., Any]:
 
     # no need for extract_request -- instead make input file to be a python not json
 
-    def load_function_from_code(code: str) -> tuple[dict[str, Any], Any]:
+    def load_function_from_code(code: str) -> dict[str, Any]:
         """
         Execute the provided Python `code` and extract top-level Triton JITFunction.
         * executes code in an isolated namespace,
@@ -69,22 +70,28 @@ def compile_kernel(file_path):
 
     with open(file_path, "r", encoding="utf-8") as f:
         src = f.read()
+
+    # todo: use "mod = importlib.import_module(file_path)" instead of the below?
     code = compile(src, file_path, "exec")
+    ns = load_function_from_code(code)
 
-    local_ns = load_function_from_code(code)
-
+    setup_fn = ns.get("setup", None)
     try:
-        run_with_timeout(lambda: exec(setup, local_ns, local_ns), CODE_EXEC_TIMEOUT_S)
+        run_with_timeout(lambda: exec(setup_fn.__code__, ns, ns), CODE_EXEC_TIMEOUT_S)
     except Exception as e:
         raise RuntimeError(
             "Failed to execute `setup`. Ensure it creates CUDA tensors and launches the kernel once.\n"
             f"Setup error: {e}"
         ) from e
 
+    # if fn_name not in ns or not callable(ns[fn_name]):
+    #     raise RuntimeError(f"File {file_path} must define a callable `{fn_name}` function")
+
     # todo-now: use decorator to intercept CompiledKernel
     # todo: programatically pick top level kernel (to know which JitFunction to attatch the callback to). For now assume single JITFunction
-    return local_ns["compiled_kernel"]
-
+    if return_ns:
+        return ns["stub"], ns
+    return ns["stub"]
 
 
 

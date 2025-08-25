@@ -49,7 +49,12 @@ class MinimalLLMPatchProvider:
     def propose_patch(self, *, phase: str, target_file: str, naive_kernel: str,
                       kernel_snippet: str, grad_summary: str) -> str:
                     #   bench_summary: str, profile_hint: str) -> str:
-        system = "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. If 'kernel snippet' is empty, generate initial version of the backward kernel. If it's not empty, modify the current version to make it improve its performance."
+        system = (
+            "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. "
+            "Target file MUST contain a Python function `backward(*inputs, upstream)` returning a tuple of per-input gradients. "
+            "If 'kernel snippet' is empty, generate an initial correct backward kernel with that signature. "
+            "If not empty, modify it to fix correctness or improve performance without changing the signature."
+        )
         user = f'''{_APPLY_PATCH_MD_SPEC}
 
 Phase: {phase}

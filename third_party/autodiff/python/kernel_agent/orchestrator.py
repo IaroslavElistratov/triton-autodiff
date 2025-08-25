@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os, re
 
+import torch
+
 from gpt_oss.tools.apply_patch import apply_patch
 from .utils import compile_kernel, _read_snippet
 
@@ -30,9 +32,9 @@ class KernelOptimizer:
         self.patcher = patcher
 
     def run(self, *,
-            fwd_fp,
+            fwd_fp: str,
             naive_grad,
-            # gradient_check,
+            gradient_check,
             # benchmark,
             # profile,
             get_user_dvice_info,
@@ -42,7 +44,12 @@ class KernelOptimizer:
             raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
         try:
-            fwd_kernel = compile_kernel(fwd_fp)
+            # naive_grad expects a compiled Triton kernel object; users should set `compiled_kernel` in setup()
+            fwd_stub, fwd_ns = compile_kernel(fwd_fp, return_ns=True)
+            fwd_kernel = fwd_ns["compiled_kernel"]
+            # raise RuntimeError("Forward file must define `forward(*inputs)` or `stub(*inputs)` for gradcheck inputs")
+            # raise RuntimeError("Unable to infer inputs for gradient_check; provide `make_args` in forward file")
+
         except Exception as e:
             raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
 
@@ -68,15 +75,20 @@ class KernelOptimizer:
             # todo-high: lift differenciated TTIR to triton-lang
             # then can just use output of my system directly as the initial version of the backward kernel to be optimized
             # (removing patcher.naive_autodiff filed, instead just using output of trtion-autodiff as patcher.kernel_snippet)
-            # and avoiding this special casing
+            # and avoiding this special casing, and avoiding this special casing, and will have a nice interpretation of "seeding a problem with a draft"
             if it > 0:
                 # 1) correctness gate
-                bwd_kernel = compile_kernel(bwd_fp)
+                bwd_stub = compile_kernel(bwd_fp)
+
+                # todo: hide in a helper
+                make_args = fwd_ns["make_args"]
+                args, kwargs = make_args(fwd_ns["SWEEP"][0])
+                # upstream = tuple(torch.randn_like(out) for out in (fwd_stub(*args, **kwargs),))
 
                 ok, stats = gradient_check(
-                    forward_fn=fwd_kernel,
-                    backward_fn=lambda *inp_up: bwd_kernel(*inp_up),
-                    inputs=(A, B),
+                    forward_fn=fwd_stub,
+                    backward_fn=bwd_stub,
+                    inputs=args,
                     mode="coord",
                 )
 
