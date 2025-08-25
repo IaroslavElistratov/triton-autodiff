@@ -5,11 +5,7 @@ import os, re
 import torch
 
 from gpt_oss.tools.apply_patch import apply_patch
-from .utils import compile_kernel, _read_snippet
-
-
-from ..api import raise_to_triton_lang, load_raised_jit
-from trtion_autodiff.api import raise_to_triton_lang, load_raised_jit
+from .utils import _read_snippet, compile_kernel as create_op
 
 
 
@@ -17,7 +13,7 @@ from trtion_autodiff.api import raise_to_triton_lang, load_raised_jit
 class Config:
     max_iters: int = 6
     patience: int = 2
-    min_rel_improvement: float = 0.02  # require >= +2% throughput to accept
+    min_rel_improvement: float = 0.10   # require >= +10% throughput to accept
     snippet_max_lines: int = 120        # bound context shown to the LLM
 
 
@@ -52,8 +48,6 @@ class KernelOptimizer:
         # except Exception as e:
         #     raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
 
-        # todo: rm'ed -- compile_kernel, naive_grad
-
         # TTIR from autodiff then raise to Python once; use as seed and target
         # using output of triton-autograd directly as the initial version of the backward kernel
         # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodif instead just using output of trtion-autodiff as patcher.kernel_snippet)
@@ -62,13 +56,13 @@ class KernelOptimizer:
 
         # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
         # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
-        op, bwd_fp = create_op(fwd_fp)
+        op, bwd_fp, ns = create_op(fwd_fp)
 
 
         # best_metrics: dict[str, float] | None = None
         device = get_user_dvice_info()
         best_path = bwd_fp
-        non_improve = 0
+        # non_improve = 0
 
         # optimization loop
         for it in range(self.cfg.max_iters):
@@ -77,12 +71,12 @@ class KernelOptimizer:
             if it > 0:
                 op = create_op(fwd_fp, overwrite=bwd_fp)
 
-            # todo: hide in a helper
-            make_args = fwd_ns["make_args"]
-            args, kwargs = make_args(fwd_ns["SWEEP"][0])
+            # todo-low: hide in a helper
+            make_args = ns["make_args"]
+            args, kwargs = make_args(ns["SWEEP"][0])
             # upstream = tuple(torch.randn_like(out) for out in (fwd_stub(*args, **kwargs),))
 
-            # todo: make gradient_check expect op
+            # todo-now: make gradient_check expect op; rewrite gradient_check to just 1) feed inputs and 2) call .backward
             ok, stats = gradient_check(
                 op=op,
                 inputs=args,
@@ -92,6 +86,7 @@ class KernelOptimizer:
             if not ok:
                 patch = self.patcher.propose_patch(
                     phase="fix",
+                    # todo: pass fwd kernel to the model as well, for more context
                     target_file=bwd_fp,
                     kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
                     grad_summary=stats,
@@ -124,12 +119,10 @@ class KernelOptimizer:
             #         break  # plateau
 
             # 3) ask for an optimization patch and apply
-            kernel_snippet = _read_snippet(bwd_fp, self.cfg.snippet_max_lines) if os.path.isfile(bwd_fp) else ""
-            phase = "optimize" if kernel_snippet else "init"
             patch = self.patcher.propose_patch(
-                phase=phase,
+                phase="optimize",
                 target_file=bwd_fp,
-                kernel_snippet=kernel_snippet, # _read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
                 grad_summary="OK",
                 # bench_summary=_summ_bench(best_metrics),
                 # profile_hint=prof_hint,

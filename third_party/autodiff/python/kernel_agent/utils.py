@@ -34,7 +34,7 @@ from triton.runtime.jit import JITFunction
 
 
 
-def compile_kernel(file_path: str):
+def compile_kernel(file_path, overwrite_fp):
 
     # no need for extract_request -- instead make input file to be a python not json
 
@@ -75,6 +75,8 @@ def compile_kernel(file_path: str):
     code = compile(src, file_path, "exec")
     ns = load_function_from_code(code)
 
+    # todo-now: from inside current fn, add "overwrite_fp" argument to my autograd function
+
     setup_fn = ns.get("setup", None)
     try:
         # Execute the function body in the same namespace so it can populate
@@ -88,7 +90,7 @@ def compile_kernel(file_path: str):
             f"Setup error: {e}"
         ) from e
 
-    # now "kernel" is my torch.autgorad fucntion
+    # "kernel" here is my torch.autgorad fucntion
     return ns["kernel"], ns
 
 
