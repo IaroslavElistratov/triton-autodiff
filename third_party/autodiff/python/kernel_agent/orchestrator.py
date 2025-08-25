@@ -48,25 +48,21 @@ class KernelOptimizer:
         if not os.path.isfile(fwd_fp):
             raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
-        try:
-            # naive_grad expects a compiled Triton kernel object; users should set `compiled_kernel` in setup()
-            fwd_stub, fwd_ns = compile_kernel(fwd_fp, return_ns=True)
-            # todo-now: use hook
-            fwd_kernel = fwd_ns["compiled_kernel"]
-            # raise RuntimeError("Forward file must define `forward(*inputs)` or `stub(*inputs)` for gradcheck inputs")
-            # raise RuntimeError("Unable to infer inputs for gradient_check; provide `make_args` in forward file")
+        # try:
+        # except Exception as e:
+        #     raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
 
-        except Exception as e:
-            raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
+        # todo: rm'ed -- compile_kernel, naive_grad
 
-
+        # TTIR from autodiff then raise to Python once; use as seed and target
         # using output of triton-autograd directly as the initial version of the backward kernel
         # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodif instead just using output of trtion-autodiff as patcher.kernel_snippet)
 
-        # TTIR from autodiff then raise to Python once; use as seed and target
-        bwd_ttir_fp = naive_grad(fwd_kernel)
-        raised_py_path = raise_to_triton_lang(bwd_ttir_fp)
-        bwd_kernel = load_raised_jit(raised_py_path)    # JITFunction
+        # todo-high: support overwritting stub
+
+        # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
+        # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
+        op, bwd_fp = create_op(fwd_fp)
 
 
         # best_metrics: dict[str, float] | None = None
@@ -74,21 +70,21 @@ class KernelOptimizer:
         best_path = bwd_fp
         non_improve = 0
 
-
         # optimization loop
         for it in range(self.cfg.max_iters):
 
             # 1) correctness gate
-            bwd_stub = compile_kernel(bwd_fp)
+            if it > 0:
+                op = create_op(fwd_fp, overwrite=bwd_fp)
 
             # todo: hide in a helper
             make_args = fwd_ns["make_args"]
             args, kwargs = make_args(fwd_ns["SWEEP"][0])
             # upstream = tuple(torch.randn_like(out) for out in (fwd_stub(*args, **kwargs),))
 
+            # todo: make gradient_check expect op
             ok, stats = gradient_check(
-                forward_fn=fwd_stub,
-                backward_fn=bwd_stub,
+                op=op,
                 inputs=args,
                 mode="coord",
             )

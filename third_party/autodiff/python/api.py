@@ -321,16 +321,20 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
           f.write(fwd_compiled_kernel.asm['ttir'])
 
         # 3) autodiff
-        run_mlir_pass(f"generated/{dir_name}")
+
+        if not fwd_kernel.overwrite_fp:
+            run_mlir_pass(f"generated/{dir_name}")
+            bwd_fp = f"generated/{dir_name}/out.ttir"
+        else:
+            # if overwrite_fp is provided then raise the kernel stored in the provided file
+            bwd_fp = fwd_kernel.overwrite_fp
 
         # 4) create callable python fn for bwd
 
         if USE_RAISED:
-            # require raised Triton-lang kernel; fail explicitly on errors
-            raised_py_path = raise_to_triton_lang(f"generated/{dir_name}/out.ttir")
+            raised_py_path = raise_to_triton_lang(bwd_fp)
             bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
             print("bwd_jit_fn._raised", bwd_jit_fn._raised)
-
 
             # comment:
             # for this path, don't need to attach any entry into the cache of the backward_jit_fucntion
@@ -338,7 +342,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # the pytohn JITFunction object (bwd_kerne._raised) from the wrap_bwd_kernel (so no populating of bwd jut fucntion caches is needed)
 
         else:
-
 
             # CompiledKernel
             bwd_compiled_kernel = compile_kernel(
@@ -625,7 +628,7 @@ def create_new_jitfn(jit_func):
 # todo-low: can idxs_buffers determine automatically:
 #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
 #   - or, in mlir pass output idx of all inputs which are used in store nodes
-def autodiff(idxs_buffers):
+def autodiff(idxs_buffers, overwrite_fp=None):
 
     def inner(fwd_kernel):
 
@@ -636,6 +639,13 @@ def autodiff(idxs_buffers):
             idxs_buffers = (idxs_buffers, )
 
         bwd_kernel = create_new_jitfn(fwd_kernel)
+
+        # optionally, allows to overwrite backward kernel with a kernel stored at the provided file pointer
+        # if overwrite_fp=None, generates a new backward kernel and uses it
+        # else just "load_raised_jit" from that path
+        fwd_kernel.overwrite_fp = overwrite_fp
+        if overwrite_fp:
+            assert overwrite_fp.endswith(".py"), "backward overwrite expects a triton-lang (not ttir) kernel"
 
         # allows to associate a bwd JITFcuntion with this specific fwdKernel
         # so that, from inside the compile hook (which will be triggered on the fwd JITFunciton)

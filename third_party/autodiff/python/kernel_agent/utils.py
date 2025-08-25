@@ -34,7 +34,7 @@ from triton.runtime.jit import JITFunction
 
 
 
-def compile_kernel(file_path: str, return_ns:bool = False) -> Callable[..., Any]:
+def compile_kernel(file_path: str):
 
     # no need for extract_request -- instead make input file to be a python not json
 
@@ -79,6 +79,8 @@ def compile_kernel(file_path: str, return_ns:bool = False) -> Callable[..., Any]
     try:
         # Execute the function body in the same namespace so it can populate
         # names like `compiled_kernel` directly into `ns`.
+
+        # comment: this triggers the callback
         run_with_timeout(lambda: exec(setup_fn.__code__, ns, ns), CODE_EXEC_TIMEOUT_S)
     except Exception as e:
         raise RuntimeError(
@@ -86,14 +88,8 @@ def compile_kernel(file_path: str, return_ns:bool = False) -> Callable[..., Any]
             f"Setup error: {e}"
         ) from e
 
-    # if fn_name not in ns or not callable(ns[fn_name]):
-    #     raise RuntimeError(f"File {file_path} must define a callable `{fn_name}` function")
-
-    # todo-now: use decorator to intercept CompiledKernel
-    # todo: programatically pick top level kernel (to know which JitFunction to attatch the callback to). For now assume single JITFunction
-    if return_ns:
-        return ns["stub"], ns
-    return ns["stub"]
+    # now "kernel" is my torch.autgorad fucntion
+    return ns["kernel"], ns
 
 
 
