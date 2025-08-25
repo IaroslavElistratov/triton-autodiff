@@ -29,63 +29,116 @@ dir = os.getenv("TRITON_AUTODIFF_DIR")
 if dir is None:
     raise ValueError("Please specify TRITON_AUTODIFF_DIR, see README.")
 
-# todo: don't hardcode
-tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
+# timeout for triton-opt invocations (seconds)
+SUBPROCESS_TIMEOUT_S = float(os.environ.get("TRITON_OPT_TIMEOUT_S", "60"))
+
+
+def _locate_triton_opt(base_dir: Optional[str]) -> str:
+    env_path = os.getenv("TRITON_OPT_BIN")
+    if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+        return env_path
+    if base_dir:
+        search_root = os.path.join(base_dir, "build")
+        if os.path.isdir(search_root):
+            for root, _dirs, files in os.walk(search_root):
+                if "triton-opt" in files:
+                    candidate = os.path.join(root, "triton-opt")
+                    if os.access(candidate, os.X_OK):
+                        return candidate
+    which_path = shutil.which("triton-opt")
+    if which_path:
+        return which_path
+    raise FileNotFoundError("Could not find `triton-opt`. Set TRITON_OPT_BIN or add to PATH.")
+
+tool = _locate_triton_opt(dir)
+
+# # Optional hint to your local triton-autodiff checkout
+# _BASE_DIR = os.getenv("TRITON_AUTODIFF_DIR")
+
+# # Use the robust locator everywhere below
+# tool = _locate_triton_opt(_BASE_DIR)
+
+# tool = f"{dir}/build/cmake.linux-x86_64-cpython-3.12/bin/triton-opt"
 
 
 def run_mlir_pass(path):
 
-  os.makedirs(path, exist_ok=True)
+    os.makedirs(path, exist_ok=True)
 
-  # produce bwd ttir
-  with open(f"{path}/out.ttir", "w") as f:
-    subprocess.run([tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
+    inp_path = f"{path}/inp.ttir"
+    out_path = f"{path}/out.ttir"
 
-  if VERBOSE >= 1:
+    # produce bwd ttir
+    with open(out_path, "w") as f_out:
+        try:
+            subprocess.run(
+                [tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", inp_path],
+                stdout=f_out,
+                stderr=subprocess.DEVNULL,  # suppress verbose compiler diagnostics
+                check=True,                 # raise on failure; we map to a friendly message
+                timeout=SUBPROCESS_TIMEOUT_S,
+            )
+        except subprocess.CalledProcessError:
+            raise RuntimeError(
+                "triton-opt failed while generating the backward TTIR.\n"
+                "Hint: Check that your kernel has static loop bounds, shapes line up, and dtypes are supported."
+            )
+
     # optionally, produce readable fwd ttir
+    if VERBOSE >= 1:
+        # ugly, needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
+        # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix"
+        # on it and write to the same files to avoid creating redundant files
+        with open(inp_path, "r+") as f_out:
+            _ = f_out.read()         # Read existing content
+            f_out.seek(0)            # Move cursor to the beginning
+            try:
+                # Overwrite from the start
+                subprocess.run(
+                    [tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", inp_path],
+                    stdout=f_out,
+                    stderr=subprocess.DEVNULL,  # suppress verbose diagnostics
+                    check=True,
+                    timeout=SUBPROCESS_TIMEOUT_S,
+                )
+                f_out.truncate()               # Remove remaining old content
+            except subprocess.CalledProcessError:
+                raise RuntimeError("triton-opt failed while pretty-printing the forward TTIR.")
 
-    # ugly, needed bc fwd.py files create out.ttir files with default SSA names (%1, %2, ...)
-    # and with location info (containing variable names). Here I ran "--mlir-use-nameloc-as-prefix"
-    # on it and write to the same files to avoid creating redundant files
-    with open(f"{path}/inp.ttir", "r+") as f:
-        content = f.read()         # Read existing content
-        f.seek(0)                  # Move cursor to the beginning
-        # Overwrite from the start
-        subprocess.run([tool, "--mlir-use-nameloc-as-prefix", "--mlir-print-debuginfo", f"{path}/inp.ttir"], stdout=f)
-        f.truncate()               # Remove remaining old content
 
-    if VERBOSE == 2:
 
-      def draw_dot(path, mode):
-        assert mode in ["fwd", "bwd"]
+    # if VERBOSE == 2:
 
-        vis_dir = path + "/vis"
-        os.makedirs(vis_dir, exist_ok=True)
+    #     def draw_dot(path, mode):
+    #     assert mode in ["fwd", "bwd"]
 
-        # a. optionally, produce vis dot
-        with open(f"{vis_dir}/{mode}.dot", "w") as f:
-          ttir_path = f"{path}/inp.ttir" if mode == "fwd" else f"{path}/out.ttir"
-          subprocess.run([tool, "-mlir-use-nameloc-as-prefix", "--view-op-graph", ttir_path], stderr=f,
-                        # suppress stdout, otherwise prints _inp_readable again
-                        stdout=subprocess.DEVNULL)
+    #     vis_dir = path + "/vis"
+    #     os.makedirs(vis_dir, exist_ok=True)
 
-        with open(f"{vis_dir}/{mode}.svg", "w") as f:
-          subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}.dot"], stdout=f)
+    #     # a. optionally, produce vis dot
+    #     with open(f"{vis_dir}/{mode}.dot", "w") as f:
+    #         ttir_path = f"{path}/inp.ttir" if mode == "fwd" else f"{path}/out.ttir"
+    #         subprocess.run([tool, "-mlir-use-nameloc-as-prefix", "--view-op-graph", ttir_path], stderr=f,
+    #                     # suppress stdout, otherwise prints _inp_readable again
+    #                     stdout=subprocess.DEVNULL)
 
-        # b. optionally cluster nodes
-        subprocess.run(["python", "cluster_dot.py", "--strict", f"{vis_dir}/{mode}.dot", f"{vis_dir}/{mode}_grouped.dot"])
+    #     with open(f"{vis_dir}/{mode}.svg", "w") as f:
+    #         subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}.dot"], stdout=f)
 
-        with open(f"{vis_dir}/{mode}_grouped.svg", "w") as f:
-          subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}_grouped.dot"], stdout=f)
+    #     # b. optionally cluster nodes
+    #     subprocess.run(["python", "cluster_dot.py", "--strict", f"{vis_dir}/{mode}.dot", f"{vis_dir}/{mode}_grouped.dot"])
 
-        # os.remove(f"{vis_dir}/{mode}.dot")
-        # os.remove(f"{vis_dir}/{mode}_grouped.dot")
+    #     with open(f"{vis_dir}/{mode}_grouped.svg", "w") as f:
+    #         subprocess.run(["dot", "-Tsvg", f"{vis_dir}/{mode}_grouped.dot"], stdout=f)
 
-      # optionally, produce vis dot
-      draw_dot(path, mode="fwd")
+    #     # os.remove(f"{vis_dir}/{mode}.dot")
+    #     # os.remove(f"{vis_dir}/{mode}_grouped.dot")
 
-      # optionally, produce vis dot
-      draw_dot(path, mode="bwd")
+    #     # optionally, produce vis dot
+    #     draw_dot(path, mode="fwd")
+
+    #     # optionally, produce vis dot
+    #     draw_dot(path, mode="bwd")
 
 
 def raise_to_triton_lang(ttir_path):
