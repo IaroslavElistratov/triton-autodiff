@@ -75,15 +75,25 @@ def compile_kernel(file_path, overwrite_fp):
     code = compile(src, file_path, "exec")
     ns = load_function_from_code(code)
 
-    # todo-now: from inside current fn, add "overwrite_fp" argument to my autograd function
-
     setup_fn = ns.get("setup", None)
     try:
-        # Execute the function body in the same namespace so it can populate
-        # names like `compiled_kernel` directly into `ns`.
+
+        # this adds the "overwrite_fp" argument to my autograd function
+        # so that the hook knows to use the backward from "overwrite_fp",
+        # and not the backward created by my mlir pass
+        def _exec_setup():
+            if overwrite_fp:
+                from third_party.autodiff.python.api import autodiff_overwrite_fp
+                with autodiff_overwrite_fp(overwrite_fp):
+                    # execute the function body in the same namespace so it can populate
+                    # names like `compiled_kernel` directly into `ns`
+                    exec(setup_fn.__code__, ns, ns)
+            else:
+                exec(setup_fn.__code__, ns, ns)
 
         # comment: this triggers the callback
-        run_with_timeout(lambda: exec(setup_fn.__code__, ns, ns), CODE_EXEC_TIMEOUT_S)
+        run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
+
     except Exception as e:
         raise RuntimeError(
             "Failed to execute `setup`. Ensure it creates CUDA tensors and launches the kernel once.\n"

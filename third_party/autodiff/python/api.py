@@ -5,6 +5,10 @@ import hashlib
 import inspect
 import subprocess
 from functools import partial
+import shutil
+from typing import Optional
+import contextvars
+import contextlib
 
 import torch
 torch.manual_seed(0)
@@ -174,6 +178,18 @@ def load_raised_jit(raised_py_path):
       raise RuntimeError(f"No @triton.jit kernel found in {raised_py_path}")
   return candidates[0]
 
+# Context for per-call override of backward kernel path
+_AD_OVERWRITE_FP = contextvars.ContextVar("ad_overwrite_fp", default=None)
+
+@contextlib.contextmanager
+def autodiff_overwrite_fp(path: str):
+  token = _AD_OVERWRITE_FP.set(path)
+  assert str(path).endswith(".py"), "backward overwrite expects a triton-lang (not ttir) kernel"
+  try:
+    yield
+  finally:
+    _AD_OVERWRITE_FP.reset(token)
+
 
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
@@ -322,17 +338,24 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         # 3) autodiff
 
-        if not fwd_kernel.overwrite_fp:
+        # optionally override via context manager;
+        # this is runtime overwrite
+        raised_py_path = _AD_OVERWRITE_FP.get()
+
+        # run the mlir pass to generate TTIR,
+        # and then raise that ttir to triton-lang
+        # (via raise_to_triton_lang below)
+        if not raised_py_path:
             run_mlir_pass(f"generated/{dir_name}")
             bwd_fp = f"generated/{dir_name}/out.ttir"
-        else:
-            # if overwrite_fp is provided then raise the kernel stored in the provided file
-            bwd_fp = fwd_kernel.overwrite_fp
 
         # 4) create callable python fn for bwd
 
         if USE_RAISED:
-            raised_py_path = raise_to_triton_lang(bwd_fp)
+
+            if not raised_py_path:
+                raised_py_path = raise_to_triton_lang(bwd_fp)
+            # if overwrite_fp is provided then raise the kernel stored in the provided file
             bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
             print("bwd_jit_fn._raised", bwd_jit_fn._raised)
 
@@ -342,6 +365,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # the pytohn JITFunction object (bwd_kerne._raised) from the wrap_bwd_kernel (so no populating of bwd jut fucntion caches is needed)
 
         else:
+
+            # runtime override was provided but USE_RAISED is False, fail early with a clear message
+            if raised_py_path:
+                raise RuntimeError("autodiff_overwrite_fp provided but USE_RAISED=False; enable USE_RAISED to load a .py override")
 
             # CompiledKernel
             bwd_compiled_kernel = compile_kernel(
@@ -585,15 +612,6 @@ def helper(spec, kernels, idxs):
                 # print("[_Helper.apply] args", args)
                 print("[_Helper.apply] kwargs", kwargs)
                 print("[_Helper.apply] grid", cls.grid)
-
-            # intercept special autodiff kwargs without polluting the user kernel signature
-            overwrite_fp_runtime = kwargs.pop("__ad_overwrite_fp", None)
-            if overwrite_fp_runtime:
-                assert overwrite_fp_runtime.endswith(".py"), "backward overwrite expects a triton-lang (not ttir) kernel"
-            if overwrite_fp_runtime is not None:
-                # Per-call override for backward kernel source
-                kernels[0].overwrite_fp = overwrite_fp_runtime
-
             bound = target_sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
             # fixed positional order for c++ apply
@@ -637,7 +655,7 @@ def create_new_jitfn(jit_func):
 # todo-low: can idxs_buffers determine automatically:
 #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
 #   - or, in mlir pass output idx of all inputs which are used in store nodes
-def autodiff(idxs_buffers, overwrite_fp=None):
+def autodiff(idxs_buffers): # , overwrite_fp=None
 
     def inner(fwd_kernel):
 
@@ -652,9 +670,11 @@ def autodiff(idxs_buffers, overwrite_fp=None):
         # optionally, allows to overwrite backward kernel with a kernel stored at the provided file pointer
         # if overwrite_fp=None, generates a new backward kernel and uses it
         # else just "load_raised_jit" from that path
-        fwd_kernel.overwrite_fp = overwrite_fp
-        if overwrite_fp:
-            assert overwrite_fp.endswith(".py"), "backward overwrite expects a triton-lang (not ttir) kernel"
+        #
+        # not setting it here becuase it's not user who sets it but rather I do it,
+        # and execution-order wise, I do it after the user facing autodiff function has ran
+        # so no use to set it here
+        # fwd_kernel.overwrite_fp = overwrite_fp
 
         # allows to associate a bwd JITFcuntion with this specific fwdKernel
         # so that, from inside the compile hook (which will be triggered on the fwd JITFunciton)
