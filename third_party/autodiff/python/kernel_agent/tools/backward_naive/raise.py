@@ -74,6 +74,12 @@ def _typed_zero(dst_ty: mlir.type) -> str:
     return "0"
 
 
+# --- small kwarg builder (avoids None/empty values) ---
+def _kw_items(*pairs):
+    """Return ['k=v', ...] only for non-empty values. Values should be preformatted strings."""
+    return [f"{k}={v}" for k, v in pairs if v not in (None, "", [])]
+
+
 # ----------------------------- Attr helpers ----------------------------------
 
 def _text_attr(op, name: str) -> Optional[str]:
@@ -321,10 +327,59 @@ class Raiser:
         # --- select (ternary)
         R["arith.select"] = lambda op: f"tl.where({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))}, {self._get(op.get_operand(2))})"
 
-        # --- compares with predicate decoding via get_attr_text("predicate")
+        # --- compares with robust predicate extraction
+        # Decode cmp predicates robustly to avoid silently generating wrong masks.
+        # 1) Prefer the symbolic 'predicate' attribute (e.g., #arith.cmpipred<slt>),
+        #    returning the token inside <>.
+        # 2) If the attribute is numeric-coded (e.g., "2 : i64") or otherwise non-symbolic,
+        #    ignore it and parse the textual op ("arith.cmpi slt, %a, %b : ...").
+        # 3) As a last resort for integer cmps, map numeric codes to tokens (2 -> slt, ...).
+        # Never default to '=='. The previous behavior mis-parsed '<' as '=='
+        # and produced always-false masks like 'offsets == N', which zeroed grads.
+        def _extract_cmp_pred(op: mlir.operation) -> Optional[str]:
+            # 1) Prefer explicit 'predicate' attribute
+            attr_txt = None
+            try:
+                attr_txt = op.get_attr_text("predicate")
+                if attr_txt:
+                    s = str(attr_txt).strip().lower()
+                    # Handles enum prints like "#arith.cmpipred<slt>"
+                    m = re.search(r"<\s*([a-z]+)\s*>", s)
+                    if m:
+                        return m.group(1)
+                    # If it's already a bare predicate token like "slt"
+                    if re.fullmatch(r"[a-z]+", s):
+                        return s
+                    # If numeric-coded like "2 : i64" or "2", don't trust it; fall back to textual op parse
+            except Exception:
+                attr_txt = None
+            # 2) Fallback: parse generic print, e.g.: "arith.cmpi slt, %a, %b : ..."
+            txt = op.str_nodebug().lower()
+            m = re.search(r"cmp[fi]\s+([a-z]+)\s*,", txt)
+            if m:
+                return m.group(1)
+            # 3) Last resort: decode numeric-coded predicate for integer cmps
+            try:
+                s = str(attr_txt).strip().lower() if attr_txt else ""
+                mnum = re.fullmatch(r"\s*(-?\d+)\s*(?::\s*i\d+)?\s*", s)
+                if mnum:
+                    code = int(mnum.group(1))
+                    name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
+                    if name.endswith("arith.cmpi") or name.endswith("cmpi") or "arith.cmpi" in name:
+                        int_map = {
+                            0: "eq", 1: "ne", 2: "slt", 3: "sle",
+                            4: "sgt", 5: "sge", 6: "ult", 7: "ule",
+                            8: "ugt", 9: "uge",
+                        }
+                        return int_map.get(code)
+            except Exception:
+                pass
+            return None
+
         def _emit_cmp_with_pred(op: mlir.operation) -> str:
-            a = self._get(op.get_operand(0)); b = self._get(op.get_operand(1))
-            s = (_text_attr(op, "predicate") or op.str_nodebug()).lower()
+            a = self._get(op.get_operand(0))
+            b = self._get(op.get_operand(1))
+            pred = _extract_cmp_pred(op)
             table = {
                 "eq":"==","oeq":"==","ueq":"==",
                 "ne":"!=","one":"!=","une":"!=",
@@ -333,13 +388,13 @@ class Raiser:
                 "sgt":">","ugt":">","ogt":">",
                 "sge":">=","uge":">=","oge":">=",
             }
-            order = ("oeq","ueq","one","une","olt","ole","ogt","oge",
-                     "eq","ne","slt","sle","sgt","sge","ult","ule","ugt","uge")
-            key = next((k for k in order if k in s), None)
-            op_sym = table.get(key, "==")
-            return f"{a} {op_sym} {b}"
-        R["arith.cmpf"] = _emit_cmp_with_pred
+            # Fail loudly on unknown preds to avoid silently emitting incorrect equality.
+            if pred not in table:
+                raise RuntimeError(f"Unsupported/unknown cmp predicate: {pred} in {op.str_nodebug()}")
+            return f"{a} {table[pred]} {b}"
+
         R["arith.cmpi"] = _emit_cmp_with_pred
+        R["arith.cmpf"] = _emit_cmp_with_pred
 
         # --- math unary
         R["math.cos"]   = lambda op: f"tl.cos({self._get(op.get_operand(0))})"
@@ -360,26 +415,30 @@ class Raiser:
         R["tt.get_num_programs"] = lambda op: f"tl.num_programs(axis={max(0, min(2, Attr.axis(op, 0)))})"
 
         # --- memory: load/store with cache/evict/padding/boundary_check
+        # Keep masked-load semantics safe by injecting a typed zero 'other='
+        # when a mask is provided without an explicit 'other'. This prevents
+        # garbage reads under false masks and mirrors TTIR semantics.
         def emit_load(op: mlir.operation) -> str:
-            ptr = self._get(op.get_operand(0))
-            args: List[str] = [f"{ptr}"]
-            if op.get_num_operands() >= 2:
-                args.append(f"mask={self._get(op.get_operand(1))}")
+            ptr  = self._get(op.get_operand(0))
+            mask = self._get(op.get_operand(1)) if op.get_num_operands() >= 2 else None
             if op.get_num_operands() >= 3:
-                args.append(f"other={self._get(op.get_operand(2))}")
-            bc = Attr.boundary_ck(op)
+                other = self._get(op.get_operand(2))
+            else:
+                # masked load with no explicit 'other' => inject typed zero (TTIR semantics)
+                other = _typed_zero(op.get_result(0).get_type()) if mask is not None else None
+
+            # optional attrs
+            bc  = Attr.boundary_ck(op)
             pad = Attr.padding_option(op)
-            cm = Attr.cache_modifier(op)
-            ev = Attr.eviction_policy(op)
-            if bc:
-                args.append(f"boundary_check={tuple(bc)}")
-            if pad:
-                args.append(f"padding_option='{pad}'")
-            if cm:
-                args.append(f"cache_modifier='{cm}'")
-            if ev:
-                args.append(f"eviction_policy='{ev}'")
-            return f"tl.load({', '.join(args)})"
+            cm  = Attr.cache_modifier(op)
+            ev  = Attr.eviction_policy(op)
+
+            kws = _kw_items(("mask", mask), ("other", other))
+            if bc:  kws.append(f"boundary_check={tuple(bc)}")
+            if pad: kws.append(f"padding_option='{pad}'")
+            if cm:  kws.append(f"cache_modifier='{cm}'")
+            if ev:  kws.append(f"eviction_policy='{ev}'")
+            return f"tl.load({ptr}{', ' if kws else ''}{', '.join(kws)})"
         R["tt.load"] = emit_load
 
         # tt.store: shape-match value to pointer; keep pointer untouched
@@ -421,12 +480,16 @@ class Raiser:
                         return toks[-1].lower()
             return fallback
 
+        # Always forward the TTIR mask to atomics. Previously, some raised variants
+        # emitted mask=None even when TTIR had a mask, which broke partial tiles/multi-program
+        # launches and led to missing gradient updates. Also cast the value to the
+        # pointee type when known to match Triton expectations.
         def emit_atomic_rmw(op: mlir.operation) -> str:
+            # op/sem/scope decoding
             opc = _enum_from_attrs(op, ["op", "operation", "atomic_op"], None)
             sem = _enum_from_attrs(op, ["sem", "semantics", "memory_semantics", "ordering"], "relaxed")
             scope = _enum_from_attrs(op, ["scope", "mem_scope", "memory_scope"], "gpu")
             if opc is None:
-                # Fallback: parse generic print
                 txt = op.str_nodebug()
                 m = re.search(r"atomic_rmw\s+([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)", txt)
                 opc, sem, scope = (m.group(1), m.group(2), m.group(3)) if m else ("add","relaxed","gpu")
@@ -440,16 +503,22 @@ class Raiser:
                 "xchg":"atomic_xchg", "exchange":"atomic_xchg",
             }
             fn = MAP.get(opc, "atomic_add")
+
             ptr = self._get(op.get_operand(0))
             val = self._get(op.get_operand(1))
-            # cast val to pointee type if we can infer it
+            # cast to pointee type when known
             try:
                 pty = _dtype_expr_from_type_string(str(op.get_operand(0).get_type()))
                 if pty:
                     val = f"tl.cast({val}, {pty})"
             except Exception:
                 pass
-            return f"tl.{fn}({ptr}, {val}, mask=None, sem='{sem}', scope='{scope}')"
+
+            mask_kw = "None"
+            if op.get_num_operands() >= 3:
+                mask_kw = self._get(op.get_operand(2))
+
+            return f"tl.{fn}({ptr}, {val}, mask={mask_kw}, sem='{sem}', scope='{scope}')"
         R["tt.atomic_rmw"] = emit_atomic_rmw
 
         # --- simple shape ops
