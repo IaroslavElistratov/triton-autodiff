@@ -18,6 +18,10 @@ from triton.compiler import compile as compile_kernel
 from triton.backends.compiler import GPUTarget
 
 
+# True: raises backward TTIR to trtion-lang then re-lowers it to TTIR,
+# False: uses backward TTIR directly
+USE_RAISED = True
+
 VERBOSE = int(os.environ.get('VERBOSE', 0))
 assert VERBOSE in [0, 1, 2]
 
@@ -96,6 +100,26 @@ def raise_to_triton_lang(ttir_path):
   with open(os.path.join(out_dir, "raised.py"), "w") as f:
     f.write(proc.stdout)
   return os.path.join(out_dir, "raised.py")
+
+
+def load_raised_jit(raised_py_path):
+  """
+  Import generated raised.py and return the first @triton.jit JITFunction found.
+  """
+  import importlib.util, sys, uuid
+  from triton.runtime.jit import JITFunction
+
+  mod_name = f"autodiff_raised_{uuid.uuid4().hex[:8]}"
+  spec = importlib.util.spec_from_file_location(mod_name, raised_py_path)
+  mod = importlib.util.module_from_spec(spec)
+  sys.modules[mod_name] = mod
+  assert spec.loader is not None, f"Failed to load spec for {raised_py_path}"
+  spec.loader.exec_module(mod)
+
+  candidates = [obj for obj in vars(mod).values() if isinstance(obj, JITFunction)]
+  if not candidates:
+      raise RuntimeError(f"No @triton.jit kernel found in {raised_py_path}")
+  return candidates[0]
 
 
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
@@ -246,46 +270,62 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # 3) autodiff
         run_mlir_pass(f"generated/{dir_name}")
 
-        raise_to_triton_lang(f"generated/{dir_name}/out.ttir")
-
         # 4) create callable python fn for bwd
 
-        # CompiledKernel
-        bwd_compiled_kernel = compile_kernel(
-            f"generated/{dir_name}/out.ttir",
-            target=target,
-            # keep original CompiledKernel.options to preserve same PTX flavour
-            # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
-        )
+        if USE_RAISED:
+            # require raised Triton-lang kernel; fail explicitly on errors
+            raised_py_path = raise_to_triton_lang(f"generated/{dir_name}/out.ttir")
+            bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
+            print("bwd_jit_fn._raised", bwd_jit_fn._raised)
 
-        # todo: seems to automatically lowered to ttgir not ttir
-        # if VERBOSE: print(bwd_compiled_kernel.asm.keys())
 
-        # 5) keep original fwd CompiledKernel with autograd.Function and add
-        # corresponding cache entry (with differentiated CompiledKernel) to
-        # cache of bwd JITFunction
+            # comment:
+            # for this path, don't need to attach any entry into the cache of the backward_jit_fucntion
+            # (as oppose to the USE_RAISED=False path) becuase USE_RAISED=True path is integrated basically calling
+            # the pytohn JITFunction object (bwd_kerne._raised) from the wrap_bwd_kernel (so no populating of bwd jut fucntion caches is needed)
 
-        # 5.1. remove constexpr from: key, signature, params
-        new_key, num_const_args = remove_constexpr(jit_fn, bwd_jit_fn, key)
+        else:
 
-        # 5.2. add new args to: key, signature, params
-        # add new args to key
-        new_key = key_add_args(new_key)
 
-        # fwd_compiled_kernel has constexprs (in its signature) while bwd_compiled_kernel does not
-        num_fwd_args = len(fwd_compiled_kernel.src.signature) - num_const_args
-        num_bwd_args = len(bwd_compiled_kernel.src.signature)
-        num_added_args = num_bwd_args - num_fwd_args
+            # CompiledKernel
+            bwd_compiled_kernel = compile_kernel(
+                f"generated/{dir_name}/out.ttir",
+                target=target,
+                # keep original CompiledKernel.options to preserve same PTX flavour
+                # options={k: compile_dict[k] for k in BACKEND_OPTS if k in compile_dict}
+            )
 
-        new_binder = rebuild_binder(bwd_jit_fn, num_added_args, backend)
+            # todo: seems to automatically lowered to ttgir not ttir
+            # if VERBOSE: print(bwd_compiled_kernel.asm.keys())
 
-        # 5.3. add to bwd CompiledKernel into the cache
+            # 5) keep original fwd CompiledKernel with autograd.Function and add
+            # corresponding cache entry (with differentiated CompiledKernel) to
+            # cache of bwd JITFunction
 
-        # keep forward cache entry as is, don't delete it
+            # 5.1. remove constexpr from: key, signature, params
+            new_key, num_const_args = remove_constexpr(jit_fn, bwd_jit_fn, key)
 
-        bwd_kernel_cache[new_key] = bwd_compiled_kernel
-        if VERBOSE: print("bwd_kernel_cache[new_key]: ", bwd_kernel_cache[new_key])
-        bwd_jit_fn.device_caches[device] = (bwd_kernel_cache, target, backend, new_binder)
+            # 5.2. add new args to: key, signature, params
+            # add new args to key
+            new_key = key_add_args(new_key)
+
+            # fwd_compiled_kernel has constexprs (in its signature) while bwd_compiled_kernel does not
+            num_fwd_args = len(fwd_compiled_kernel.src.signature) - num_const_args
+            num_bwd_args = len(bwd_compiled_kernel.src.signature)
+            num_added_args = num_bwd_args - num_fwd_args
+
+            new_binder = rebuild_binder(bwd_jit_fn, num_added_args, backend)
+
+            # 5.3. add to bwd CompiledKernel into the cache
+
+            # keep forward cache entry as is, don't delete it
+
+            bwd_kernel_cache[new_key] = bwd_compiled_kernel
+            if VERBOSE: print("bwd_kernel_cache[new_key]: ", bwd_kernel_cache[new_key])
+            bwd_jit_fn.device_caches[device] = (bwd_kernel_cache, target, backend, new_binder)
+
+        # still keep _autodiff_info on bwd_jit_fn (folded indices) for the wrapper logic
+        # (for both USE_RAISED=True and USE_RAISED=False) becuase wrap_bwd_kernel reads it unconditionally
 
         # recover all arguments that have been folded into the CompiledKernel (need for later removal
         # of these folded args from fwd_kernel_args inside wrapped_bwd_kernel before passing them bwd_kernel);
@@ -379,7 +419,9 @@ def wrap_bwd_kernel(fwd_kernel, bwd_kernel, idxs_buffers, grid, kernel_inputs, a
     # if VERBOSE: print("[wrap_bwd_kernel] fwd_args:", kernel_inputs)
     if VERBOSE: print("[wrap_bwd_kernel] bwd_args:", bwd_args)
 
-    bwd_kernel[grid](*kernel_inputs, *bwd_args)
+
+    kernel_impl = bwd_kernel._raised if USE_RAISED else bwd_kernel
+    kernel_impl[grid](*kernel_inputs, *bwd_args)
     # bwd_kernel.run(grid=grid, warmup=False, *kernel_inputs, *bwd_args)
 
     if VERBOSE: print("[wrap_bwd_kernel] bwd_args (after calling bwd_kernel): ", bwd_args)
