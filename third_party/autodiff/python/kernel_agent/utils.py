@@ -77,6 +77,8 @@ def compile_kernel(file_path: str, return_ns:bool = False) -> Callable[..., Any]
 
     setup_fn = ns.get("setup", None)
     try:
+        # Execute the function body in the same namespace so it can populate
+        # names like `compiled_kernel` directly into `ns`.
         run_with_timeout(lambda: exec(setup_fn.__code__, ns, ns), CODE_EXEC_TIMEOUT_S)
     except Exception as e:
         raise RuntimeError(

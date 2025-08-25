@@ -46,22 +46,19 @@ class MinimalLLMPatchProvider:
         )
 
     # todo: use pply_patch.md instead of my custom instructions belo
-    def propose_patch(self, *, phase: str, target_file: str, naive_kernel: str,
+    def propose_patch(self, *, phase: str, target_file: str,
                       kernel_snippet: str, grad_summary: str) -> str:
                     #   bench_summary: str, profile_hint: str) -> str:
         system = (
             "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. "
             "Target file MUST contain a Python function `backward(*inputs, upstream)` returning a tuple of per-input gradients. "
-            "If 'kernel snippet' is empty, generate an initial correct backward kernel with that signature. "
-            "If not empty, modify it to fix correctness or improve performance without changing the signature."
+            "Use the provided 'Seed raised kernel' verbatim as the starting point and make edits to improve performance."
+            "Do not rewrite from scratch; preserve function names/signatures and pointer/mask semantics."
         )
         user = f'''{_APPLY_PATCH_MD_SPEC}
 
 Phase: {phase}
 Target file: {target_file}
-
-Naive backward (correct but slow):
-{naive_kernel}
 
 Kernel snippet:
 {kernel_snippet}
