@@ -585,6 +585,15 @@ def helper(spec, kernels, idxs):
                 # print("[_Helper.apply] args", args)
                 print("[_Helper.apply] kwargs", kwargs)
                 print("[_Helper.apply] grid", cls.grid)
+
+            # intercept special autodiff kwargs without polluting the user kernel signature
+            overwrite_fp_runtime = kwargs.pop("__ad_overwrite_fp", None)
+            if overwrite_fp_runtime:
+                assert overwrite_fp_runtime.endswith(".py"), "backward overwrite expects a triton-lang (not ttir) kernel"
+            if overwrite_fp_runtime is not None:
+                # Per-call override for backward kernel source
+                kernels[0].overwrite_fp = overwrite_fp_runtime
+
             bound = target_sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()
             # fixed positional order for c++ apply

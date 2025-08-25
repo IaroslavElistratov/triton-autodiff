@@ -90,6 +90,8 @@ def compile_kernel(file_path, overwrite_fp):
             f"Setup error: {e}"
         ) from e
 
+    # todo-now: return file path
+
     # "kernel" here is my torch.autgorad fucntion
     return ns["kernel"], ns
 
@@ -130,7 +132,7 @@ def run_with_timeout(fn, timeout_s: float):
 
 
 
-# todo-now: use slicing, don't feed entire file
+# todo-high: use slicing, don't feed entire file
 def _read_snippet(path: str, max_lines: int) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
