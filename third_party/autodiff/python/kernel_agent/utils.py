@@ -109,8 +109,8 @@ def compile_kernel(file_path, overwrite_fp=None):
         ) from e
 
 
-    # "kernel" here is my torch.autograd Function entry (autodiff wrapper)
-    return ns["kernel"], bwd_fp, ns
+    # stub now calls my "kernel" which is my _Helper(DifferentiatedCompiledKernel)
+    return ns["stub"], bwd_fp, ns
 
 
 

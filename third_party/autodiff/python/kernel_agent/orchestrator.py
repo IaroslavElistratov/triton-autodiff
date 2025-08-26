@@ -76,13 +76,13 @@ class KernelOptimizer:
             # todo-low: hide in a helper
             make_args = ns["make_args"]
             args, kwargs = make_args(ns["SWEEP"][0])
-            # upstream = tuple(torch.randn_like(out) for out in (fwd_stub(*args, **kwargs),))
 
-            # todo-now: make gradient_check expect op; rewrite gradient_check to just 1) feed inputs and 2) call .backward
+            # Compare grads: reference torch implementation vs my fused op
             ok, stats = gradient_check(
-                op=op,
+                ref_fwd=ns["torch_fn"],
+                my_op=op,
                 inputs=args,
-                mode="coord",
+                outputs="auto",
             )
 
             if not ok:
@@ -100,6 +100,9 @@ class KernelOptimizer:
                 apply_patch(patch)
                 # retry correctness in next iteration
                 continue
+
+
+            # todo-now: add benchmark; initially, without re-trace; only then with re-trace
 
             # # 2) performance
             # cand = _norm_bench(benchmark(bwd_fp))
