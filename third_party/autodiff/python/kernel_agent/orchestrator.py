@@ -8,6 +8,9 @@ from gpt_oss.tools.apply_patch import apply_patch
 from .utils import _read_snippet, compile_kernel as create_op
 from .tools.gradcheck.core import check_op_backward_parity
 
+# Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
+VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
+
 
 
 @dataclass
@@ -55,7 +58,13 @@ class KernelOptimizer:
 
         # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
         # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
+        if VERBOSE:
+            print("[kernel-agent] Starting run")
+            print(f"[kernel-agent] Forward file: {fwd_fp}")
+            print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
         op, bwd_fp, ns = create_op(fwd_fp, overwrite_fp=None)
+        if VERBOSE:
+            print(f"[kernel-agent] Initial backward path: {bwd_fp}")
 
 
         # best_metrics: dict[str, float] | None = None
@@ -65,9 +74,13 @@ class KernelOptimizer:
 
         # optimization loop
         for it in range(self.cfg.max_iters):
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] Begin iteration")
 
             # 1) correctness gate
             if it > 0:
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
                 op, _, _ = create_op(fwd_fp, overwrite_fp=bwd_fp)
 
             # Build inputs for parity check from user's helpers
@@ -77,6 +90,9 @@ class KernelOptimizer:
             sweep = ns.get("SWEEP")
             dims = sweep[0] if isinstance(sweep, (list, tuple)) and sweep else {}
             args, _kwargs = make_args(dims)
+            if VERBOSE:
+                shapes = tuple(getattr(t, "shape", None) for t in args)
+                print(f"[kernel-agent][it={it}] Inputs dims={dims}, shapes={shapes}")
 
             # (a, b), _ = mod.make_args(mod.SWEEP[0]) 
 
@@ -89,14 +105,21 @@ class KernelOptimizer:
             #
             # Grid handling remains in the stub, so gradient_check does not need to know meta params or shapes.
             # No change required to check_op_backward_parity.
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] Running gradient_check (parity)")
             ok, stats = check_op_backward_parity(
                 ref_fwd=ns["torch_fn"],
                 my_op=op,
                 inputs=args,
                 outputs="auto",
             )
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] gradient_check ok={ok}")
+                print(f"[kernel-agent][it={it}] gradient_check stats={json.dumps(stats, default=str) if isinstance(stats, (dict, list)) else stats}")
 
             if not ok:
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Parity failed — requesting 'fix' patch from LLM")
                 patch = self.patcher.propose_patch(
                     phase="fix",
                     # todo: pass fwd kernel to the model as well, for more context
@@ -108,7 +131,16 @@ class KernelOptimizer:
                 )
                 # apply_patch applies patch-text to files in-tree
                 # in-place; path presumed unchanged
+                if VERBOSE:
+                    preview = str(patch)[:800]
+                    print(f"[kernel-agent][it={it}] LLM thinking (fix):\n{getattr(self.patcher, 'last_thinking', '')}")
+                    print(f"[kernel-agent][it={it}] LLM patch (fix) preview:\n{preview}")
+                if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
+                    print("[kernel-agent] LLM returned non-patch content; skipping apply for 'fix' phase")
+                    break
                 apply_patch(patch)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Applied 'fix' patch successfully")
                 # retry correctness in next iteration
                 continue
 
@@ -135,6 +167,8 @@ class KernelOptimizer:
             #         break  # plateau
 
             # 3) ask for an optimization patch and apply
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
             patch = self.patcher.propose_patch(
                 phase="optimize",
                 target_file=bwd_fp,
@@ -143,7 +177,17 @@ class KernelOptimizer:
                 # bench_summary=_summ_bench(best_metrics),
                 # profile_hint=prof_hint,
             )
+            if VERBOSE:
+                preview = str(patch)[:800]
+                print(f"[kernel-agent][it={it}] LLM thinking (optimize):\n{getattr(self.patcher, 'last_thinking', '')}")
+                print(f"[kernel-agent][it={it}] LLM patch (optimize) preview:\n{preview}")
+            if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
+                print("[kernel-agent] LLM returned non-patch content; skipping apply for 'optimize' phase")
+                break
             apply_patch(patch)  # in-place; path presumed unchanged
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] Applied 'optimize' patch successfully")
+                print(f"[kernel-agent][it={it}] End iteration")
 
         return {
             # "best_metrics": best_metrics or {},
