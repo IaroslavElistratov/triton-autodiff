@@ -180,6 +180,8 @@ def load_raised_jit(raised_py_path):
 
 # Context for per-call override of backward kernel path
 _AD_OVERWRITE_FP = contextvars.ContextVar("ad_overwrite_fp", default=None)
+# capture artifacts produced by the autodiff hook
+_AD_ARTIFACTS = contextvars.ContextVar("ad_artifacts", default=None)
 
 @contextlib.contextmanager
 def autodiff_overwrite_fp(path: str):
@@ -189,6 +191,28 @@ def autodiff_overwrite_fp(path: str):
     yield
   finally:
     _AD_OVERWRITE_FP.reset(token)
+
+@contextlib.contextmanager
+def record_autodiff_artifacts():
+  """
+  Capture backward file pointer (raised.py) for the current trace.
+  Usage:
+      with record_autodiff_artifacts():
+          ... launch a Triton kernel once ...
+      bwd_fp = get_last_bwd_fp()
+  """
+  token = _AD_ARTIFACTS.set(None)
+  try:
+    yield
+  finally:
+    _AD_ARTIFACTS.reset(token)
+
+def get_last_bwd_fp() -> Optional[str]:
+  """
+  Return the most recent backward file pointer (raised.py path) produced by the autodiff hook.
+  None if no kernels were traced yet in this process.
+  """
+  return _AD_ARTIFACTS.get()
 
 
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
@@ -358,6 +382,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # if overwrite_fp is provided then raise the kernel stored in the provided file
             bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
             print("bwd_jit_fn._raised", bwd_jit_fn._raised)
+
+            # expose artifacts in context store
+            # publish raised.py as the backward file pointer
+            _AD_ARTIFACTS.set(raised_py_path)
 
             # comment:
             # for this path, don't need to attach any entry into the cache of the backward_jit_fucntion

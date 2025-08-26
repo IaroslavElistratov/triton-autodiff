@@ -34,7 +34,7 @@ from triton.runtime.jit import JITFunction
 
 
 
-def compile_kernel(file_path, overwrite_fp):
+def compile_kernel(file_path, overwrite_fp=None):
 
     # no need for extract_request -- instead make input file to be a python not json
 
@@ -88,8 +88,13 @@ def compile_kernel(file_path, overwrite_fp):
                     # execute the function body in the same namespace so it can populate
                     # names like `compiled_kernel` directly into `ns`
                     exec(setup_fn.__code__, ns, ns)
+                # unused, keeping here to be explicit
+                bwd_fp = overwrite_fp
             else:
-                exec(setup_fn.__code__, ns, ns)
+                from third_party.autodiff.python.api import record_autodiff_artifacts, get_last_bwd_fp
+                with record_autodiff_artifacts():
+                    exec(setup_fn.__code__, ns, ns)
+                bwd_fp = get_last_bwd_fp()
 
         # comment: this triggers the callback
         run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
@@ -100,10 +105,9 @@ def compile_kernel(file_path, overwrite_fp):
             f"Setup error: {e}"
         ) from e
 
-    # todo-now: return file path
 
-    # "kernel" here is my torch.autgorad fucntion
-    return ns["kernel"], ns
+    # "kernel" here is my torch.autograd Function entry (autodiff wrapper)
+    return ns["kernel"], bwd_fp, ns
 
 
 

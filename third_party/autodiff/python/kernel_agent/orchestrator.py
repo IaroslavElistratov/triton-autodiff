@@ -6,6 +6,7 @@ import torch
 
 from gpt_oss.tools.apply_patch import apply_patch
 from .utils import _read_snippet, compile_kernel as create_op
+from .tools.gradcheck.core import check_op_backward_parity
 
 
 
@@ -52,11 +53,12 @@ class KernelOptimizer:
         # using output of triton-autograd directly as the initial version of the backward kernel
         # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodif instead just using output of trtion-autodiff as patcher.kernel_snippet)
 
-        # todo-high: support overwritting stub
+        # todo-high: support overwritting stub (current api.py integration doens't support it)
 
         # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
         # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
-        op, bwd_fp, ns = create_op(fwd_fp)
+        # todo: retun bwd_fp from create_op
+        op, bwd_fp, ns = create_op(fwd_fp, overwrite_fp=None)
 
 
         # best_metrics: dict[str, float] | None = None
@@ -69,7 +71,7 @@ class KernelOptimizer:
 
             # 1) correctness gate
             if it > 0:
-                op = create_op(fwd_fp, overwrite=bwd_fp)
+                op, _, _ = create_op(fwd_fp, overwrite_fp=bwd_fp)
 
             # todo-low: hide in a helper
             make_args = ns["make_args"]
