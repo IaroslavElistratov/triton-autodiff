@@ -56,12 +56,15 @@ def compile_kernel(file_path, overwrite_fp=None):
                 f"Exec error: {e}"
             ) from e
 
-        kernels: dict[str, Any] = {name: value for name, value in local_ns.items() if isinstance(value, JITFunction)}
+        # accept a Triton JITFunction decorated with autodiff-wrapped helper class
+        from third_party.autodiff.python.api import DifferentiatedCompiledKernel as DCK
 
+        kernels = {name: value for name, value in local_ns.items() if isinstance(value, DCK)}
         if not kernels:
             raise RuntimeError(
-                "No Triton JITFunction found.\n"
-                "Expected your `code` to define top-level function decorated with @triton.jit, e.g.:\n"
+                "No Triton JITFunction decorated with @autodiff found.\n"
+                "Expected your code to define top-level function decorated with @triton.jit and @autodiff, e.g.:\n"
+                "@autodiff(...)"
                 "@triton.jit\n"
                 "def my_kernel(...): ...\n"
             )
