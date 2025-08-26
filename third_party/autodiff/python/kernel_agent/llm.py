@@ -32,10 +32,11 @@ Return ONLY one patch in apply_patch.md format (no prose):
 
 @dataclass
 class MinimalLLMPatchProvider:
+    reasoning_effort: str
     temperature: float = 0.0
     max_tokens: int = 1536
-    reasoning_effort: str
     context: int | None = None
+    last_thinking: str = ""
 
     def __post_init__(self) -> None:
         self._sampler = _GenerateSampler(
@@ -83,11 +84,25 @@ Gradient check summary:
         # If no sentinel block is found, it returns the whole text as-is.
 
         # If the model added any extra text, keep only the patch block.
+        # Capture thinking, if provided by backend
+        try:
+            self.last_thinking = (resp.response_metadata or {}).get("thinking", "")  # type: ignore[attr-defined]
+        except Exception:
+            self.last_thinking = ""
+
         begin, end = "*** Begin Patch", "*** End Patch"
+        patch_text = text
         if begin in text and end in text:
             s, e = text.index(begin), text.index(end) + len(end)
-            return text[s:e].strip()
-        return text  # trust the model if already clean
+            patch_text = text[s:e].strip()
+
+        # Ensure target file line points to requested file
+        patch_lines = patch_text.splitlines()
+        for i, ln in enumerate(patch_lines):
+            if ln.strip().startswith("*** Update File:"):
+                patch_lines[i] = f"*** Update File: {target_file}"
+                break
+        return "\n".join(patch_lines)
 
 
 REASONING_EFFORT = {
@@ -181,17 +196,23 @@ class _GenerateSampler:
 
         # Parse the completion tokens into Harmony messages and extract final text
         entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
-        final_text_parts: list[str] = [
-            content["text"]
-            for entry in entries
-            if (entry_dict := entry.to_dict()).get("channel") == "final"
-            for content in entry_dict.get("content", [])
-            if "text" in content
-        ]
+        final_text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        for entry in entries:
+            entry_dict = entry.to_dict()
+            channel = entry_dict.get("channel")
+            parts = [c.get("text", "") for c in entry_dict.get("content", []) if isinstance(c, dict) and c.get("text")]
+            if channel == "final":
+                final_text_parts.extend(parts)
+            elif channel and channel != "tool":
+                thinking_parts.extend(parts)
         text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
+        # In stub mode, if nothing meaningful generated, return empty no-op patch
+        if not text.strip():
+            text = "*** Begin Patch\n*** End Patch"
         return SamplerResponse(
             response_text=text,
             actual_queried_message_list=message_list,
-            response_metadata={},
+            response_metadata={"thinking": "\n".join(thinking_parts)},
         )
 
