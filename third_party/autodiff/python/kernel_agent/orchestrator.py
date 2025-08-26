@@ -22,7 +22,7 @@ class Config:
 class KernelOptimizer:
     """
     Deterministic controller:
-      init: get_user_forwrad() -> naive_grad()
+      init: get_user_forwrad() -> naive_grad (via triton-autodiff/api.py)
       loop:
         - gradient_check() -> if FAIL: LLM 'fix' patch -> apply_patch -> continue
         - benchmark()
@@ -35,8 +35,6 @@ class KernelOptimizer:
 
     def run(self, *,
             fwd_fp: str,
-            naive_grad,
-            gradient_check,
             # benchmark,
             # profile,
             get_user_dvice_info,
@@ -57,7 +55,6 @@ class KernelOptimizer:
 
         # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
         # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
-        # todo: retun bwd_fp from create_op
         op, bwd_fp, ns = create_op(fwd_fp, overwrite_fp=None)
 
 
@@ -73,12 +70,26 @@ class KernelOptimizer:
             if it > 0:
                 op, _, _ = create_op(fwd_fp, overwrite_fp=bwd_fp)
 
-            # todo-low: hide in a helper
-            make_args = ns["make_args"]
-            args, kwargs = make_args(ns["SWEEP"][0])
+            # Build inputs for parity check from user's helpers
+            make_args = ns.get("make_args")
+            if not callable(make_args):
+                raise RuntimeError("User kernel must define make_args(dims) -> (args, kwargs)")
+            sweep = ns.get("SWEEP")
+            dims = sweep[0] if isinstance(sweep, (list, tuple)) and sweep else {}
+            args, _kwargs = make_args(dims)
 
-            # Compare grads: reference torch implementation vs my fused op
-            ok, stats = gradient_check(
+            # (a, b), _ = mod.make_args(mod.SWEEP[0]) 
+
+            # compare grads: reference torch implementation vs my fused op
+
+            # gradient_check uses autograd, its expectations are: my_op(*inputs) -> true outputs,
+            # those outputs must be on a graph back to inputs. The stub satisfies this after @autodiff
+            # because it runs the autograd‑wrapped kernel and returns the real outputs. The parity core
+            # clones inputs, builds random upstreams, and compares torch.autograd.grad results per input.
+            #
+            # Grid handling remains in the stub, so gradient_check does not need to know meta params or shapes.
+            # No change required to check_op_backward_parity.
+            ok, stats = check_op_backward_parity(
                 ref_fwd=ns["torch_fn"],
                 my_op=op,
                 inputs=args,

@@ -12,6 +12,7 @@ def _as_tuple(x: MaybeTensors) -> Tensors:
 def _select_outputs(y: MaybeTensors, sel: OutputSel) -> Tensors:
     yt = _as_tuple(y)
     if sel == "auto":
+        # default: trust the op's return (e.g., user stub returning true outputs)
         return yt
     if isinstance(sel, int):
         return (yt[sel],)

@@ -126,6 +126,19 @@ class _GenerateSampler:
             case "vllm":
                 from gpt_oss.vllm.token_generator import TokenGenerator as VLLMGenerator
                 self.generator = VLLMGenerator(self.checkpoint, tensor_parallel_size=2)
+            case "stub":
+                # class _NoopPatcher:
+                #     def propose_patch(self, *_, **__):
+                #         return "*** Begin Patch\n*** End Patch"
+                # llm = _NoopPatcher()
+                # Generator stub that echoes back a no-op patch
+                class _StubGen:
+                    def generate(self, *_ , **__):
+                        # Emit a trivial no-op apply_patch block
+                        text = "*** Begin Patch\n*** End Patch"
+                        # Return once, in tokenized form; our stub encoding just decodes raw
+                        yield (0,)
+                self.generator = _StubGen()
             case _:
                 raise ValueError(f"Invalid backend: {self.backend}")
 

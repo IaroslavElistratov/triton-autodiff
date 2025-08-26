@@ -1,28 +1,28 @@
+# cd /root/triton-autodiff && export TRITON_AUTODIFF_DIR=/root/triton-autodiff
+# cd /root/triton-autodiff/third_party/autodiff/python
+# python -m pip install -e /root/triton-autodiff/third_party/autodiff/python
+# cd /root/triton-autodiff/third_party/autodiff/python/kernel_agent
+# kernel-agent --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --backend triton --max-iters 10 --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/
+
+
+
 from __future__ import annotations
 import argparse
 import os
 
 from .orchestrator import KernelOptimizer, Config
-from .llm import MinimalLLMPatchProvider
+# from .llm import MinimalLLMPatchProvider
 
-
-from .tools import (  # type: ignore
-    naive_grad,
-    gradient_check,
-    # benchmark,
-    # profile,
-    # get_user_dvice_info,
-)
 
 def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
     ap.add_argument("--max-iters", type=int, default=6)
     ap.add_argument("--patience", type=int, default=2)
-    ap.add_argument("--min-rel-impr", type=float, default=0.02)
-    ap.add_argument("--file-path", metavar="FILE", type=str, default="", help="Path to the forward kernel to be optimized")
+    ap.add_argument("--min-rel-impr", type=float, default=0.10)
+    ap.add_argument("--file-path", metavar="FILE", type=str, help="Path to the forward kernel to be optimized")
 
-    ap.add_argument("--backend", type=str, default="triton", choices=["triton", "torch", "vllm"], help="Inference backend for local sampler")
-    ap.add_argument("--checkpoint", metavar="FILE", type=str, default="", help="Path to the SafeTensors checkpoint")
+    ap.add_argument("--backend", type=str, default="inputs", choices=["stub", "triton", "torch", "vllm"], help="Inference backend for local sampler")
+    ap.add_argument("--checkpoint", metavar="FILE", type=str, help="Path to the SafeTensors checkpoint")
 
     ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=32768, help="Max context length (tokens)")
     ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="high", choices=["high", "medium", "low"], help="Reasoning effort")
@@ -36,19 +36,24 @@ def main() -> None:
 
     cfg = Config(max_iters=args.max_iters, patience=args.patience,
                  min_rel_improvement=args.min_rel_impr)
-    llm = MinimalLLMPatchProvider(
-        temperature=0.7,
-        # todo-low: rm
-        max_tokens=1536,
-        reasoning_effort=args.reasoning_effort,
-        context=args.context,
-    )
+    # Defer heavy LLM imports unless we're actually iterating
+    if args.max_iters > 0:
+        from .llm import MinimalLLMPatchProvider  # lazy import
+        llm = MinimalLLMPatchProvider(
+            temperature=0.7,
+            max_tokens=1536,
+            reasoning_effort=args.reasoning_effort,
+            context=args.context,
+        )
+    else:
+        class _Noop:
+            def propose_patch(self, *_, **__):
+                return "*** Begin Patch\n*** End Patch"
+        llm = _Noop()
     agent = KernelOptimizer(cfg, llm)
 
     out = agent.run(
         fwd_fp=args.file_path,
-        naive_grad=naive_grad,
-        gradient_check=gradient_check,
         # benchmark=benchmark,
         # profile=profile,
         # todo:

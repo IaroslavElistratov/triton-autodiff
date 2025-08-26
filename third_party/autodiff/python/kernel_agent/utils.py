@@ -57,14 +57,14 @@ def compile_kernel(file_path, overwrite_fp=None):
             ) from e
 
         # accept a Triton JITFunction decorated with autodiff-wrapped helper class
-        from third_party.autodiff.python.api import DifferentiatedCompiledKernel as DCK
+        from triton.backends.autodiff import DifferentiatedCompiledKernel as DCK
 
-        kernels = {name: value for name, value in local_ns.items() if isinstance(value, DCK)}
-        if not kernels:
+        has_dck = any(isinstance(v, type) and issubclass(v, DCK) for v in local_ns.values())
+        if not has_dck:
             raise RuntimeError(
                 "No Triton JITFunction decorated with @autodiff found.\n"
                 "Expected your code to define top-level function decorated with @triton.jit and @autodiff, e.g.:\n"
-                "@autodiff(...)"
+                "@autodiff(...)\n"
                 "@triton.jit\n"
                 "def my_kernel(...): ...\n"
             )
@@ -80,24 +80,26 @@ def compile_kernel(file_path, overwrite_fp=None):
 
     setup_fn = ns.get("setup", None)
     try:
-
-        # this adds the "overwrite_fp" argument to my autograd function
-        # so that the hook knows to use the backward from "overwrite_fp",
-        # and not the backward created by my mlir pass
+        bwd_fp = None
         def _exec_setup():
+            nonlocal bwd_fp
             if overwrite_fp:
-                from third_party.autodiff.python.api import autodiff_overwrite_fp
+                from triton.backends.autodiff import autodiff_overwrite_fp
+                # this adds the "overwrite_fp" argument to my autograd function
+                # so that the hook knows to use the backward from "overwrite_fp",
+                # and not the backward created by my mlir pass
                 with autodiff_overwrite_fp(overwrite_fp):
                     # execute the function body in the same namespace so it can populate
                     # names like `compiled_kernel` directly into `ns`
                     exec(setup_fn.__code__, ns, ns)
-                # unused, keeping here to be explicit
-                bwd_fp = overwrite_fp
+                    # not used, keeping for clarity
+                    bwd_fp = overwrite_fp
             else:
-                from third_party.autodiff.python.api import record_autodiff_artifacts, get_last_bwd_fp
+                from triton.backends.autodiff import record_autodiff_artifacts, get_last_bwd_fp
                 with record_autodiff_artifacts():
                     exec(setup_fn.__code__, ns, ns)
-                bwd_fp = get_last_bwd_fp()
+                    # record path to the last generated/selected backward before context resets
+                    bwd_fp = get_last_bwd_fp()
 
         # comment: this triggers the callback
         run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)

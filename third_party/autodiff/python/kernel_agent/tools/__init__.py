@@ -1,5 +1,5 @@
-from .backward_naive.core import generate_naive_backward as naive_grad
+from .gradcheck.core import check_op_backward_parity 
 
-__all__ = ["naive_grad"]
+__all__ = ["check_op_backward_parity"]
 
 
