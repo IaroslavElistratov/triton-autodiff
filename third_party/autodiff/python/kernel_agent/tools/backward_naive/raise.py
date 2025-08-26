@@ -701,7 +701,7 @@ class Raiser:
                 arg_names.append(self._bind(v, nm))
 
         self.lines.append("@triton.jit")
-        self.lines.append(f"def {self.func_name}({', '.join(arg_names)}):")
+        self.lines.append(f"def backward_{self.func_name}({', '.join(arg_names)}):")
 
         # Walk & emit only operations belonging to the kernel entry region
         ops: List[mlir.operation] = []

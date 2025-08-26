@@ -52,9 +52,10 @@ class MinimalLLMPatchProvider:
                     #   bench_summary: str, profile_hint: str) -> str:
         system = (
             "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. "
-            "Target file MUST contain a Python function `backward(*inputs, upstream)` returning a tuple of per-input gradients. "
-            "Use the provided 'Seed raised kernel' verbatim as the starting point and make edits to improve performance."
-            "Do not rewrite from scratch; preserve function names/signatures and pointer/mask semantics."
+            "Target file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
+            "e.g. `backward(*inputs, arg_1, arg_2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i') "
+            "Use this backward kernel provided to you as the starting point and make edits to improve its performance."
+            "Do not rewrite backward kernel from scratch; preserve function names/signatures and pointer/mask semantics."
         )
         user = f'''{_APPLY_PATCH_MD_SPEC}
 

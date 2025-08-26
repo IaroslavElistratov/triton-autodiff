@@ -3,7 +3,7 @@
 # python -m pip install -e /root/triton-autodiff/third_party/autodiff/python
 # cd /root/triton-autodiff/third_party/autodiff/python/kernel_agent
 # kernel-agent --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --backend triton --max-iters 10 --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/
-
+# export KERNEL_AGENT_VERBOSE=1
 
 
 from __future__ import annotations
