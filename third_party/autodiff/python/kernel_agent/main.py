@@ -18,7 +18,7 @@ def main() -> None:
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
     ap.add_argument("--file-path", metavar="FILE", type=str, help="Path to the forward kernel to be optimized")
 
-    ap.add_argument("--backend", type=str, default="inputs", choices=["stub", "triton", "torch", "vllm"], help="Inference backend for local sampler")
+    ap.add_argument("--backend", type=str, default="stub", choices=["stub", "triton", "torch", "vllm"], help="Inference backend for local sampler")
     ap.add_argument("--checkpoint", metavar="FILE", type=str, help="Path to the SafeTensors checkpoint")
 
     ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=32768, help="Max context length (tokens)")

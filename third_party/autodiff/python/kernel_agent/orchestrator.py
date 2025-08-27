@@ -4,12 +4,65 @@ import os, re, json
 
 import torch
 
-from gpt_oss.tools.apply_patch import apply_patch
+from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op
 from .tools.gradcheck.core import check_op_backward_parity
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
 VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
+
+# Parse target file paths from patch headers (Update/Add/Delete).
+def _extract_update_paths(patch_text: str) -> list[str]:
+    paths: list[str] = []
+    for ln in patch_text.splitlines():
+        s = ln.strip()
+        if s.startswith("*** Update File:") or s.startswith("*** Add File:") or s.startswith("*** Delete File:"):
+            try:
+                paths.append(s.split(":", 1)[1].strip())
+            except Exception:
+                pass
+    return paths
+
+def _patch_has_effect(patch_text: str) -> bool:
+    """Detect whether patch contains any real change hunks or add/delete ops."""
+    lines = [ln.strip() for ln in patch_text.splitlines()]
+    if any(ln.startswith(("*** Add File:", "*** Delete File:")) for ln in lines):
+        return True
+    if any(ln.startswith("@@") for ln in lines):
+        return True
+    for ln in lines:
+        if ln and ln[0] in "+-" and not ln.startswith("***"):
+            return True
+    return False
+
+def _read_bytes(path: str) -> bytes:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return b""
+
+def _apply_and_report(patch_text: str, it: int, stage: str) -> tuple[bool, list[str]]:
+    """Apply patch iff it has effect; report whether any bytes changed and which targets were touched."""
+    # 1) Parse targets from patch headers.
+    targets = _extract_update_paths(patch_text)
+    # 0) Skip apply if patch has no effect (prevents false positives in change detection).
+    if not _patch_has_effect(patch_text):
+        if VERBOSE:
+            print(f"[kernel-agent][it={it}] No-op '{stage}' patch; no hunks/add/delete — skipping apply")
+        return False, targets
+    # 2) Snapshot raw bytes of each target before applying the patch.
+    before = {p: _read_bytes(p) for p in targets}
+    # 3) Apply the patch in-tree.
+    _apply_patch_raw(patch_text)
+    # 4) Re-read bytes and mark changed if any target differs.
+    changed = any(_read_bytes(p) != before.get(p, b"") for p in targets)
+    if VERBOSE:
+        if changed:
+            print(f"[kernel-agent][it={it}] Applied '{stage}' patch; changed: {targets or ['(no explicit targets)']}")
+        else:
+            print(f"[kernel-agent][it={it}] No-op '{stage}' patch; nothing changed for: {targets or ['(no explicit targets)']}")
+    return changed, targets
 
 
 
@@ -96,6 +149,9 @@ class KernelOptimizer:
 
             # (a, b), _ = mod.make_args(mod.SWEEP[0]) 
 
+            # breadcrumb for LLM continuity
+            self.patcher.remember("iteration", f"it={it}, bwd_file={bwd_fp}, dims={dims}")
+
             # compare grads: reference torch implementation vs my fused op
 
             # gradient_check uses autograd, its expectations are: my_op(*inputs) -> true outputs,
@@ -122,6 +178,8 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] gradient_check ok={ok}")
                 print(f"[kernel-agent][it={it}] gradient_check stats={json.dumps(stats, default=str) if isinstance(stats, (dict, list)) else stats}")
 
+            self.patcher.remember("gradcheck", f"ok={ok}\n{json.dumps(stats, default=str) if isinstance(stats, (dict, list)) else stats}")
+
             if not ok:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed — requesting 'fix' patch from LLM")
@@ -144,9 +202,9 @@ class KernelOptimizer:
                 if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
                     print("[kernel-agent] LLM returned non-patch content; skipping apply for 'fix' phase")
                     break
-                apply_patch(patch)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Applied 'fix' patch successfully")
+                self.patcher.remember("llm.patch.fix", patch[:1200])
+                changed, targets = _apply_and_report(patch, it, "fix")
+                self.patcher.remember("apply.fix", f"changed={changed}, targets={targets}")
                 # retry correctness in next iteration
                 continue
 
@@ -191,9 +249,11 @@ class KernelOptimizer:
             if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
                 print("[kernel-agent] LLM returned non-patch content; skipping apply for 'optimize' phase")
                 break
-            apply_patch(patch)  # in-place; path presumed unchanged
+
+            self.patcher.remember("llm.patch.optimize", patch[:1200])
+            changed, targets = _apply_and_report(patch, it, "optimize")  # in-place
+            self.patcher.remember("apply.optimize", f"changed={changed}, targets={targets}")
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] Applied 'optimize' patch successfully")
                 print(f"[kernel-agent][it={it}] End iteration")
 
         return {

@@ -42,6 +42,8 @@ class MinimalLLMPatchProvider:
     max_tokens: int = 1536
     context: int | None = None
     last_thinking: str = ""
+    # Max breadcrumbs kept for prompt context; small to avoid token bloat.
+    history_max_items: int = 8
 
     # Optional streaming sink for thinking tokens; if None and
     # KERNEL_AGENT_STREAM_THINKING is truthy, a default console printer is used.
@@ -54,6 +56,30 @@ class MinimalLLMPatchProvider:
             context=self.context,
             reasoning_effort=self.reasoning_effort,
         )
+        # Minimal per-run context to give the model continuity across iterations.
+        # Stored as small text snippets. Not a chat transcript.
+        self._history: list[str] = []
+
+    # breadcrumb API for per-iteration context used by the orchestrator.
+    def remember(self, kind: str, text: str) -> None:
+        """Record a compact breadcrumb for later prompts."""
+        try:
+            s = str(text).strip()
+        except Exception:
+            s = "<unprintable>"
+        if not s:
+            return
+        self._history.append(f"[{kind}]\n{s}")
+        if len(self._history) > self.history_max_items:
+            self._history = self._history[-self.history_max_items:]
+
+    # Render breadcrumbs as a single block for injection into prompts.
+    def _history_block(self) -> str:
+        return ("\n\n".join(self._history)) if self._history else "(none)"
+
+    def _trim_history(self) -> None:
+        if len(self.history) > self.history_cap:
+            self.history = self.history[-self.history_cap:]
 
     # todo: use pply_patch.md instead of my custom instructions belo
     def propose_patch(self, *, phase: str,
@@ -73,11 +99,15 @@ class MinimalLLMPatchProvider:
             "1. signature: `backward(*inputs, arg_1, arg_2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "
             "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermideate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formular of some forward operator. "
             "3. heavily unrolled: for loops from the forward kernel were unrolled -- can start by fixing that, as it would clearly improvement the performance "
+            "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
             # "If gradient summary is OK, don't second guess it -- assume the gradient is correct"
         )
         user = f'''{_APPLY_PATCH_MD_SPEC}
 
 Phase: {phase}
+
+Context from previous iterations:
+{self._history_block()}
 
 Forward kernel:
 {fwd_kernel_snippet}
@@ -96,8 +126,7 @@ Gradient check summary:
 # Profiler hint:
 # {profile_hint}
 
-        msgs = [{"role": "system", "content": system},
-                {"role": "user", "content": user}]
+        msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
         # Streaming toggle via a single env flag; install default sink if enabled.
         thinking_sink = self.on_thinking_chunk
@@ -131,24 +160,17 @@ Gradient check summary:
         if patch_text is None:
             patch_text = _extract_patch(self.last_thinking)
         if patch_text is None:
-            # Synthesize a no-op patch so the optimizer loop can proceed deterministically
-            patch_text = f"{begin}\n*** Update File: {bwd_file}\n{end}"
+            # No real changes: return a true no-op patch (avoid emitting an Update line without hunks).
+            return f"{begin}\n{end}"
 
-        # Ensure target file line points to requested file (fix any mismatched path)
-        patch_lines = patch_text.splitlines()
-        updated = False
-        for i, ln in enumerate(patch_lines):
-            if ln.strip().startswith("*** Update File:"):
-                patch_lines[i] = f"*** Update File: {bwd_file}"
-                updated = True
-                break
-        if not updated:
-            # Insert target line as second line if missing
-            if len(patch_lines) >= 1 and patch_lines[0].strip() == begin:
-                patch_lines.insert(1, f"*** Update File: {bwd_file}")
-            else:
-                patch_lines = [begin, f"*** Update File: {bwd_file}"] + patch_lines + [end]
-        return "\n".join(patch_lines)
+        # If an explicit Update target is present, correct it to the requested file; otherwise leave as-is.
+        if "*** Update File:" in patch_text:
+            patch_lines = patch_text.splitlines()
+            for i, ln in enumerate(patch_lines):
+                if ln.strip().startswith("*** Update File:"):
+                    patch_lines[i] = f"*** Update File: {bwd_file}"
+            return "\n".join(patch_lines)
+        return patch_text
 
 
 REASONING_EFFORT = {
