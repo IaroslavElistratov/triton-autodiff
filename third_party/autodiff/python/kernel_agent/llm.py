@@ -15,12 +15,43 @@ from openai_harmony import (
     load_harmony_encoding,
 )
 
+
+BEGIN_PATCH = "*** Begin Patch"
+END_PATCH = "*** End Patch"
+
+# --- helpers (strict hunk check + target normalization) ----------------------
+
+def extract_patch(text: str | None) -> str | None:
+    if not text:
+        return None
+    i = text.find(BEGIN_PATCH)
+    j = text.rfind(END_PATCH)
+    return text[i:j+len(END_PATCH)] if i != -1 and j != -1 else None
+
+def has_real_change(patch_text: str | None) -> bool:
+    if not patch_text or (BEGIN_PATCH not in patch_text) or (END_PATCH not in patch_text):
+        return False
+    for ln in patch_text.splitlines():
+        s = ln.lstrip()
+        if not s or s.startswith(("***", "@@", "+++", "---")):
+            continue
+        if s[0] in "+-":
+            return True
+    return False
+
+def _ensure_update_file_target(patch_text: str, target_file: str) -> str:
+    lines = patch_text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("*** Update File:"):
+            lines[i] = f"*** Update File: {target_file}"
+            break
+    return "\n".join(lines)
+
+
 def _env_truthy(name: str, default: str = "0") -> bool:
     """Parse boolean-like env flags from environment."""
     val = os.environ.get(name, default)
     return str(val).lower() not in ("0", "", "false", "no", "off")
-
-
 
 
 _APPLY_PATCH_MD_SPEC = """
@@ -86,21 +117,27 @@ class MinimalLLMPatchProvider:
                       fwd_kernel_snippet: str,
                       bwd_file: str, bwd_kernel_snippet: str,
                       grad_summary: str) -> str:
+        """
+        Ask the LLM to propose an apply_patch.md patch for the current backward kernel.
+        """
                     #   bench_summary: str, profile_hint: str) -> str:
         system = (
-            "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. "
+            "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
+            "Output ONLY an apply_patch.md patch. No prose. "
+            "If you wrote any analysis above, end with exactly one apply_patch.md block. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
-            # todo-high: allow to re-write from scratch?
-            "Do not rewrite backward kernel from scratch; preserve function names/signatures and pointer/mask semantics. "
-            # todo: attach stub, so that model sees details it
+            "You can rewrite backward kernel from scratch; but preserve function names/signatures and pointer/mask semantics. "
+            "You cannot modify the stub yet. "
             # "Do not add a stub for that kernel, this is already handled outside of this file -- just assume the stub is present"
             "More details about the initial backward kernel: "
-            "1. signature: `backward(*inputs, arg_1, arg_2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "
+            "1. signature: `backward(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "
             "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermideate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formular of some forward operator. "
-            "3. heavily unrolled: for loops from the forward kernel were unrolled -- can start by fixing that, as it would clearly improvement the performance "
-            "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
-            # "If gradient summary is OK, don't second guess it -- assume the gradient is correct"
+            "3. heavily unrolled: for loops from the forward kernel were unrolled -- can start by fixing that, as it'll clearly improvement the performance "
+            # "4. atomics: kernel uses atomics -- try privataize the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
+            "If gradient summary is OK, don't second guess it -- assume the gradient is correct. "
+            "Reply with substantive code changes, not with comment/docstring 'touch' patches. "
+            # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
         )
         user = f'''{_APPLY_PATCH_MD_SPEC}
 
@@ -145,31 +182,34 @@ Gradient check summary:
         except Exception:
             self.last_thinking = ""
 
-        begin, end = "*** Begin Patch", "*** End Patch"
-
-        def _extract_patch(src: str) -> str | None:
-            if not src:
-                return None
-            if begin in src and end in src:
-                s, e = src.index(begin), src.index(end) + len(end)
-                return src[s:e].strip()
-            return None
-
-        # Prefer patch from final text; otherwise try thinking; otherwise synthesize no-op
-        patch_text = _extract_patch(text)
+        # Prefer patch from final text; otherwise try thinking; otherwise retry once; otherwise return no-op
+        patch_text = extract_patch(text)
         if patch_text is None:
-            patch_text = _extract_patch(self.last_thinking)
-        if patch_text is None:
-            # No real changes: return a true no-op patch (avoid emitting an Update line without hunks).
-            return f"{begin}\n{end}"
+            patch_text = extract_patch(self.last_thinking)
 
-        # If an explicit Update target is present, correct it to the requested file; otherwise leave as-is.
-        if "*** Update File:" in patch_text:
-            patch_lines = patch_text.splitlines()
-            for i, ln in enumerate(patch_lines):
-                if ln.strip().startswith("*** Update File:"):
-                    patch_lines[i] = f"*** Update File: {bwd_file}"
-            return "\n".join(patch_lines)
+        # One strict retry if the model ignored the format or produced a no-op.
+        if (patch_text is None or not has_real_change(patch_text)): #  and _env_truthy("KERNEL_AGENT_PATCH_RETRY", "1"):
+            retry_system = "Return ONLY one apply_patch.md patch that modifies the target backward file; no analysis, no commentary."
+            retry_user = user + "\nIMPORTANT: Your previous attempt did not include a non-empty patch. Emit exactly one patch with at least one real hunk."
+            retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
+            resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
+            text2 = (getattr(resp2, "response_text", "") or "").strip()
+            patch2 = extract_patch(text2)
+            if patch2 is None:
+                try:
+                    thinking2 = (resp2.response_metadata or {}).get("thinking", "")
+                except Exception:
+                    thinking2 = ""
+                patch2 = extract_patch(thinking2)
+            if patch2:
+                patch_text = patch2
+
+        # If still nothing, return a true no-op apply_patch block.
+        if patch_text is None:
+            patch_text = f"{BEGIN_PATCH}\n{END_PATCH}"
+
+        # Ensure target file line points to requested file (fix any mismatched path)
+        patch_text = _ensure_update_file_target(patch_text, bwd_file)
         return patch_text
 
 

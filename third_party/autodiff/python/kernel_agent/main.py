@@ -38,7 +38,7 @@ def main() -> None:
         from .llm import MinimalLLMPatchProvider  # lazy import
         llm = MinimalLLMPatchProvider(
             temperature=0.7,
-            max_tokens=1536,
+            max_tokens=4096,
             reasoning_effort=args.reasoning_effort,
             context=args.context,
         )
