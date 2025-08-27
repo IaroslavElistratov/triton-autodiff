@@ -99,9 +99,9 @@ Gradient check summary:
         msgs = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
 
-        # Streaming thinking if a sink is provided or env flag is set.
+        # Streaming toggle via a single env flag; install default sink if enabled.
         thinking_sink = self.on_thinking_chunk
-        if thinking_sink is None and _env_truthy("KERNEL_AGENT_STREAM_THINKING", "0"):
+        if thinking_sink is None and _env_truthy("KERNEL_AGENT_STREAM", "0"):
             def _print_sink(chunk: str) -> None:
                 # keep minimal/no prefix to avoid noisy logs; orchestrator can add one
                 print(chunk, end="", flush=True)
@@ -231,10 +231,9 @@ class _GenerateSampler:
         stop_tokens = []
 
         generated: list[int] = []
-        # streaming controls
-        parse_every = max(int(os.environ.get("KERNEL_AGENT_STREAM_PARSE_EVERY", "8")), 1)
-        early_stop = _env_truthy("KERNEL_AGENT_EARLY_STOP_ON_ENDPATCH", "1")
-        thinking_emitted = 0
+        # streaming controls (single toggle)
+        parse_every = 8
+        emitted_chars = 0
 
         for idx, out in enumerate(self.generator.generate(
             input_tokens,
@@ -246,23 +245,14 @@ class _GenerateSampler:
             token = int(out[0]) if isinstance(out, tuple) else int(out)
             generated.append(token)
 
-            # Opportunistic streaming of thinking content + early stop on patch end.
-            if (on_thinking_chunk or early_stop) and (idx + 1) % parse_every == 0:
+            # Stream decoded deltas and early-stop on patch terminator.
+            if on_thinking_chunk and (idx + 1) % parse_every == 0:
                 try:
-                    entries_inc = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
-                    final_so_far, thinking_so_far = "", ""
-                    for e in entries_inc:
-                        d = e.to_dict()
-                        ch = d.get("channel")
-                        parts = [c.get("text", "") for c in d.get("content", []) if isinstance(c, dict) and c.get("text")]
-                        if ch == "final":
-                            final_so_far += "".join(parts)
-                        elif ch and ch != "tool":
-                            thinking_so_far += "".join(parts)
-                    if on_thinking_chunk and len(thinking_so_far) > thinking_emitted:
-                        on_thinking_chunk(thinking_so_far[thinking_emitted:])
-                        thinking_emitted = len(thinking_so_far)
-                    if early_stop and "*** End Patch" in final_so_far:
+                    decoded = self.encoding.decode(generated)
+                    if len(decoded) > emitted_chars:
+                        on_thinking_chunk(decoded[emitted_chars:])
+                        emitted_chars = len(decoded)
+                    if "*** End Patch" in decoded:
                         break
                 except Exception:
                     # streaming should never be fatal
@@ -281,17 +271,11 @@ class _GenerateSampler:
             elif channel and channel != "tool":
                 thinking_parts.extend(parts)
         text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
-        # Emit any remaining thinking that wasn't flushed during streaming, apply optional cap.
+        # Cap thinking for metadata only (do not re-stream to avoid duplicates).
         all_thinking = "".join(thinking_parts)
         max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
         if max_thinking_chars > 0 and len(all_thinking) > max_thinking_chars:
             all_thinking = all_thinking[-max_thinking_chars:]
-        if on_thinking_chunk:
-            try:
-                if len(all_thinking) > thinking_emitted:
-                    on_thinking_chunk(all_thinking[thinking_emitted:])
-            except Exception:
-                pass
         # In stub mode, if nothing meaningful generated, return empty no-op patch
         if not text.strip():
             text = "*** Begin Patch\n*** End Patch"
