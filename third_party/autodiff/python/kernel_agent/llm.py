@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import os
-from typing import Any
+from typing import Any, Callable
 
 from gpt_oss.evals.types import SamplerResponse
 from openai_harmony import (
@@ -14,6 +14,11 @@ from openai_harmony import (
     SystemContent,
     load_harmony_encoding,
 )
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    """Parse boolean-like env flags from environment."""
+    val = os.environ.get(name, default)
+    return str(val).lower() not in ("0", "", "false", "no", "off")
 
 
 
@@ -37,6 +42,10 @@ class MinimalLLMPatchProvider:
     max_tokens: int = 1536
     context: int | None = None
     last_thinking: str = ""
+
+    # Optional streaming sink for thinking tokens; if None and
+    # KERNEL_AGENT_STREAM_THINKING is truthy, a default console printer is used.
+    on_thinking_chunk: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         self._sampler = _GenerateSampler(
@@ -89,7 +98,16 @@ Gradient check summary:
 
         msgs = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
-        resp = self._sampler(msgs)
+
+        # Streaming thinking if a sink is provided or env flag is set.
+        thinking_sink = self.on_thinking_chunk
+        if thinking_sink is None and _env_truthy("KERNEL_AGENT_STREAM_THINKING", "0"):
+            def _print_sink(chunk: str) -> None:
+                # keep minimal/no prefix to avoid noisy logs; orchestrator can add one
+                print(chunk, end="", flush=True)
+            thinking_sink = _print_sink
+
+        resp = self._sampler(msgs, on_thinking_chunk=thinking_sink)
         text = (getattr(resp, "response_text", "") or "").strip()
 
         # Capture thinking, if provided by backend (may contain patch when final was truncated)
@@ -187,7 +205,7 @@ class _GenerateSampler:
 
 
     # todo-low: simplfiy
-    def __call__(self, message_list: list[dict[str, str]]) -> SamplerResponse:
+    def __call__(self, message_list: list[dict[str, str]], on_thinking_chunk: Callable[[str], None] | None = None) -> SamplerResponse:
         """ uses Harmony encoding for single-response generation """
 
         # Extract the simple system and user contents
@@ -213,15 +231,42 @@ class _GenerateSampler:
         stop_tokens = []
 
         generated: list[int] = []
-        for out in self.generator.generate(
+        # streaming controls
+        parse_every = max(int(os.environ.get("KERNEL_AGENT_STREAM_PARSE_EVERY", "8")), 1)
+        early_stop = _env_truthy("KERNEL_AGENT_EARLY_STOP_ON_ENDPATCH", "1")
+        thinking_emitted = 0
+
+        for idx, out in enumerate(self.generator.generate(
             input_tokens,
             stop_tokens=stop_tokens,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             return_logprobs=False,
-        ):
+        )):
             token = int(out[0]) if isinstance(out, tuple) else int(out)
             generated.append(token)
+
+            # Opportunistic streaming of thinking content + early stop on patch end.
+            if (on_thinking_chunk or early_stop) and (idx + 1) % parse_every == 0:
+                try:
+                    entries_inc = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
+                    final_so_far, thinking_so_far = "", ""
+                    for e in entries_inc:
+                        d = e.to_dict()
+                        ch = d.get("channel")
+                        parts = [c.get("text", "") for c in d.get("content", []) if isinstance(c, dict) and c.get("text")]
+                        if ch == "final":
+                            final_so_far += "".join(parts)
+                        elif ch and ch != "tool":
+                            thinking_so_far += "".join(parts)
+                    if on_thinking_chunk and len(thinking_so_far) > thinking_emitted:
+                        on_thinking_chunk(thinking_so_far[thinking_emitted:])
+                        thinking_emitted = len(thinking_so_far)
+                    if early_stop and "*** End Patch" in final_so_far:
+                        break
+                except Exception:
+                    # streaming should never be fatal
+                    pass
 
         # Parse the completion tokens into Harmony messages and extract final text
         entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
@@ -236,12 +281,24 @@ class _GenerateSampler:
             elif channel and channel != "tool":
                 thinking_parts.extend(parts)
         text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
+        # Emit any remaining thinking that wasn't flushed during streaming, apply optional cap.
+        all_thinking = "".join(thinking_parts)
+        max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
+        if max_thinking_chars > 0 and len(all_thinking) > max_thinking_chars:
+            all_thinking = all_thinking[-max_thinking_chars:]
+        if on_thinking_chunk:
+            try:
+                if len(all_thinking) > thinking_emitted:
+                    on_thinking_chunk(all_thinking[thinking_emitted:])
+            except Exception:
+                pass
         # In stub mode, if nothing meaningful generated, return empty no-op patch
         if not text.strip():
             text = "*** Begin Patch\n*** End Patch"
+        capture_thinking = _env_truthy("KERNEL_AGENT_CAPTURE_THINKING", "1")
         return SamplerResponse(
             response_text=text,
             actual_queried_message_list=message_list,
-            response_metadata={"thinking": "\n".join(thinking_parts)},
+            response_metadata={"thinking": (all_thinking if capture_thinking else "")},
         )
 
