@@ -56,6 +56,7 @@ class MinimalLLMPatchProvider:
             "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
+            # todo-high: allow to re-write from scratch?
             "Do not rewrite backward kernel from scratch; preserve function names/signatures and pointer/mask semantics. "
             # todo: attach stub, so that model sees details it
             # "Do not add a stub for that kernel, this is already handled outside of this file -- just assume the stub is present"
@@ -91,29 +92,44 @@ Gradient check summary:
         resp = self._sampler(msgs)
         text = (getattr(resp, "response_text", "") or "").strip()
 
-        # todo-now:
-        # slices the model output between the sentinels *** Begin Patch and *** End Patch and discards everything else.
-        # If no sentinel block is found, it returns the whole text as-is.
-
-        # If the model added any extra text, keep only the patch block.
-        # Capture thinking, if provided by backend
+        # Capture thinking, if provided by backend (may contain patch when final was truncated)
         try:
             self.last_thinking = (resp.response_metadata or {}).get("thinking", "")  # type: ignore[attr-defined]
         except Exception:
             self.last_thinking = ""
 
         begin, end = "*** Begin Patch", "*** End Patch"
-        patch_text = text
-        if begin in text and end in text:
-            s, e = text.index(begin), text.index(end) + len(end)
-            patch_text = text[s:e].strip()
 
-        # Ensure target file line points to requested file
+        def _extract_patch(src: str) -> str | None:
+            if not src:
+                return None
+            if begin in src and end in src:
+                s, e = src.index(begin), src.index(end) + len(end)
+                return src[s:e].strip()
+            return None
+
+        # Prefer patch from final text; otherwise try thinking; otherwise synthesize no-op
+        patch_text = _extract_patch(text)
+        if patch_text is None:
+            patch_text = _extract_patch(self.last_thinking)
+        if patch_text is None:
+            # Synthesize a no-op patch so the optimizer loop can proceed deterministically
+            patch_text = f"{begin}\n*** Update File: {bwd_file}\n{end}"
+
+        # Ensure target file line points to requested file (fix any mismatched path)
         patch_lines = patch_text.splitlines()
+        updated = False
         for i, ln in enumerate(patch_lines):
             if ln.strip().startswith("*** Update File:"):
-                patch_lines[i] = f"*** Update File: {target_file}"
+                patch_lines[i] = f"*** Update File: {bwd_file}"
+                updated = True
                 break
+        if not updated:
+            # Insert target line as second line if missing
+            if len(patch_lines) >= 1 and patch_lines[0].strip() == begin:
+                patch_lines.insert(1, f"*** Update File: {bwd_file}")
+            else:
+                patch_lines = [begin, f"*** Update File: {bwd_file}"] + patch_lines + [end]
         return "\n".join(patch_lines)
 
 
@@ -193,7 +209,8 @@ class _GenerateSampler:
 
         conversation = Conversation.from_messages(messages)
         input_tokens = self.encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
-        stop_tokens = self.encoding.stop_tokens_for_assistant_actions()
+        # Avoid stopping at channel boundaries; let the model emit the final patch block
+        stop_tokens = []
 
         generated: list[int] = []
         for out in self.generator.generate(
