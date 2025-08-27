@@ -47,23 +47,34 @@ class MinimalLLMPatchProvider:
         )
 
     # todo: use pply_patch.md instead of my custom instructions belo
-    def propose_patch(self, *, phase: str, target_file: str,
-                      kernel_snippet: str, grad_summary: str) -> str:
+    def propose_patch(self, *, phase: str,
+                      fwd_kernel_snippet: str,
+                      bwd_file: str, bwd_kernel_snippet: str,
+                      grad_summary: str) -> str:
                     #   bench_summary: str, profile_hint: str) -> str:
         system = (
             "You are a CUDA/Triton kernel optimizer. Output ONLY an apply_patch.md patch. No prose. "
-            "Target file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
-            "e.g. `backward(*inputs, arg_1, arg_2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i') "
-            "Use this backward kernel provided to you as the starting point and make edits to improve its performance."
-            "Do not rewrite backward kernel from scratch; preserve function names/signatures and pointer/mask semantics."
+            "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
+            "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
+            "Do not rewrite backward kernel from scratch; preserve function names/signatures and pointer/mask semantics. "
+            # todo: attach stub, so that model sees details it
+            # "Do not add a stub for that kernel, this is already handled outside of this file -- just assume the stub is present"
+            "More details about the initial backward kernel: "
+            "1. signature: `backward(*inputs, arg_1, arg_2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "
+            "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermideate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formular of some forward operator. "
+            "3. heavily unrolled: for loops from the forward kernel were unrolled -- can start by fixing that, as it would clearly improvement the performance "
+            # "If gradient summary is OK, don't second guess it -- assume the gradient is correct"
         )
         user = f'''{_APPLY_PATCH_MD_SPEC}
 
 Phase: {phase}
-Target file: {target_file}
 
-Kernel snippet:
-{kernel_snippet}
+Forward kernel:
+{fwd_kernel_snippet}
+
+Backward file: {bwd_file}
+Backward kernel:
+{bwd_kernel_snippet}
 
 Gradient check summary:
 {grad_summary}

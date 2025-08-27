@@ -123,8 +123,9 @@ class KernelOptimizer:
                 patch = self.patcher.propose_patch(
                     phase="fix",
                     # todo: pass fwd kernel to the model as well, for more context
-                    target_file=bwd_fp,
-                    kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                    bwd_file=bwd_fp,
+                    fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                    bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
                     grad_summary=stats,
                     # bench_summary=_summ_bench(best_metrics),
                     # profile_hint="(n/a, fix first)",
@@ -171,8 +172,9 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
             patch = self.patcher.propose_patch(
                 phase="optimize",
-                target_file=bwd_fp,
-                kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                bwd_file=bwd_fp,
+                fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
                 grad_summary="OK",
                 # bench_summary=_summ_bench(best_metrics),
                 # profile_hint=prof_hint,

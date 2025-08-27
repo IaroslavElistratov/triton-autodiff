@@ -1,9 +1,6 @@
-# cd /root/triton-autodiff && export TRITON_AUTODIFF_DIR=/root/triton-autodiff
-# cd /root/triton-autodiff/third_party/autodiff/python
-# python -m pip install -e /root/triton-autodiff/third_party/autodiff/python
+# python -m pip install -e /root/triton-autodiff/third_party/autodiff/python && export KERNEL_AGENT_VERBOSE=1 && export TRITON_AUTODIFF_DIR=/root/triton-autodiff
 # cd /root/triton-autodiff/third_party/autodiff/python/kernel_agent
-# kernel-agent --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --backend triton --max-iters 10 --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/
-# export KERNEL_AGENT_VERBOSE=1
+# kernel-agent --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/
 
 
 from __future__ import annotations
