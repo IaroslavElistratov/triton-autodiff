@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 
 @triton.jit
-def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kn, stride_kk, stride_vk, stride_vn, stride_om, stride_on, Z, H, arg17, arg18, arg19, arg20, arg21):
+def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, stride_kn, stride_kk, stride_vk, stride_vn, stride_om, stride_on, Z, H, grad_Q, grad_K, grad_V, grad_M, grad_Out):
     fwd_off_hz = tl.program_id(axis=1)
     fwd_off_z = fwd_off_hz // H  # assumes non-negative
     fwd_qvk_offset = tl.cast(fwd_off_z, tl.int64)
@@ -113,7 +113,7 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     fwd_m_i = tl.log2(fwd_l_i)
     fwd_m_i_1 = fwd_m_ij_1 + fwd_m_i
     tl.store(fwd_m_ptrs_3, fwd_m_i_1)
-    fwd_m_ptrs_4 = arg20 + tl.cast(fwd_m_ptrs, tl.int64)
+    fwd_m_ptrs_4 = grad_M + tl.cast(fwd_m_ptrs, tl.int64)
     fwd_m_ptrs_5 = fwd_m_ptrs_4 + tl.zeros((16,), dtype=tl.int64)
     fwd_m_ptrs_6 = fwd_m_ptrs_5 + tl.broadcast_to(tl.cast(fwd_offs_m_2, tl.int64), (16,))
     bwd_m_i = tl.load(fwd_m_ptrs_6)
@@ -124,7 +124,7 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_m_i_5 = tl.broadcast_to(bwd_m_i_4, (16,))
     bwd_m_i_6 = bwd_m_i_5 / bwd_m_i_3
     bwd_m_i_7 = bwd_m_i_6 * bwd_m_i
-    fwd_O_block_ptr_12 = arg21 + tl.cast(fwd_qvk_offset_6, tl.int64)
+    fwd_O_block_ptr_12 = grad_Out + tl.cast(fwd_qvk_offset_6, tl.int64)
     fwd_O_block_ptr_13 = fwd_O_block_ptr_12 + tl.zeros((16, 16), dtype=tl.int64)
     fwd_O_block_ptr_14 = fwd_O_block_ptr_13 + tl.broadcast_to(tl.cast(fwd_O_block_ptr_10, tl.int64), (16, 16))
     bwd_O_block_ptr = tl.load(fwd_O_block_ptr_14)
@@ -181,8 +181,8 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_qk_5 = tl.expand_dims(bwd_qk_4, axis=1)
     bwd_qk_6 = tl.reshape(bwd_qk_5, (16,))
     bwd_m_i_9 = bwd_m_i_8 + bwd_qk_6
-    bwd_m_ij = fwd_m_ij == fwd_unnamed_4
-    bwd_m_ij_1 = fwd_unnamed_4 == fwd_m_ij
+    bwd_m_ij = fwd_m_ij >= fwd_unnamed_4
+    bwd_m_ij_1 = fwd_unnamed_4 > fwd_m_ij
     bwd_m_ij_2 = 1.0
     bwd_m_ij_3 = tl.broadcast_to(bwd_m_ij_2, (16,))
     bwd_m_ij_4 = 0.0
@@ -218,15 +218,15 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_qk_16 = 0.0
     bwd_qk_17 = tl.broadcast_to(bwd_qk_16, (16, 16))
     bwd_qk_18 = tl.dot(bwd_qk_15, bwd_qk_10) + bwd_qk_17
-    fwd_Q_block_ptr_5 = arg17 + tl.cast(fwd_qvk_offset_6, tl.int64)
+    fwd_Q_block_ptr_5 = grad_Q + tl.cast(fwd_qvk_offset_6, tl.int64)
     fwd_q_15 = fwd_Q_block_ptr_5 + tl.zeros((16, 16), dtype=tl.int64)
     fwd_q_16 = fwd_q_15 + tl.broadcast_to(tl.cast(fwd_q_12, tl.int64), (16, 16))
     bwd_q = tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16), mask=None, sem='acq_rel', scope='gpu')
-    fwd_K_block_ptr_3 = arg18 + tl.cast(fwd_qvk_offset_6, tl.int64)
+    fwd_K_block_ptr_3 = grad_K + tl.cast(fwd_qvk_offset_6, tl.int64)
     fwd_k_11 = fwd_K_block_ptr_3 + tl.zeros((16, 16), dtype=tl.int64)
     fwd_k_12 = fwd_k_11 + tl.broadcast_to(tl.cast(fwd_k_8, tl.int64), (16, 16))
     bwd_k = tl.atomic_add(fwd_k_12, tl.cast(bwd_qk_18, tl.float16), mask=None, sem='acq_rel', scope='gpu')
-    fwd_V_block_ptr_3 = arg19 + tl.cast(fwd_qvk_offset_6, tl.int64)
+    fwd_V_block_ptr_3 = grad_V + tl.cast(fwd_qvk_offset_6, tl.int64)
     fwd_v_10 = fwd_V_block_ptr_3 + tl.zeros((16, 16), dtype=tl.int64)
     fwd_v_11 = fwd_v_10 + tl.broadcast_to(tl.cast(fwd_v_7, tl.int64), (16, 16))
     bwd_v = tl.atomic_add(fwd_v_11, tl.cast(bwd_acc_12, tl.float16), mask=None, sem='acq_rel', scope='gpu')

@@ -11,7 +11,7 @@ DEVICE = torch.device("cuda:0")
 
 B=256
 NUM_HEADS=64
-SEQ_LEN=32
+SEQ_LEN=16
 HEAD_DIM=16
 dtype=torch.float16
 

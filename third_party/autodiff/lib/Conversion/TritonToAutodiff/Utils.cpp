@@ -25,6 +25,25 @@
 namespace mlir {
 namespace triton {
 
+  // Extract first NameLoc string from a Location, searching through CallSiteLoc/FusedLoc if needed.
+  static std::optional<StringRef> firstNameInLoc(Location loc) {
+    if (auto nl = dyn_cast<NameLoc>(loc))
+      return nl.getName().getValue();
+
+    if (auto cs = dyn_cast<CallSiteLoc>(loc)) {
+      if (auto s = firstNameInLoc(cs.getCallee())) return s;
+      if (auto s = firstNameInLoc(cs.getCaller())) return s;
+      return std::nullopt;
+    }
+
+    if (auto fused = dyn_cast<FusedLoc>(loc)) {
+      for (Location sub : fused.getLocations())
+        if (auto s = firstNameInLoc(sub)) return s;
+    }
+
+    return std::nullopt;
+  }
+
   NameLoc createNodeName(Operation *op, std::string prefix){
     // Only use this approach with -mlir-use-nameloc-as-prefix compilation flag
 
@@ -529,6 +548,7 @@ namespace triton {
     auto fnType = funcOp.getFunctionType();
     SmallVector<Type> newInputTypes;
     SmallVector<Type> additionalPtrTypes; // Track only the new pointer types
+    SmallVector<unsigned> origPtrArgIndices; // Track which original arg each added ptr corresponds to
 
     std::map<unsigned, unsigned> ptrIdxToAddedPtrIdxMap;
     unsigned numOrigInputs = fnType.getInputs().size();
@@ -539,6 +559,7 @@ namespace triton {
 
       if (auto ptrType = dyn_cast<triton::PointerType>(inputType)) {
         additionalPtrTypes.push_back(ptrType); // Remember only the new ones
+        origPtrArgIndices.push_back(i);
 
         auto numAdded = ptrIdxToAddedPtrIdxMap.size();
         ptrIdxToAddedPtrIdxMap[i] = numOrigInputs + numAdded;
@@ -559,8 +580,24 @@ namespace triton {
     Block &entryBlock = funcOp.getBody().front();
 
     // Only add block arguments for the newly added pointer types
-    for (auto ptrType : additionalPtrTypes) {
-      entryBlock.addArgument(ptrType, funcOp.getLoc());
+    // Assign meaningful NameLocs derived from the original pointer arg
+    for (auto it : llvm::enumerate(additionalPtrTypes)) {
+      auto ptrType = it.value();
+      unsigned origIdx = origPtrArgIndices[it.index()];
+
+      Value origArg = entryBlock.getArgument(origIdx);
+      Location origLoc = origArg.getLoc();
+
+      std::string gradName = "grad_";
+      if (auto optName = firstNameInLoc(origLoc))
+        gradName += optName->str();
+      else
+        gradName += ("arg" + std::to_string(origIdx));
+
+      auto nameAttr = StringAttr::get(funcOp.getContext(), gradName);
+      Location gradLoc = NameLoc::get(nameAttr, origLoc);
+
+      entryBlock.addArgument(ptrType, gradLoc);
     }
 
 

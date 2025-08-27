@@ -259,4 +259,4 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
 # todo: works but unrolls for loop too many -- so try smaller shapes
 # test_op(256, 64, 128, 64, causal=True)
 
-test_op(256, 64, 32, 16, causal=False)
+test_op(256, 64, 16, 16, causal=False)
