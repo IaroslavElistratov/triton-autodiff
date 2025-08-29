@@ -828,12 +828,18 @@ class StubOverrideDCK(torch.autograd.Function):
         it_t = iter(ctx.saved_tensors)
         it_n = iter(ctx.non_ten)
         all_inps = [next(it_t) if t else next(it_n) for t in ctx.is_ten]
-        grads_for_tensors = ctx.bwd_stub(*all_inps, *upstreams)
+        # in emit_stub.py i made upstream args (to the generated bwd stub) to be keyword only
+        # and then appended the added upstream_* args to the end bwd stub's arg list.
+        # becuase I want to preserve defult args which user orig stub might have,
+        # and not break python’s rule that non‑default params cannot follow defaulted ones
+        kw_up = {f"upstream_{i}": g for i, g in enumerate(upstreams)}
+        grads_for_tensors = ctx.bwd_stub(*all_inps, **kw_up)
 
         # align to forward inputs (Tensor -> grad, non‑Tensor -> None)
         it_g = iter(grads_for_tensors)
         per_input = [next(it_g) if t else None for t in ctx.is_ten]
         return (None, *per_input)  # first arg (stubs tuple) has no grad
+
 
 import sys, importlib, inspect, textwrap
 

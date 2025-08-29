@@ -50,6 +50,43 @@ def _find_kernel_call(func_node, src, kernel_name):
     ]
     return call, grid_code, posargs_code, kwargs_code
 
+def _render_bwd_paramlist(fn, up_names, src):
+    a = fn.args
+    parts = []
+
+    # positional-only
+    if getattr(a, "posonlyargs", []):
+        parts += [p.arg for p in a.posonlyargs]
+        parts.append("/")
+
+    # positional-or-keyword (preserve defaults)
+    n, m = len(a.args), len(a.defaults)
+    for i, p in enumerate(a.args):
+        if i >= n - m:
+            d = a.defaults[i - (n - m)]
+            parts.append(f"{p.arg}={_src_of(d, src)}")
+        else:
+            parts.append(p.arg)
+
+    # vararg or start keyword-only section
+    if a.vararg is not None:
+        parts.append(f"*{a.vararg.arg}")
+    elif a.kwonlyargs or up_names:
+        parts.append("*")
+
+    # existing keyword-only (preserve defaults)
+    for p, d in zip(a.kwonlyargs, a.kw_defaults):
+        parts.append(p.arg if d is None else f"{p.arg}={_src_of(d, src)}")
+
+    # upstreams as keyword-only
+    parts += up_names
+
+    # **kwargs passthrough
+    if a.kwarg is not None:
+        parts.append(f"**{a.kwarg.arg}")
+
+    return ", ".join(parts)
+
 def gen_bwd_stub_auto(
     stub_src: str,
     *,
@@ -89,10 +126,10 @@ def gen_bwd_stub_auto(
     up_names = [f"upstream_{k}" for k in range(len(shifted_upstream))]
     up_map = {i: up_names[k] for k, i in enumerate(shifted_upstream)}
 
-    # params of the new stub = original stub params + upstreams
+    # params of the new stub = original stub params (with defaults) + upstreams as kw-only
     param_names = [a.arg for a in fn.args.args]
-    bwd_params = param_names + up_names
     bwd_name = f"backward_{stub_name}"
+    header_params = _render_bwd_paramlist(fn, up_names, stub_src)
 
     # precompute grad vars for each kept positional arg
     grad_lines, grad_vars = [], []
@@ -120,7 +157,7 @@ def gen_bwd_stub_auto(
     if len(tensor_param_names) == 1: ret += ","
 
     # assemble function
-    lines = [f"def {bwd_name}({', '.join(bwd_params)}):",
+    lines = [f"def {bwd_name}({header_params}):",
              *pre_lines,
              "    # --- codegen stub ---",
              *grad_lines,
