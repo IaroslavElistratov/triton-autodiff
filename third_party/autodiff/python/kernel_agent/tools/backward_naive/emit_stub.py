@@ -157,7 +157,10 @@ def gen_bwd_stub_auto(
     if len(tensor_param_names) == 1: ret += ","
 
     # assemble function
-    lines = [f"def {bwd_name}({header_params}):",
+    lines = ["import torch",
+             # todo: copy user globals
+             "DEVICE = torch.device('cuda:0')",
+            f"def {bwd_name}({header_params}):",
              *pre_lines,
              "    # --- codegen stub ---",
              *grad_lines,

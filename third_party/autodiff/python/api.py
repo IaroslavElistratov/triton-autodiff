@@ -455,10 +455,9 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                     key,
                 )
 
-                # todo-now:
-                # but also need to change what Op I emit below (use StubOverrideDCK instead of DCK)
 
-
+                ### create StubOverrideDCK and install into user's module ###
+                create_stub_op(raised_py_path, mod_name, is_override_stub=True)
 
 
             # if overwrite_fp is provided then raise the kernel stored in the provided file
@@ -852,9 +851,43 @@ def get_stub_src_from_module(mod_name, stub_name: str) -> str:
 
 
 
+# now i'm sucessfully generating both raised user bwd kernel and bwd stub into a file.
+# Now basically i want to replace user's stub (fucntion with some name) in their module
+# with the StubOverrideDCK -- where StubOverrideDCK's fwd calls users stub and StubOverrideDCK.bwd
+# calls the generated stub (which in turn calls the genrated bwd kenrel)
+#
+# I can't import form the generated_file (which contains the bwd_kernel and bwd_stub) -- becuase it's
+# compitely in a random place on disk -- instead seems what i can do is parse the genrated
+# file and python compile that and exec it into some new namespace to turn these
+# strings into a python fucntions, which i then case use to e.g.
+# closure capture into the StubOverrideDCK.backawrd
+def create_stub_op(gen_fp, usr_module_name, name="stub", *, is_override_stub=False):
+    import runpy
 
+    # gen_fp = "/abs/path/to/generated/autogen.py"
+    assert os.path.exists(gen_fp)
+    bwd_stub = runpy.run_path(gen_fp)[f"backward_{name}"]      # function object
 
+    # ns = {}
+    # exec(compile(generated_source_text, "<autogen>", "exec"), ns)
+    # bwd_stub = ns[f"backward_{name}"]
 
+    usr_module = sys.modules.get(usr_module_name)
+
+    fwd_stub = getattr(usr_module, name)
+    stubs = (fwd_stub, bwd_stub)
+
+    op = partial(StubOverrideDCK.apply, stubs)
+
+    # note: in this case, ofc replacing the fwd user stub,
+    # not fwd user kernel -- becuase the StubOverrideDCK
+    # operates on the lvl of stubs
+    if is_override_stub:
+        # install to user module -- overwrite
+        # user fwd stub with the StubOverrideDCK
+        setattr(usr_module, name, op)
+
+    return op
 
 
 
@@ -920,8 +953,14 @@ def autodiff(idxs_buffers, stub_name=None): # , overwrite_fp=None
         # the autograd machinery on already differentiated kernels)
         fwd_kernel._is_fwd_kernel = True
 
-        wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idxs_buffers)
-        kernels = (fwd_kernel, wrapped_bwd_kernel)
+        if USE_RAISED:
+            # in this case do not want to overwrite user kernel with DifferentiatedCompiledKernel
+            # becuase instead i'm overwritting their stub (not kernel) with StubOverrideDCK
+            # and StubOverrideDCK.forward calls the original unchanged user fwd
+            return fwd_kernel
+        else:
+            wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idxs_buffers)
+            kernels = (fwd_kernel, wrapped_bwd_kernel)
 
         # takes the signature form fwd_kernel's python fn
         op = helper(fwd_kernel.fn, kernels, idxs_buffers)
