@@ -101,9 +101,24 @@ def gen_bwd_stub(
     bwd_params = param_names + [upstream_param]
     bwd_name = bwd_stub_name or f"{stub_name}_bwd"
 
-    # Replay original body but drop any explicit returns
-    body_lines = [textwrap.indent(_src_of(stmt, stub_src), "    ")
-                  for stmt in fn.body if not isinstance(stmt, ast.Return)]
+    # Find the forward kernel launch statement index so we can replace it in-place
+    launch_idx: Optional[int] = None
+    for i, stmt in enumerate(fn.body):
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            func_expr = stmt.value.func
+            if isinstance(func_expr, ast.Subscript):
+                base = func_expr.value
+                if isinstance(base, ast.Name) and base.id == kernel_name:
+                    launch_idx = i
+                    break
+    if launch_idx is None:
+        raise ValueError(f"{kernel_name}[...] call statement not found inside {fn.name}")
+
+    # Split original body around the forward launch; drop explicit returns everywhere
+    pre_nodes = [s for s in fn.body[:launch_idx] if not isinstance(s, ast.Return)]
+    post_nodes = [s for s in fn.body[launch_idx+1:] if not isinstance(s, ast.Return)]
+    pre_lines = [textwrap.indent(_src_of(stmt, stub_src), "    ") for stmt in pre_nodes]
+    post_lines = [textwrap.indent(_src_of(stmt, stub_src), "    ") for stmt in post_nodes]
 
     # Validate indices
     n_pos = len(posargs)
@@ -159,12 +174,14 @@ def gen_bwd_stub(
     if len(ret_exprs) == 1:
         ret_tuple += ","
 
+    # Rebuild function: keep pre, insert bwd launch at the original spot, then keep post
     bwd_def = [
         f"def {bwd_name}({', '.join(bwd_params)}):",
-        *body_lines,
+        *pre_lines,
         "    # --- codegen: precomputed grad args (no runtime loops) ---",
         *grad_lines,
         bwd_call,
+        *post_lines,
         f"    return ({ret_tuple})",
     ]
     return "\n".join(bwd_def)
