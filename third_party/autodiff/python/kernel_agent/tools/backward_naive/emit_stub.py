@@ -1,61 +1,46 @@
-"""
-Generate a backward stub (Python source) from a user's forward stub that launches
-a Triton/CUDA-style kernel via:  kernel[grid](...)
+import re
+from typing import List, Tuple
 
-Merged features:
-- AST-only, no LibCST
-- Preserves the user stub body but removes its `return`
-- Precomputes grad args at codegen time (no runtime loops)
-- Supports removing folded positional args before the backward launch
-- Forwards original keyword args (including **kwargs) to the backward kernel
-- Returns `None` for requested grads that cannot be mapped
-- Avoids requiring `import torch` by using Tensor.new_zeros for zero-like grads
-"""
-import ast
-import textwrap
-from typing import List, Dict, Optional
+# --- pointer positions from compile signature like: "[('*fp32','D'), ('constexpr',4), ...]"
+def _ptr_arg_idxs_from_signature(sig: str):
+    body = sig[sig.find("[")+1:sig.rfind("]")]
+    items = [x.replace("(", "").replace(")", "") for x in body.split(", (")]
+    idxs = []
+    for i, it in enumerate(items):
+        s = it.replace(" ", "")
+        if s.startswith("'*fp") or s.startswith("\"*fp"):
+            idxs.append(i)
+    return idxs
+
+def _shift_indices(indices, folded):
+    folded = sorted(folded)
+    return [i - sum(f < i for f in folded) for i in indices]
 
 
-def _src_of(node: ast.AST, src: str) -> str:
+import ast, textwrap, inspect
+
+def _src_of(node, src):
     seg = ast.get_source_segment(src, node)
     return seg if seg is not None else ast.unparse(node)
 
-
-def _find_func(src: str, name: str) -> ast.FunctionDef:
-    try:
-        mod = ast.parse(src)
-    except SyntaxError as e:
-        raise ValueError(f"Failed to parse stub_src: {e}") from e
+def _find_func(src, name):
+    mod = ast.parse(src)
     for n in mod.body:
         if isinstance(n, ast.FunctionDef) and n.name == name:
             return n
-    raise ValueError(f"function {name!r} not found in provided source")
+    raise ValueError(f"function {name} not found")
 
-
-def _find_kernel_call(func_node: ast.FunctionDef, src: str, kernel_name: str):
-    """
-    Find the first call like:  <kernel_name>[...](...)
-    Returns (call_node, grid_code:str, posargs_code:list[str], kwargs_code:list[str or '**expr']).
-    """
+def _find_kernel_call(func_node, src, kernel_name):
     class Finder(ast.NodeVisitor):
-        def __init__(self):
-            self.hit: Optional[ast.Call] = None
-        def visit_Call(self, node: ast.Call):
-            if self.hit is not None:
-                return
-            func = node.func
-            if isinstance(func, ast.Subscript):
-                val = func.value
+        def __init__(self): self.hit = None
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Subscript):
+                val = node.func.value
                 if isinstance(val, ast.Name) and val.id == kernel_name:
-                    self.hit = node
-                    return
+                    self.hit = node; return
             self.generic_visit(node)
-
-    f = Finder()
-    f.visit(func_node)
-    if f.hit is None:
-        raise ValueError(f"{kernel_name}[...] call not found inside {func_node.name}")
-
+    f = Finder(); f.visit(func_node)
+    if f.hit is None: raise ValueError("kernel[...] call not found")
     call = f.hit
     grid_code = _src_of(call.func.slice, src)
     posargs_code = [_src_of(a, src) for a in call.args]
@@ -65,126 +50,99 @@ def _find_kernel_call(func_node: ast.FunctionDef, src: str, kernel_name: str):
     ]
     return call, grid_code, posargs_code, kwargs_code
 
-
-def gen_bwd_stub(
+def gen_bwd_stub_auto(
     stub_src: str,
+    *,
     stub_name: str,
-    kernel_name: str,
-    bwd_kernel_name: str,
-    upstream_param: str,
-    tensor_params: List[str],           # params in stub that require grads, in order
-    tensor_arg_idxs: List[int],         # positions in *positional* kernel args that are tensors
-    upstream_map: Dict[int, str],       # original arg_idx -> upstream tensor name in bwd stub
-    folded_const_idxs: Optional[List[int]] = None,  # original positional arg indices to drop for bwd
-    bwd_stub_name: Optional[str] = None,
-) -> str:
-    """
-    Synthesize a backward stub function that:
-      1) Replays the forward stub body (excluding its `return`) to rebuild needed tensors.
-      2) Precomputes grad vars for *kept* positional args.
-      3) Calls the backward kernel with: kept positional args + grad vars + original kwargs.
-      4) Returns grads in the order of `tensor_params` (uses None when not found).
-
-    Folding:
-      - `folded_const_idxs` are indices into the *original positional* argument list of the
-        forward kernel call. These are removed before invoking the backward kernel.
-      - `tensor_arg_idxs` and `upstream_map` are specified in the original index space and
-        are shifted automatically after folding.
-    """
+    fwd_kernel_name: str,
+    bwd_kernel_sym: str,
+    idxs_buffers,        # original fwd indices of output buffers
+    idx_folded,          # positional indices specialized away in fwd
+    ptr_arg_idxs,        # positional indices of pointer args in the fwd call
+):
     fn = _find_func(stub_src, stub_name)
-    call, grid, posargs, kwargs = _find_kernel_call(fn, stub_src, kernel_name)
+    call, grid, posargs, kwargs = _find_kernel_call(fn, stub_src, fwd_kernel_name)
 
-    # Build new function signature
-    param_names = [a.arg for a in fn.args.args]
-    if upstream_param in param_names:
-        raise ValueError(f"upstream_param {upstream_param!r} duplicates an existing parameter")
-    bwd_params = param_names + [upstream_param]
-    bwd_name = bwd_stub_name or f"{stub_name}_bwd"
+    # find launch stmt index
+    launch_idx = None
+    for i, s in enumerate(fn.body):
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
+            f = s.value.func
+            if isinstance(f, ast.Subscript) and isinstance(f.value, ast.Name) and f.value.id == fwd_kernel_name:
+                launch_idx = i; break
+    assert launch_idx is not None
 
-    # Find the forward kernel launch statement index so we can replace it in-place
-    launch_idx: Optional[int] = None
-    for i, stmt in enumerate(fn.body):
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-            func_expr = stmt.value.func
-            if isinstance(func_expr, ast.Subscript):
-                base = func_expr.value
-                if isinstance(base, ast.Name) and base.id == kernel_name:
-                    launch_idx = i
-                    break
-    if launch_idx is None:
-        raise ValueError(f"{kernel_name}[...] call statement not found inside {fn.name}")
-
-    # Split original body around the forward launch; drop explicit returns everywhere
-    pre_nodes = [s for s in fn.body[:launch_idx] if not isinstance(s, ast.Return)]
+    # split body around the launch, drop 'return'
+    pre_nodes  = [s for s in fn.body[:launch_idx] if not isinstance(s, ast.Return)]
     post_nodes = [s for s in fn.body[launch_idx+1:] if not isinstance(s, ast.Return)]
-    pre_lines = [textwrap.indent(_src_of(stmt, stub_src), "    ") for stmt in pre_nodes]
-    post_lines = [textwrap.indent(_src_of(stmt, stub_src), "    ") for stmt in post_nodes]
+    pre_lines  = [textwrap.indent(_src_of(s, stub_src), "    ") for s in pre_nodes]
+    post_lines = [textwrap.indent(_src_of(s, stub_src), "    ") for s in post_nodes]
 
-    # Validate indices
-    n_pos = len(posargs)
-    folded = sorted(set(folded_const_idxs or []))
-    def _chk_space(idxs, label):
-        bad = [i for i in idxs if not (0 <= i < n_pos)]
-        if bad:
-            raise ValueError(f"{label} contains invalid arg indices {bad}; kernel has {n_pos} positional args")
-    _chk_space(upstream_map.keys(), "upstream_map")
-    _chk_space(tensor_arg_idxs, "tensor_arg_idxs")
-    _chk_space(folded, "folded_const_idxs")
+    # fold positional args
+    folded = sorted(idx_folded)
+    kept_posargs = [a for j, a in enumerate(posargs) if j not in folded]
+    # shift outputs and pointer indices into kept-args space
+    shifted_upstream = _shift_indices(sorted(idxs_buffers), folded)
+    shifted_ptrs     = set(_shift_indices(ptr_arg_idxs, folded))
 
-    # Compute kept positional args and index shift
-    keep_pos = [i for i in range(n_pos) if i not in folded]
-    kept_posargs = [posargs[i] for i in keep_pos]
-    def _shift(i): return i - sum(f < i for f in folded)
+    # name upstream params
+    up_names = [f"upstream_{k}" for k in range(len(shifted_upstream))]
+    up_map = {i: up_names[k] for k, i in enumerate(shifted_upstream)}
 
-    shifted_upstream_map = { _shift(i): name for i, name in upstream_map.items() if i not in folded }
-    shifted_tensor_idxs = [ _shift(i) for i in tensor_arg_idxs if i not in folded ]
+    # params of the new stub = original stub params + upstreams
+    param_names = [a.arg for a in fn.args.args]
+    bwd_params = param_names + up_names
+    bwd_name = f"{stub_name}_bwd"
 
-    # Precompute grad vars for kept positional args
-    grad_var_names: List[str] = []
-    grad_lines: List[str] = []
-    for j, arg_code in enumerate(kept_posargs):
-        base = arg_code if arg_code.isidentifier() else f"arg{j}"
-        gname = f"grad_{base}"
-        if j in shifted_upstream_map:
-            src_name = shifted_upstream_map[j]
-            grad_lines.append(f"    {gname} = {src_name}.clone()")
-            grad_var_names.append(gname)
-        elif j in shifted_tensor_idxs:
-            grad_lines.append(f"    {gname} = {arg_code}.new_zeros({arg_code}.shape)")
-            grad_var_names.append(gname)
-        # else: non-tensor kept arg → no grad slot
+    # precompute grad vars for each kept positional arg
+    grad_lines, grad_vars = [], []
+    for j, a in enumerate(kept_posargs):
+        base = a if a.isidentifier() else f"arg{j}"
+        g = f"grad_{base}"
+        if j in up_map:
+            grad_lines.append(f"    {g} = {up_map[j]}.clone()")
+            grad_vars.append(g)
+        elif j in shifted_ptrs:
+            grad_lines.append(f"    {g} = torch.zeros_like({a})")
+            grad_vars.append(g)
+        # else: non‑tensor, skip
 
-    # Backward kernel call: kept positional args + grads + original kwargs
-    call_args = ", ".join(kept_posargs + grad_var_names)
+    # build backward launch (replace the fwd one)
     call_kwargs = (", " + ", ".join(kwargs)) if kwargs else ""
-    bwd_call = f"    {bwd_kernel_name}[{grid}]({call_args}{call_kwargs})"
+    bwd_call = f"    {bwd_kernel_sym}[{grid}]({', '.join(kept_posargs + grad_vars)}{call_kwargs})"
 
-    # Map kept positional arg source names to grad var names
-    name_to_grad: Dict[str, str] = {}
-    for j, arg_code in enumerate(kept_posargs):
-        base = arg_code if arg_code.isidentifier() else f"arg{j}"
-        name_to_grad[arg_code] = f"grad_{base}"
+    # return grads for original tensor *parameters* in declaration order
+    name_to_grad = {a: f"grad_{(a if a.isidentifier() else f'arg{j}')}" for j, a in enumerate(kept_posargs)}
+    tensor_param_names = [p for p in param_names
+                          if p in posargs and posargs.index(p) in set(i for i in range(len(posargs)) if i not in folded) and
+                             _shift_indices([posargs.index(p)], folded)[0] in shifted_ptrs]
+    ret = ", ".join(name_to_grad[p] for p in tensor_param_names) or ""
+    if len(tensor_param_names) == 1: ret += ","
 
-    # Return grads aligned to function parameters
-    ret_exprs: List[str] = []
-    for pname in tensor_params:
-        ret_exprs.append(name_to_grad.get(pname, "None"))
+    # assemble function
+    lines = [f"def {bwd_name}({', '.join(bwd_params)}):",
+             *pre_lines,
+             "    # --- codegen: precomputed grad args (no runtime loops) ---",
+             *grad_lines,
+             bwd_call,
+             *post_lines,
+             f"    return ({ret})"]
+    return "\n".join(lines)
 
-    ret_tuple = ", ".join(ret_exprs)
-    if len(ret_exprs) == 1:
-        ret_tuple += ","
+def _append_stub_into_raised(raised_py_path: str, bwd_stub_src: str, *, alias_to: str | None):
+    with open(raised_py_path, "a") as f:
+        f.write("\n# --- autodiff: generated backward stub ---\n")
+        f.write("import torch\n")
+        if alias_to:
+            f.write(f"kernel_bwd = {alias_to}\n")
+        else:
+            f.write("from triton.runtime.jit import JITFunction as _JF\n")
+            f.write("kernel_bwd = next(v for v in globals().values() if isinstance(v, _JF))\n")
+        f.write("\n")
+        f.write(bwd_stub_src)
+        f.write("\n")
 
-    # Rebuild function: keep pre, insert bwd launch at the original spot, then keep post
-    bwd_def = [
-        f"def {bwd_name}({', '.join(bwd_params)}):",
-        *pre_lines,
-        "    # --- codegen: precomputed grad args (no runtime loops) ---",
-        *grad_lines,
-        bwd_call,
-        *post_lines,
-        f"    return ({ret_tuple})",
-    ]
-    return "\n".join(bwd_def)
+
 
 
 # ---------------- minimal demo ----------------
@@ -217,58 +175,121 @@ if __name__ == "__main__":
 
 
 
-    user_stub = '''
-def stub_impl(
-        a,
-        b,
-        BLOCK_SIZE_M=16,
-        BLOCK_SIZE_N=16,
-        BLOCK_SIZE_K=16
-    ):
+#     user_stub = '''
+# def stub_impl(
+#         a,
+#         b,
+#         BLOCK_SIZE_M=16,
+#         BLOCK_SIZE_N=16,
+#         BLOCK_SIZE_K=16
+#     ):
 
-    # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-    assert a.is_contiguous(), "Matrix A must be contiguous"
-    M, K = a.shape
-    K, N = b.shape
-    # Allocates output.
+#     # Check constraints.
+#     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+#     assert a.is_contiguous(), "Matrix A must be contiguous"
+#     M, K = a.shape
+#     K, N = b.shape
+#     # Allocates output.
+#     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+#     # 1D launch kernel where each block gets its own program.
+#     # todo: passing grid with meta args isn't supported yet
+#     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
+#     print("grid: ", grid)
+#     kernel[grid](
+#         a, b, c,
+#         M, N, K,
+#         a.stride(0), a.stride(1),
+#         b.stride(0), b.stride(1),
+#         c.stride(0), c.stride(1),
+
+#         BLOCK_SIZE_M,
+#         BLOCK_SIZE_N,
+#         BLOCK_SIZE_K,
+#     )
+#     c = ...
+#     return c
+# '''.strip()
+
+
+
+    user_stub = '''
+
+def kernel():
+  pass
+
+def stub(a, b, BLOCK_SIZE_M=16, BLOCK_SIZE_N=16, BLOCK_SIZE_K=16):
+    assert a.shape[1] == b.shape[0]
+    M, K = a.shape; K, N = b.shape
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
-    # 1D launch kernel where each block gets its own program.
-    # todo: passing grid with meta args isn't supported yet
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
-    print("grid: ", grid)
     kernel[grid](
         a, b, c,
         M, N, K,
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_K,
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
     )
-    c = ...
     return c
 '''.strip()
 
-    code = gen_bwd_stub(
-        ### extract from user source ####
-        stub_src=user_stub,
-        #### fix these -- enforce user to use these specific names ###
-        stub_name="stub_impl",
-        kernel_name="kernel",
-        bwd_kernel_name="kernel_bwd",
+    sig = (
+        "[('*fp16','D'), ('*fp16','D'), ('*fp16','D'), "  # a_ptr, b_ptr, c_ptr  → tensors
+        "('i32',''), ('i32',''), ('i32',''), "            # M, N, K
+        "('i64',''), ('i64',''), ('i64',''), "            # a.stride(0/1), b.stride(0)
+        "('i64',''), ('i64',''), ('i64','')]"             # b.stride(1), c.stride(0/1)
+        "{'num_warps': 4}"
+    )
 
-        #### hardcode with upstream_1, upstream_2 etc -- based on the number of elements in the idxs_buffers set  ###
-        upstream_param="upstream",
-        #### get this from the python inspect.signatrue ? Aleternatively hardcode ####
-        tensor_params=["a", "b"],          # only 'a' requires a returned grad
-        ### get this from the kernel signature -- for every ptr in the sig, this is a tensor arg ###
-        tensor_arg_idxs=[0, 1, 2],       # 0:'a', 1:'out' are tensors
-        #### info contained in idxs_buffers set ####
-        upstream_map={2: "upstream"}, # index 1 (out) gets the upstream
-        #### these are my "idx_folded = _autodiff_info[-1]" ###
-        folded_const_idxs=[],         # no positional constants in this stub
+    # code = gen_bwd_stub_auto(
+    #     stub_src=user_stub,
+    #     signature_str=sig,
+    #     idxs_buffers=(2,),            # c is arg index 2 → gets upstream_0
+    #     idx_folded=(12, 13, 14),      # BLOCK_SIZE_M/N/K dropped in bwd
+    # )
+
+
+
+    # import inspect
+    stub_src = user_stub # inspect.getsource(stub_spec)
+    # folded indices (positional) were already computed in your hook
+    idx_folded = (12, 13, 14) #  [p[0] for p in compile_dict["constants"]]  # works with your current structure
+    # pointer positions from compile signature
+    ptr_idxs = _ptr_arg_idxs_from_signature(sig) # str(compile_dict["signature"]))
+    # which fwd-call args carry upstream
+    idxs_bufs = (2, ) # getattr(jit_fn, "_idxs_buffers", ())
+    # generate and append
+    code = gen_bwd_stub_auto(
+        stub_src,
+        stub_name="stub", # stub_spec.__name__,
+        fwd_kernel_name="kernel", # jit_fn.fn.__name__,
+        bwd_kernel_sym="kernel_bwd",
+        idxs_buffers=tuple(idxs_bufs),
+        idx_folded=tuple(idx_folded),
+        ptr_arg_idxs=tuple(ptr_idxs),
     )
     print(code)
+    # alias = f"backward_{jit_fn.fn.__name__}"   # matches raise.py’s function name
+    # _append_stub_into_raised(raised_py_path, code, alias_to=alias)
+
+
+    # code = gen_bwd_stub(
+    #     ### extract from user source ####
+    #     stub_src=user_stub,
+    #     #### fix these -- enforce user to use these specific names ###
+    #     stub_name="stub_impl",
+    #     kernel_name="kernel",
+    #     bwd_kernel_name="kernel_bwd",
+
+    #     #### hardcode with upstream_1, upstream_2 etc -- based on the number of elements in the idxs_buffers set  ###
+    #     upstream_param="upstream",
+    #     #### get this from the python inspect.signatrue ? Aleternatively hardcode ####
+    #     tensor_params=["a", "b"],          # only 'a' requires a returned grad
+    #     ### get this from the kernel signature -- for every ptr in the sig, this is a tensor arg ###
+    #     tensor_arg_idxs=[0, 1, 2],       # 0:'a', 1:'out' are tensors
+    #     #### info contained in idxs_buffers set ####
+    #     upstream_map={2: "upstream"}, # index 1 (out) gets the upstream
+    #     #### these are my "idx_folded = _autodiff_info[-1]" ###
+    #     folded_const_idxs=[],         # no positional constants in this stub
+    # )
+    # print(code)
