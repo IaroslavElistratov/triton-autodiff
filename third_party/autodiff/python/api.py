@@ -465,6 +465,18 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 triton.knobs.runtime.jit_post_compile_hook = my_post_hook
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 # it's not as much as a stub, but more like helper to wrap_bwd_kernel
 # from kernel_inputs -- the true stub is the user thing, this thing
 # just piggy backs on the true stub
@@ -653,6 +665,77 @@ def helper(spec, kernels, idxs):
             return cls.apply
 
     return _Helper
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
+# useful to provide llm with ability to overwirte stubs
+class StubOverrideDCK(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, stubs, *all_stub_inputs):
+
+        fwd_stub, bwd_stub = stubs
+        out = fwd_stub(*all_stub_inputs)
+
+        # ugly workaround because save_for_backward only works for tensor inputs
+        tensor_stub_inputs = [a for a in all_stub_inputs if isinstance(a, torch.Tensor)]
+        ctx.save_for_backward(*tensor_stub_inputs)
+        ctx.non_tensor_inputs = [a for a in all_stub_inputs if not isinstance(a, torch.Tensor)]
+        ctx.arg_types = [isinstance(a, torch.Tensor) for a in all_stub_inputs]
+
+        ctx.bwd_stub = bwd_stub
+
+        return out
+
+    @staticmethod
+    def backward(ctx, *upstream_grads): # wrt stub outputs
+
+        # reconstruct all fwd kernel args
+        all_stub_inputs = []
+        tensor_idx = 0
+        non_tensor_idx = 0
+        for is_tensor in ctx.arg_types:
+            if is_tensor:
+                all_stub_inputs.append(ctx.saved_tensors[tensor_idx])
+                tensor_idx += 1
+            else:
+                all_stub_inputs.append(ctx.non_tensor_inputs[non_tensor_idx])
+                non_tensor_idx += 1
+
+        # call bwd stub with all fwd stub inputs + upstream grads
+        downstream_grads = ctx.bwd_stub(*all_stub_inputs, *upstream_grads)
+
+        downstream_per_input = []
+        tensor_idx = 0
+        for i, is_tensor in enumerate(ctx.arg_types):
+            if is_tensor:
+                downstream_per_input.append(downstream_grads[tensor_idx])
+                tensor_idx += 1
+            else:
+                downstream_per_input.append(None)
+
+    return (None, *per_input_grads)
+
+
+
+
+
+
+
+
+
 
 
 

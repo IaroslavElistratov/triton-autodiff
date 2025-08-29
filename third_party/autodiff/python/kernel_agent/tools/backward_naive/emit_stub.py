@@ -253,14 +253,22 @@ def stub_impl(
 '''.strip()
 
     code = gen_bwd_stub(
+        ### extract from user source ####
         stub_src=user_stub,
+        #### fix these -- enforce user to use these specific names ###
         stub_name="stub_impl",
         kernel_name="kernel",
         bwd_kernel_name="kernel_bwd",
+
+        #### hardcode with upstream_1, upstream_2 etc -- based on the number of elements in the idxs_buffers set  ###
         upstream_param="upstream",
+        #### get this from the python inspect.signatrue ? Aleternatively hardcode ####
         tensor_params=["a", "b"],          # only 'a' requires a returned grad
+        ### get this from the kernel signature -- for every ptr in the sig, this is a tensor arg ###
         tensor_arg_idxs=[0, 1, 2],       # 0:'a', 1:'out' are tensors
+        #### info contained in idxs_buffers set ####
         upstream_map={2: "upstream"}, # index 1 (out) gets the upstream
+        #### these are my "idx_folded = _autodiff_info[-1]" ###
         folded_const_idxs=[],         # no positional constants in this stub
     )
     print(code)
