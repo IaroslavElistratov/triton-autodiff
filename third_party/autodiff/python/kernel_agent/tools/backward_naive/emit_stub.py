@@ -17,7 +17,7 @@ def _shift_indices(indices, folded):
     return [i - sum(f < i for f in folded) for i in indices]
 
 
-import ast, textwrap, inspect
+import ast, textwrap, inspect, sys
 
 def _src_of(node, src):
     seg = ast.get_source_segment(src, node)
@@ -92,7 +92,7 @@ def gen_bwd_stub_auto(
     # params of the new stub = original stub params + upstreams
     param_names = [a.arg for a in fn.args.args]
     bwd_params = param_names + up_names
-    bwd_name = f"{stub_name}_bwd"
+    bwd_name = f"backward_{stub_name}"
 
     # precompute grad vars for each kept positional arg
     grad_lines, grad_vars = [], []
@@ -122,7 +122,7 @@ def gen_bwd_stub_auto(
     # assemble function
     lines = [f"def {bwd_name}({', '.join(bwd_params)}):",
              *pre_lines,
-             "    # --- codegen: precomputed grad args (no runtime loops) ---",
+             "    # --- codegen stub ---",
              *grad_lines,
              bwd_call,
              *post_lines,
@@ -145,72 +145,38 @@ def _append_stub_into_raised(raised_py_path: str, bwd_stub_src: str, *, alias_to
 
 
 
-# ---------------- minimal demo ----------------
+# ---------------- CLI entry ----------------
 if __name__ == "__main__":
-#     user_stub = '''
-# import torch
-# def stub_impl(a):
-#     out = torch.empty_like(a)
-#     kernel[1,](a, out, BLOCK_SIZE=a.numel())
-#     return out
-# '''.strip()
 
-#     code = gen_bwd_stub(
-#         stub_src=user_stub,
-#         stub_name="stub_impl",
-#         kernel_name="kernel",
-#         bwd_kernel_name="kernel_bwd",
-#         upstream_param="upstream",
-#         tensor_params=["a"],          # only 'a' requires a returned grad
-#         tensor_arg_idxs=[0, 1],       # 0:'a', 1:'out' are tensors
-#         upstream_map={1: "upstream"}, # index 1 (out) gets the upstream
-#         folded_const_idxs=[],         # no positional constants in this stub
-#     )
-#     print(code)
+    if len(sys.argv) != 8:
+        print(
+            "Usage: python emit_stub.py <stub_src> <stub_name> <fwd_kernel_name> <bwd_kernel_sym> <idxs_buffers> <idx_folded> <signature_key>"
+        )
+        raise SystemExit(1)
+    stub_src = sys.argv[1]
+    stub_name = sys.argv[2]
+    fwd_kernel_name = sys.argv[3]
+    bwd_kernel_sym = sys.argv[4]
+    # parse tuples/lists like "(1, 2)" or "[1, 2]"
+    idxs_buffers = tuple(ast.literal_eval(sys.argv[5]))
+    idx_folded = tuple(ast.literal_eval(sys.argv[6]))
+    signature_key = sys.argv[7]
+    ptr_arg_idxs = tuple(_ptr_arg_idxs_from_signature(signature_key))
 
-
-
-
-
-
-
-
-#     user_stub = '''
-# def stub_impl(
-#         a,
-#         b,
-#         BLOCK_SIZE_M=16,
-#         BLOCK_SIZE_N=16,
-#         BLOCK_SIZE_K=16
-#     ):
-
-#     # Check constraints.
-#     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-#     assert a.is_contiguous(), "Matrix A must be contiguous"
-#     M, K = a.shape
-#     K, N = b.shape
-#     # Allocates output.
-#     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
-#     # 1D launch kernel where each block gets its own program.
-#     # todo: passing grid with meta args isn't supported yet
-#     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
-#     print("grid: ", grid)
-#     kernel[grid](
-#         a, b, c,
-#         M, N, K,
-#         a.stride(0), a.stride(1),
-#         b.stride(0), b.stride(1),
-#         c.stride(0), c.stride(1),
-
-#         BLOCK_SIZE_M,
-#         BLOCK_SIZE_N,
-#         BLOCK_SIZE_K,
-#     )
-#     c = ...
-#     return c
-# '''.strip()
+    code = gen_bwd_stub_auto(
+        stub_src,
+        stub_name=stub_name,
+        fwd_kernel_name=fwd_kernel_name,
+        bwd_kernel_sym=bwd_kernel_sym,
+        idxs_buffers=idxs_buffers,
+        idx_folded=idx_folded,
+        ptr_arg_idxs=ptr_arg_idxs,
+    )
+    print(code)
 
 
+
+def test():
 
     user_stub = '''
 
@@ -241,12 +207,6 @@ def stub(a, b, BLOCK_SIZE_M=16, BLOCK_SIZE_N=16, BLOCK_SIZE_K=16):
         "{'num_warps': 4}"
     )
 
-    # code = gen_bwd_stub_auto(
-    #     stub_src=user_stub,
-    #     signature_str=sig,
-    #     idxs_buffers=(2,),            # c is arg index 2 → gets upstream_0
-    #     idx_folded=(12, 13, 14),      # BLOCK_SIZE_M/N/K dropped in bwd
-    # )
 
 
 

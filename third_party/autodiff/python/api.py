@@ -145,18 +145,64 @@ def run_mlir_pass(path):
     #     draw_dot(path, mode="bwd")
 
 
-def raise_to_triton_lang(ttir_path):
-  # Run raiser and write the resulting Triton code to raised.py in the same directory
-  out_dir = os.path.dirname(ttir_path)
-  os.makedirs(out_dir, exist_ok=True)
-  raise_py = os.path.join(dir, "third_party/autodiff/python/kernel_agent/tools/backward_naive/raise.py")
-  proc = subprocess.run([sys.executable, raise_py, ttir_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-  if proc.returncode != 0:
-    print(proc.stderr)
-    raise RuntimeError(f"raise.py failed on {ttir_path}")
-  with open(os.path.join(out_dir, "raised.py"), "w") as f:
-    f.write(proc.stdout)
-  return os.path.join(out_dir, "raised.py")
+def raise_to_triton_lang(ttir_path: str):
+    out_dir = os.path.dirname(ttir_path)
+    os.makedirs(out_dir, exist_ok=True)
+    # Use repo root (TRITON_AUTODIFF_DIR) to locate raise.py in third_party tree
+    # This avoids relying on the backend file location.
+    raise_py = os.path.join(dir, "third_party/autodiff/python/kernel_agent/tools/backward_naive/raise.py")
+    proc = subprocess.run([sys.executable, raise_py, ttir_path],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        print(proc.stderr)
+        raise RuntimeError(f"raise.py failed on {ttir_path}")
+    dst = os.path.join(out_dir, "raised.py")
+    with open(dst, "w") as f:
+        f.write(proc.stdout)
+    return dst
+
+def emit_stub_to_file(
+    raised_py_path: str,
+    stub_src: str,
+    stub_name: str,
+    fwd_kernel_name: str,
+    bwd_kernel_sym: str,
+    idxs_buffers,
+    idx_folded,
+    signature_key: str,
+):
+    # Use repo root (TRITON_AUTODIFF_DIR) to locate emit_stub.py in third_party tree
+    emit_stub_py = os.path.join(
+        dir, "third_party/autodiff/python/kernel_agent/tools/backward_naive/emit_stub.py"
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            emit_stub_py,
+            stub_src,
+            stub_name,
+            fwd_kernel_name,
+            bwd_kernel_sym,
+            repr(tuple(idxs_buffers)),
+            repr(tuple(idx_folded)),
+            signature_key,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        print(proc.stderr)
+        raise RuntimeError(f"emit_stub.py failed for {raised_py_path}")
+    code = proc.stdout
+    # append into raised.py
+    print("writting stub to ", raised_py_path)
+    with open(raised_py_path, "a") as f:
+        f.write("\n")
+        f.write(code)
+        f.write("\n")
+    return code
+
 
 
 def load_raised_jit(raised_py_path):
@@ -378,7 +424,43 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         if USE_RAISED:
 
             if not raised_py_path:
+
+                ### generate kernel ###
+
                 raised_py_path = raise_to_triton_lang(bwd_fp)
+
+                ### generate stub ###
+
+                # folded indices (positional) were already computed in your hook
+                idx_folded = list(p[0] for p in compile_dict["constants"])  # works with current structure
+                # which fwd-call args carry upstream
+                idxs_bufs = getattr(jit_fn, "idxs_buffers", ())
+
+                # get user stub source lazily (module is fully initialized now)
+                mod_name = jit_fn.fn.__module__
+                # stub_name = getattr(jit_fn, "stub_name", "stub")
+                stub_name = "stub"
+                # user stub lives in the same module as their kenrel
+                stub_src = get_stub_src_from_module(mod_name, stub_name)
+
+                # generate and append via CLI script
+                emit_stub_to_file(
+                    raised_py_path,
+                    stub_src,
+                    stub_name,
+                    jit_fn.fn.__name__,
+                    f"backward_{jit_fn.fn.__name__}",
+                    tuple(idxs_bufs),
+                    tuple(idx_folded),
+                    key,
+                )
+
+                # todo-now:
+                # but also need to change what Op I emit below (use StubOverrideDCK instead of DCK)
+
+
+
+
             # if overwrite_fp is provided then raise the kernel stored in the provided file
             bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
             print("bwd_jit_fn._raised", bwd_jit_fn._raised)
@@ -679,56 +761,88 @@ def helper(spec, kernels, idxs):
 
 
 
-# same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
-# useful to provide llm with ability to overwirte stubs
-class StubOverrideDCK(torch.autograd.Function):
+# # same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
+# # useful to provide llm with ability to overwirte stubs
+# class StubOverrideDCK(torch.autograd.Function):
 
+#     @staticmethod
+#     def forward(ctx, stubs, *all_stub_inputs):
+
+#         fwd_stub, bwd_stub = stubs
+#         out = fwd_stub(*all_stub_inputs)
+
+#         # ugly workaround because save_for_backward only works for tensor inputs
+#         tensor_stub_inputs = [a for a in all_stub_inputs if isinstance(a, torch.Tensor)]
+#         ctx.save_for_backward(*tensor_stub_inputs)
+#         ctx.non_tensor_inputs = [a for a in all_stub_inputs if not isinstance(a, torch.Tensor)]
+#         ctx.arg_types = [isinstance(a, torch.Tensor) for a in all_stub_inputs]
+
+#         ctx.bwd_stub = bwd_stub
+
+#         return out
+
+#     @staticmethod
+#     def backward(ctx, *upstream_grads): # wrt stub outputs
+
+#         # reconstruct all fwd kernel args
+#         all_stub_inputs = []
+#         tensor_idx = 0
+#         non_tensor_idx = 0
+#         for is_tensor in ctx.arg_types:
+#             if is_tensor:
+#                 all_stub_inputs.append(ctx.saved_tensors[tensor_idx])
+#                 tensor_idx += 1
+#             else:
+#                 all_stub_inputs.append(ctx.non_tensor_inputs[non_tensor_idx])
+#                 non_tensor_idx += 1
+
+#         # call bwd stub with all fwd stub inputs + upstream grads
+#         downstream_grads = ctx.bwd_stub(*all_stub_inputs, *upstream_grads)
+
+#         downstream_per_input = []
+#         tensor_idx = 0
+#         for i, is_tensor in enumerate(ctx.arg_types):
+#             if is_tensor:
+#                 downstream_per_input.append(downstream_grads[tensor_idx])
+#                 tensor_idx += 1
+#             else:
+#                 downstream_per_input.append(None)
+
+#     return (None, *per_input_grads)
+
+
+class StubOverrideDCK(torch.autograd.Function):
     @staticmethod
     def forward(ctx, stubs, *all_stub_inputs):
-
         fwd_stub, bwd_stub = stubs
         out = fwd_stub(*all_stub_inputs)
-
-        # ugly workaround because save_for_backward only works for tensor inputs
-        tensor_stub_inputs = [a for a in all_stub_inputs if isinstance(a, torch.Tensor)]
-        ctx.save_for_backward(*tensor_stub_inputs)
-        ctx.non_tensor_inputs = [a for a in all_stub_inputs if not isinstance(a, torch.Tensor)]
-        ctx.arg_types = [isinstance(a, torch.Tensor) for a in all_stub_inputs]
-
+        ten = [x for x in all_stub_inputs if isinstance(x, torch.Tensor)]
+        ctx.save_for_backward(*ten)
+        ctx.non_ten = [x for x in all_stub_inputs if not isinstance(x, torch.Tensor)]
+        ctx.is_ten = [isinstance(x, torch.Tensor) for x in all_stub_inputs]
         ctx.bwd_stub = bwd_stub
-
         return out
 
     @staticmethod
-    def backward(ctx, *upstream_grads): # wrt stub outputs
+    def backward(ctx, *upstreams):
+        it_t = iter(ctx.saved_tensors)
+        it_n = iter(ctx.non_ten)
+        all_inps = [next(it_t) if t else next(it_n) for t in ctx.is_ten]
+        grads_for_tensors = ctx.bwd_stub(*all_inps, *upstreams)
 
-        # reconstruct all fwd kernel args
-        all_stub_inputs = []
-        tensor_idx = 0
-        non_tensor_idx = 0
-        for is_tensor in ctx.arg_types:
-            if is_tensor:
-                all_stub_inputs.append(ctx.saved_tensors[tensor_idx])
-                tensor_idx += 1
-            else:
-                all_stub_inputs.append(ctx.non_tensor_inputs[non_tensor_idx])
-                non_tensor_idx += 1
+        # align to forward inputs (Tensor -> grad, non‑Tensor -> None)
+        it_g = iter(grads_for_tensors)
+        per_input = [next(it_g) if t else None for t in ctx.is_ten]
+        return (None, *per_input)  # first arg (stubs tuple) has no grad
 
-        # call bwd stub with all fwd stub inputs + upstream grads
-        downstream_grads = ctx.bwd_stub(*all_stub_inputs, *upstream_grads)
+import sys, importlib, inspect, textwrap
 
-        downstream_per_input = []
-        tensor_idx = 0
-        for i, is_tensor in enumerate(ctx.arg_types):
-            if is_tensor:
-                downstream_per_input.append(downstream_grads[tensor_idx])
-                tensor_idx += 1
-            else:
-                downstream_per_input.append(None)
-
-    return (None, *per_input_grads)
-
-
+def get_stub_src_from_module(mod_name, stub_name: str) -> str:
+    mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+    print("[get_stub_src_from_module] mod", mod)
+    stub_obj = getattr(mod, stub_name)  # assumes the stub is a top-level def
+    stub_obj = inspect.unwrap(stub_obj) # in case user decorated the stub too
+    return textwrap.dedent(inspect.getsource(stub_obj))  # -> str
 
 
 
@@ -766,15 +880,18 @@ def create_new_jitfn(jit_func):
 # todo-low: can idxs_buffers determine automatically:
 #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
 #   - or, in mlir pass output idx of all inputs which are used in store nodes
-def autodiff(idxs_buffers): # , overwrite_fp=None
+def autodiff(idxs_buffers, stub_name=None): # , overwrite_fp=None
 
     def inner(fwd_kernel):
 
-        nonlocal idxs_buffers
+        nonlocal idxs_buffers, stub_name
         assert isinstance(idxs_buffers, (tuple, int)), f"idxs_buffers must be either tuple or int, got {type(idxs_buffers)}"
         # make the most common case slightly more convenient for usr
         if isinstance(idxs_buffers, int):
             idxs_buffers = (idxs_buffers, )
+
+        # for bwd stub gen
+        fwd_kernel.idxs_buffers = idxs_buffers
 
         bwd_kernel = create_new_jitfn(fwd_kernel)
 
