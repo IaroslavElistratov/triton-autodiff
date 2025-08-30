@@ -133,13 +133,13 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         if VERBOSE: print(f"[my hook] compile hook triggered on the fwd JITFunction: {fn.name}")
 
         compile_dict = compile
-        bwd_jit_fn = jit_fn._bwd_kernel
+        # bwd_jit_fn = jit_fn._bwd_kernel
 
         # 1) extract fwd_compiled_kernel
 
         device = driver.active.get_current_device()
         fwd_kernel_cache, target, backend, _binder = jit_fn.device_caches[device]
-        bwd_kernel_cache, target, backend, _binder = bwd_jit_fn.device_caches[device]
+        # bwd_kernel_cache, target, backend, _binder = bwd_jit_fn.device_caches[device]
 
         assert len(fwd_kernel_cache) == 1, "Temporary limitation: retracing is not yet supported."
 
@@ -205,13 +205,19 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             )
 
 
-            ### create StubOverrideDCK and install into user's module ###
-            create_stub_op(raised_py_path, mod_name, is_override_stub=True)
+            mod_name, stub_name = jit_fn._autodiff_stub_info
+
+            import runpy
+            bwd_fn = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
+            setattr(jit_fn, "_generated_bwd_stub", bwd_fn)
 
 
         # if overwrite_fp is provided then raise the kernel stored in the provided file
-        bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
-        print("bwd_jit_fn._raised", bwd_jit_fn._raised)
+        # bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
+        # print("bwd_jit_fn._raised", bwd_jit_fn._raised)
+
+        jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
+        # print("jit_fn._raised", jit_fn._raised)
 
         # expose artifacts in context store
         # publish raised.py as the backward file pointer
@@ -231,8 +237,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # includes compile‑time constants (declared `constexpr`) AND automatically specialised (ints/bools/tuples …)
         folded = list(p[0] for p in compile_dict["constants"])
         names = [jit_fn.arg_names[i] for i in folded]
-        # todo-high: ugly
-        bwd_jit_fn._autodiff_info.append(folded)
 
         if VERBOSE:
             print("[my_hook] compile_dict['signature']", compile_dict["signature"])
@@ -353,38 +357,104 @@ def get_stub_src_from_module(mod_name, stub_name: str) -> str:
 # now i'm sucessfully generating both raised user bwd kernel and bwd stub into a file.
 # Now basically i want to replace user's stub (fucntion with some name) in their module
 # with the StubOverrideDCK -- where StubOverrideDCK's fwd calls users stub and StubOverrideDCK.bwd
-# calls the generated stub (which in turn calls the genrated bwd kenrel)
-#
+# calls the generated stub (which in turn calls the genrated bwd kenrel);
 # I can't import form the generated_file (which contains the bwd_kernel and bwd_stub) -- becuase it's
 # compitely in a random place on disk -- instead seems what i can do is parse the genrated
 # file and python compile that and exec it into some new namespace to turn these
 # strings into a python fucntions, which i then case use to e.g.
 # closure capture into the StubOverrideDCK.backawrd
-def create_stub_op(gen_fp, usr_module_name, name="stub", *, is_override_stub=False):
-    import runpy
 
-    # gen_fp = "/abs/path/to/generated/autogen.py"
-    assert os.path.exists(gen_fp)
-    bwd_stub = runpy.run_path(gen_fp)[f"backward_{name}"]      # function object
 
-    # ns = {}
-    # exec(compile(generated_source_text, "<autogen>", "exec"), ns)
-    # bwd_stub = ns[f"backward_{name}"]
+# # autograd.Function[s] don't support kwargs,
+# # but user might be using their stub with kwargs
+# # this helper adds the kwarg support
+# def add_kwarg_support(spec, kernels):
+#     target_sig = inspect.signature(spec)
+#     params = target_sig.parameters.values()
 
-    usr_module = sys.modules.get(usr_module_name)
+#     class _Helper(StubOverrideDCK):
+#         __doc__       = StubOverrideDCK.__doc__
+#         __name__      = StubOverrideDCK.__name__
+#         __qualname__  = StubOverrideDCK.__qualname__
 
-    fwd_stub = getattr(usr_module, name)
-    stubs = (fwd_stub, bwd_stub)
+#         @classmethod
+#         def apply(cls, *args, **kwargs):
+#             bound = target_sig.bind_partial(*args, **kwargs)
+#             bound.apply_defaults()
+#             # fixed positional order for c++ apply
+#             ordered = [bound.arguments[p.name] for p in params]
+#             return super().apply(kernels, *ordered)
 
-    op = partial(StubOverrideDCK.apply, stubs)
+#     return _Helper
 
-    # note: in this case, ofc replacing the fwd user stub,
-    # not fwd user kernel -- becuase the StubOverrideDCK
-    # operates on the lvl of stubs
-    if is_override_stub:
-        # install to user module -- overwrite
-        # user fwd stub with the StubOverrideDCK
-        setattr(usr_module, name, op)
 
-    return op
+# # todo-low: can idxs_buffers determine automatically:
+# #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
+# #   - or, in mlir pass output idx of all inputs which are used in store nodes
+# def autodiff(kernel, idxs_buffers): # , overwrite_fp=None
 
+#     # for user it's more natual to specify "kernel=..." (and not "fwd_kernel")
+#     # but fwd_kernel reflects the semantics better
+#     fwd_kernel = kernel
+
+#     def inner(fwd_stub):
+
+#         # nonlocal idxs_buffers
+#         assert isinstance(idxs_buffers, (tuple, int)), f"idxs_buffers must be either tuple or int, got {type(idxs_buffers)}"
+#         # make the most common case slightly more convenient for usr
+#         if isinstance(idxs_buffers, int):
+#             idxs_buffers = (idxs_buffers, )
+
+#         # for bwd stub gen
+#         fwd_kernel.idxs_buffers = idxs_buffers
+#         # fwd_kernel._bwd_kernel = create_new_jitfn(fwd_kernel)
+#         fwd_kernel._is_fwd_kernel = True
+
+
+#         def _bwd_stub_proxy(*args, **kwargs):
+#             fn = getattr(fwd_kernel, "_generated_bwd_stub", None)
+#             if fn is None:
+#                 raise RuntimeError("backward stub not ready; run forward once")
+#             return fn(*args, **kwargs)
+
+#         stubs = (fwd_stub, _bwd_stub_proxy)
+#         op = add_kwarg_support(fwd_stub, stubs)
+
+#         return op # .apply
+
+#     return inner
+
+
+
+
+# api.py
+import inspect, functools
+
+def _make_stub_wrapper(fwd_stub, bwd_proxy):
+    sig   = inspect.signature(fwd_stub)
+    names = [p.name for p in sig.parameters.values()]
+
+    @functools.wraps(fwd_stub)  # keeps __name__/__qualname__/__doc__ and __wrapped__ for inspect.unwrap
+    def wrapped(*args, **kwargs):
+        bound = sig.bind_partial(*args, **kwargs); bound.apply_defaults()
+        ordered = [bound.arguments[n] for n in names]
+        return StubOverrideDCK.apply((fwd_stub, bwd_proxy), *ordered)
+    return wrapped
+
+def autodiff(kernel, idxs_buffers, stub_name=None):
+    fwd_kernel = kernel
+    def inner(fwd_stub):
+        idxs = (idxs_buffers,) if isinstance(idxs_buffers, int) else tuple(idxs_buffers)
+        # tag kernel for the hook
+        fwd_kernel.idxs_buffers      = idxs
+        fwd_kernel._bwd_kernel       = create_new_jitfn(fwd_kernel)
+        fwd_kernel._is_fwd_kernel    = True
+        fwd_kernel._autodiff_stub_info = (fwd_stub.__module__, fwd_stub.__name__)  # tell hook which stub
+        # late-resolving proxy that the hook will fill
+        def _bwd_stub_proxy(*args, **kwargs):
+            fn = getattr(fwd_kernel, "_generated_bwd_stub", None)
+            if fn is None:
+                raise RuntimeError("backward stub not ready; run forward once")
+            return fn(*args, **kwargs)
+        return _make_stub_wrapper(fwd_stub, _bwd_stub_proxy)   # do not return .apply directly
+    return inner

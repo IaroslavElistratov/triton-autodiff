@@ -11,7 +11,6 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-
 @triton.jit
 def kernel(
         a_ptr,
@@ -31,6 +30,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, z)
 
+@autodiff(kernel, idxs_buffers=3)
 def stub(a, b, c):
     output = torch.empty_like(a)
     grid = (1, 1, 1)

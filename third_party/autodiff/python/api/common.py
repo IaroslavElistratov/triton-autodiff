@@ -23,9 +23,6 @@ from triton.compiler import compile as compile_kernel
 from triton.backends.compiler import GPUTarget
 
 
-# True: raises backward TTIR to trtion-lang; and emits stub
-# False: uses backward TTIR directly
-USE_LEGACY_API = False
 
 VERBOSE = int(os.environ.get('VERBOSE', 0))
 assert VERBOSE in [0, 1, 2]
@@ -171,57 +168,3 @@ def create_new_jitfn(jit_func):
     new.pre_run_hooks = list(jit_func.pre_run_hooks)
 
     return new
-
-
-# todo-low: can idxs_buffers determine automatically:
-#   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
-#   - or, in mlir pass output idx of all inputs which are used in store nodes
-def autodiff(idxs_buffers, stub_name=None): # , overwrite_fp=None
-
-    def inner(fwd_kernel):
-
-        nonlocal idxs_buffers, stub_name
-        assert isinstance(idxs_buffers, (tuple, int)), f"idxs_buffers must be either tuple or int, got {type(idxs_buffers)}"
-        # make the most common case slightly more convenient for usr
-        if isinstance(idxs_buffers, int):
-            idxs_buffers = (idxs_buffers, )
-
-        # for bwd stub gen
-        fwd_kernel.idxs_buffers = idxs_buffers
-
-        bwd_kernel = create_new_jitfn(fwd_kernel)
-
-        # optionally, allows to overwrite backward kernel with a kernel stored at the provided file pointer
-        # if overwrite_fp=None, generates a new backward kernel and uses it
-        # else just "load_raised_jit" from that path
-        #
-        # not setting it here becuase it's not user who sets it but rather I do it,
-        # and execution-order wise, I do it after the user facing autodiff function has ran
-        # so no use to set it here
-        # fwd_kernel.overwrite_fp = overwrite_fp
-
-        # allows to associate a bwd JITFcuntion with this specific fwdKernel
-        # so that, from inside the compile hook (which will be triggered on the fwd JITFunciton)
-        # I can install the bwd CompiledKernel **on the backward JITFcuntion** (NOT fwd JITFcuntion)
-        fwd_kernel._bwd_kernel = bwd_kernel
-
-        # I'm registering compile hook on all JITFunction[s] (both forward and backward);
-        # this flag is needed to be able to early exit from the hook (avoids triggering
-        # the autograd machinery on already differentiated kernels)
-        fwd_kernel._is_fwd_kernel = True
-
-        if not USE_LEGACY_API:
-            # in this case do not want to overwrite user kernel with DifferentiatedCompiledKernel
-            # becuase instead i'm overwritting their stub (not kernel) with StubOverrideDCK
-            # and StubOverrideDCK.forward calls the original unchanged user fwd
-            return fwd_kernel
-        else:
-            wrapped_bwd_kernel = partial(wrap_bwd_kernel, fwd_kernel, bwd_kernel, idxs_buffers)
-            kernels = (fwd_kernel, wrapped_bwd_kernel)
-
-            # takes the signature form fwd_kernel's python fn
-            op = helper(fwd_kernel.fn, kernels, idxs_buffers)
-            return op
-
-    return inner
-

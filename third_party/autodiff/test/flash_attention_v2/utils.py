@@ -87,7 +87,7 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
-@autodiff(idxs_buffers=(4, 5))
+
 # todo: rm do_not_specialize
 @triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
 def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
@@ -175,6 +175,8 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
 BLOCK_M = 16
 BLOCK_N = 16
 
+
+@autodiff(_attn_fwd, idxs_buffers=(4, 5))
 def stub(q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]

@@ -1,9 +1,11 @@
-from .common import USE_LEGACY_API, autodiff
+# True: raises backward TTIR to trtion-lang; and emits stub
+# False: uses backward TTIR directly
+USE_LEGACY_API = False
 
 if USE_LEGACY_API:
-    from . import legacy as _backend  # noqa: F401
+    from .legacy import autodiff
 else:
-    from . import new as _backend  # noqa: F401
+    from .new import autodiff
 
 __all__ = ["autodiff"]
 

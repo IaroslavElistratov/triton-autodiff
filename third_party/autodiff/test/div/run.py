@@ -12,7 +12,6 @@ DEVICE = torch.device("cuda:0")
 torch.manual_seed(0)
 
 
-@autodiff(idxs_buffers=2)
 @triton.jit
 def kernel(
         a_ptr,
@@ -29,6 +28,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, z)
 
+@autodiff(kernel, idxs_buffers=2)
 def stub(a, b, BLOCK_SIZE=4):
     output = torch.empty_like(a)
     # todo: support meta

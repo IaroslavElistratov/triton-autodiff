@@ -11,7 +11,6 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-@autodiff(idxs_buffers=1)
 @triton.jit
 def kernel(
         x_ptr,  # *Pointer* to first input vector.
@@ -26,6 +25,8 @@ def kernel(
     # Write x + y back to DRAM.
     tl.store(output_ptr + offsets, output)
 
+
+@autodiff(kernel, idxs_buffers=1)
 def stub(x):
     # We need to preallocate the output.
     output = torch.empty_like(x)

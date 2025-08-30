@@ -11,7 +11,6 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-@autodiff(idxs_buffers=2)
 @triton.jit
 def kernel(
         a_ptr,
@@ -36,6 +35,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, y, mask=offsets<10)
 
+@autodiff(kernel, idxs_buffers=2)
 def stub(a, b, BLOCK_SIZE=4):
     output = torch.empty_like(a)
     assert a.device == DEVICE and output.device == DEVICE

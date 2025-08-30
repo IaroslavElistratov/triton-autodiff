@@ -8,7 +8,6 @@ from triton.backends.autodiff import autodiff
 
 # NOTE: copied from official triton tutorial -- https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py
 
-@autodiff(idxs_buffers=(1,4,5))
 @triton.jit
 def _layer_norm_fwd_fused(
     X,  # pointer to the input
@@ -63,6 +62,7 @@ def _layer_norm_fwd_fused(
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
+@autodiff(kernel=_layer_norm_fwd_fused, idxs_buffers=(1,4,5))
 def stub(x, weight, bias, eps=1e-5):
     # allocate output
     y = torch.empty_like(x)

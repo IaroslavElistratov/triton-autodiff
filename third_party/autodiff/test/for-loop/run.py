@@ -11,7 +11,6 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-@autodiff(idxs_buffers=1)
 @triton.jit
 def kernel(
       a_ptr,
@@ -33,6 +32,7 @@ def kernel(
 
     tl.store(output_ptr + offsets, accum)
 
+@autodiff(kernel, idxs_buffers=1)
 def stub(a):
     output = torch.zeros_like(a)
     n_elements = output.numel()

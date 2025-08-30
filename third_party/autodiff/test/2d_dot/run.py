@@ -11,7 +11,6 @@ torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
 
-@autodiff(idxs_buffers=2)
 @triton.jit
 def kernel(
         a_ptr,
@@ -28,6 +27,7 @@ def kernel(
     l = tl.dot(a, b)
     tl.store(output_ptr + offsets_2d, l)
 
+@autodiff(kernel, idxs_buffers=2)
 def stub(a, b):
     output = torch.empty(a.shape[0], b.shape[1]).to(dtype=torch.float32, device='cuda:0')
     # grid = lambda meta: (triton.cdiv(output.numel(), meta['BLOCK_SIZE']), )
