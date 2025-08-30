@@ -8,6 +8,8 @@ def _ptr_arg_idxs_from_signature(sig: str):
     idxs = []
     for i, it in enumerate(items):
         s = it.replace(" ", "")
+        # todo: pointer detection misses BF16 and is brittle
+        # if it.startswith("*"):  # any pointer arg
         if s.startswith("'*fp") or s.startswith("\"*fp"):
             idxs.append(i)
     return idxs
@@ -96,6 +98,7 @@ def gen_bwd_stub_auto(
     idxs_buffers,        # original fwd indices of output buffers
     idx_folded,          # positional indices specialized away in fwd
     ptr_arg_idxs,        # positional indices of pointer args in the fwd call
+    folded_names,        # names of constexpr/specialized params to drop from kwargs
 ):
     fn = _find_func(stub_src, stub_name)
     call, grid, posargs, kwargs = _find_kernel_call(fn, stub_src, fwd_kernel_name)
@@ -145,7 +148,27 @@ def gen_bwd_stub_auto(
         # else: non‑tensor, skip
 
     # build backward launch (replace the fwd one)
-    call_kwargs = (", " + ", ".join(kwargs)) if kwargs else ""
+    # keep kwargs except those folded by name; preserve **kwargs passthrough
+    #
+    # problem: i wasn't removing folded kwargs, so in the emited kernel call
+    # the generated code was still passing kwargs which were folded away, resulted in error;
+    # in my legacy path DifferentiatedCompiledKernel -> wrap_bwd_kernel, this was not a problem
+    # becuase in my api.helper i normalized a mix of user args + kwargs into args only,
+    # so dropping by index worked. But here (when using StubOverrideDCK)
+    # adding an arg canonicalization helper on the stub level won't help
+    # because i need to normlize args to the kernel call (not the stub call).
+    #
+    # solution: basically use get ordered names of args from the compile_dict["signature"]
+    # then use drop_folded idx to get the names of args we want to drop then drop
+    # these args by name
+    kept_kwargs = []
+    for kw in call.keywords:
+        if kw.arg is None:
+            kept_kwargs.append(f"**{_src_of(kw.value, stub_src)}")
+            continue
+        if kw.arg not in folded_names:
+            kept_kwargs.append(f"{kw.arg}={_src_of(kw.value, stub_src)}")
+    call_kwargs = (", " + ", ".join(kept_kwargs)) if kept_kwargs else ""
     bwd_call = f"    {bwd_kernel_sym}[{grid}]({', '.join(kept_posargs + grad_vars)}{call_kwargs})"
 
     # return grads for original tensor *parameters* in declaration order
@@ -190,7 +213,7 @@ if __name__ == "__main__":
 
     if len(sys.argv) != 8:
         print(
-            "Usage: python emit_stub.py <stub_src> <stub_name> <fwd_kernel_name> <bwd_kernel_sym> <idxs_buffers> <idx_folded> <signature_key>"
+            "Usage: python emit_stub.py <stub_src> <stub_name> <fwd_kernel_name> <bwd_kernel_sym> <idxs_buffers> <idx_folded> <signature>"
         )
         raise SystemExit(1)
     stub_src = sys.argv[1]
@@ -200,8 +223,13 @@ if __name__ == "__main__":
     # parse tuples/lists like "(1, 2)" or "[1, 2]"
     idxs_buffers = tuple(ast.literal_eval(sys.argv[5]))
     idx_folded = tuple(ast.literal_eval(sys.argv[6]))
-    signature_key = sys.argv[7]
-    ptr_arg_idxs = tuple(_ptr_arg_idxs_from_signature(signature_key))
+    # structured signature map: {'arg_name': 'type_str', ...}
+    sig_map = ast.literal_eval(sys.argv[7])
+    names = list(sig_map.keys())
+    # pointer positions for grad allocation
+    ptr_arg_idxs = tuple(i for i, t in enumerate(sig_map.values()) if isinstance(t, str) and t.startswith("*"))
+    # names of folded params (constexpr/specialized) from provided indices
+    folded_names = {names[i] for i in idx_folded if i < len(names)}
 
     code = gen_bwd_stub_auto(
         stub_src,
@@ -211,6 +239,7 @@ if __name__ == "__main__":
         idxs_buffers=idxs_buffers,
         idx_folded=idx_folded,
         ptr_arg_idxs=ptr_arg_idxs,
+        folded_names=folded_names,
     )
     print(code)
 

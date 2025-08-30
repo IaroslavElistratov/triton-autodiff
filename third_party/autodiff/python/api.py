@@ -1,5 +1,6 @@
 import sys
 import os
+import builtins
 # os.environ['TRITON_ALWAYS_COMPILE']='1'
 import hashlib
 import inspect
@@ -452,7 +453,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                     f"backward_{jit_fn.fn.__name__}",
                     tuple(idxs_bufs),
                     tuple(idx_folded),
-                    key,
+                    builtins.repr(compile_dict["signature"]),
                 )
 
 
