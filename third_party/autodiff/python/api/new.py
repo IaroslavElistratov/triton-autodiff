@@ -4,7 +4,8 @@ import inspect, functools
 from .common import *
 
 
-# todo: the two helpers below are ugly -- reorganize the package so that you can just
+# todo: replace the two subprocess helpers with import-first calls
+# the two helpers below are ugly -- reorganize the package so that you can just
 # import "raise" and "emit_stub" functions instead of needing to call them via subprocess.run
 def raise_to_triton_lang(ttir_path: str):
     out_dir = os.path.dirname(ttir_path)
@@ -194,7 +195,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # get user stub source lazily (module is fully initialized now)
             mod_name = jit_fn.fn.__module__
             # stub_name = getattr(jit_fn, "stub_name", "stub")
-            stub_name = "stub"
+            mod_name, stub_name = jit_fn._autodiff_stub_info
             # user stub lives in the same module as their kenrel
             stub_src = get_stub_src_from_module(mod_name, stub_name)
 
@@ -211,7 +212,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             )
 
 
-            mod_name, stub_name = jit_fn._autodiff_stub_info
             bwd_fn = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
             # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
             setattr(jit_fn, "_generated_bwd_stub", bwd_fn)
@@ -252,7 +252,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             print("Hard‑coded parameter indices:", folded)
             print("Hard‑coded parameter names:  ", names)
 
-    return False
+    return True
 
 
 # dont set it inside autograd fn, but rather set it here on module lvl (triggers at import)
@@ -294,16 +294,17 @@ class StubOverrideDCK(torch.autograd.Function):
         # call bwd stub with all fwd stub inputs + upstream grads
         grads_for_tensors = ctx.bwd_stub(*all_inps, **kw_up)
 
-        # align to forward inputs (Tensor -> grad, non‑Tensor -> None)
-        it_g = iter(grads_for_tensors)
-        per_input = [next(it_g) if t else None for t in ctx.is_ten]
-        return (None, *per_input)  # first arg (stubs tuple) has no grad
-
         # todo: layernorm tests fail because retrun order mismatches -- my code expects outputs
         # of the stub be in same order as inputs to the stub;
         # IOW: wrapper expects the backward stub to return one gradient per tensor
         # input parameter of the stub, in the stub’s declaration order
+        if len(grads_for_tensors) != sum(ctx.is_ten):
+            raise RuntimeError("Backward stub must return one grad per tensor input (in stub order).")
 
+        # align to forward inputs (Tensor -> grad, non‑Tensor -> None)
+        it_g = iter(grads_for_tensors)
+        per_input = [next(it_g) if t else None for t in ctx.is_ten]
+        return (None, *per_input)  # first arg (stubs tuple) has no grad
 
 import sys, importlib, inspect, textwrap
 
