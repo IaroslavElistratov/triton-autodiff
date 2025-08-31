@@ -100,16 +100,17 @@ namespace triton {
       llvm::report_fatal_error("markVisited received null operation pointer\n");
     }
 
-    NamedAttrList attrs;
-    attrs.append("autogradVisited", builder.getBoolAttr(true));
+    // preserve existing attributes (e.g. "gradOf") when setting new ones
+    NamedAttrList attrs(op->getAttrs());
+    attrs.set("autogradVisited", builder.getBoolAttr(true));
     if (mode == visitedType::Original)
-      attrs.append("isOrig", builder.getBoolAttr(true));
+      attrs.set("isOrig", builder.getBoolAttr(true));
     else if (mode == visitedType::Inserted)
-      attrs.append("isInserted", builder.getBoolAttr(true));
+      attrs.set("isInserted", builder.getBoolAttr(true));
     else if (mode == visitedType::Cloned)
-      attrs.append("isCloned", builder.getBoolAttr(true));
+      attrs.set("isCloned", builder.getBoolAttr(true));
     else if (mode == visitedType::GradPtrRebase)
-      attrs.append("isGradPtrRebase", builder.getBoolAttr(true));
+      attrs.set("isGradPtrRebase", builder.getBoolAttr(true));
     else {
       llvm::report_fatal_error("markVisited invalid visitedType value\n");
     }
