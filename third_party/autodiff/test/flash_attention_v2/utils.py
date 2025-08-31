@@ -172,12 +172,10 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 
-BLOCK_M = 16
-BLOCK_N = 16
 
 
 @autodiff(_attn_fwd, idxs_buffers=(4, 5))
-def stub(q, k, v, causal, sm_scale):
+def stub(q, k, v, causal, sm_scale, BLOCK_M=16, BLOCK_N=16):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
     # when v is in float8_e5m2 it is transposed.

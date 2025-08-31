@@ -84,9 +84,14 @@ def stub(x, weight, bias, eps=1e-5):
     grid = (M, )
     print("grid:", grid)
     _layer_norm_fwd_fused[grid](  #
-        x_arg, y, weight, bias, mean, rstd,  #
+        # todo-high: when use x_arg in the kernel call below, the generated stub
+        # does not return grads wrt x (input of this stub) -- the generated stub
+        # only returns (grad_weight, grad_bias). The stub emitter
+        # drops x because the kernel call uses the alias x_arg, so the
+        # "return grads for parameters present in the call" logic never maps back to x
+        x, y, weight, bias, mean, rstd,  #
         x_arg.stride(0), N, eps,  #
-        # todo-now: commenting out "num_warps=num_warps, num_ctas=1" solves the error!
+        # old-todo: commenting out "num_warps=num_warps, num_ctas=1" solves the error!
         BLOCK_SIZE=BLOCK_SIZE #, num_warps=num_warps, num_ctas=1
     )
     return y

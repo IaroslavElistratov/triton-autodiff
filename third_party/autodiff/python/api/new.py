@@ -4,6 +4,8 @@ import inspect, functools
 from .common import *
 
 
+# todo: the two helpers below are ugly -- reorganize the package so that you can just
+# import "raise" and "emit_stub" functions instead of needing to call them via subprocess.run
 def raise_to_triton_lang(ttir_path: str):
     out_dir = os.path.dirname(ttir_path)
     os.makedirs(out_dir, exist_ok=True)
@@ -296,6 +298,11 @@ class StubOverrideDCK(torch.autograd.Function):
         it_g = iter(grads_for_tensors)
         per_input = [next(it_g) if t else None for t in ctx.is_ten]
         return (None, *per_input)  # first arg (stubs tuple) has no grad
+
+        # todo: layernorm tests fail because retrun order mismatches -- my code expects outputs
+        # of the stub be in same order as inputs to the stub;
+        # IOW: wrapper expects the backward stub to return one gradient per tensor
+        # input parameter of the stub, in the stub’s declaration order
 
 
 import sys, importlib, inspect, textwrap
