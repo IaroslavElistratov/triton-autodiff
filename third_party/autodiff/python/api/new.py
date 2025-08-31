@@ -1,4 +1,8 @@
+import runpy
+import inspect, functools
+
 from .common import *
+
 
 def raise_to_triton_lang(ttir_path: str):
     out_dir = os.path.dirname(ttir_path)
@@ -206,9 +210,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
 
             mod_name, stub_name = jit_fn._autodiff_stub_info
-
-            import runpy
             bwd_fn = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
+            # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
             setattr(jit_fn, "_generated_bwd_stub", bwd_fn)
 
 
@@ -258,62 +261,10 @@ triton.knobs.runtime.jit_post_compile_hook = my_post_hook
 
 
 
-
-
-
-
-
-# # same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
-# # useful to provide llm with ability to overwirte stubs
-# class StubOverrideDCK(torch.autograd.Function):
-
-#     @staticmethod
-#     def forward(ctx, stubs, *all_stub_inputs):
-
-#         fwd_stub, bwd_stub = stubs
-#         out = fwd_stub(*all_stub_inputs)
-
-#         # ugly workaround because save_for_backward only works for tensor inputs
-#         tensor_stub_inputs = [a for a in all_stub_inputs if isinstance(a, torch.Tensor)]
-#         ctx.save_for_backward(*tensor_stub_inputs)
-#         ctx.non_tensor_inputs = [a for a in all_stub_inputs if not isinstance(a, torch.Tensor)]
-#         ctx.arg_types = [isinstance(a, torch.Tensor) for a in all_stub_inputs]
-
-#         ctx.bwd_stub = bwd_stub
-
-#         return out
-
-#     @staticmethod
-#     def backward(ctx, *upstream_grads): # wrt stub outputs
-
-#         # reconstruct all fwd kernel args
-#         all_stub_inputs = []
-#         tensor_idx = 0
-#         non_tensor_idx = 0
-#         for is_tensor in ctx.arg_types:
-#             if is_tensor:
-#                 all_stub_inputs.append(ctx.saved_tensors[tensor_idx])
-#                 tensor_idx += 1
-#             else:
-#                 all_stub_inputs.append(ctx.non_tensor_inputs[non_tensor_idx])
-#                 non_tensor_idx += 1
-
-#         # call bwd stub with all fwd stub inputs + upstream grads
-#         downstream_grads = ctx.bwd_stub(*all_stub_inputs, *upstream_grads)
-
-#         downstream_per_input = []
-#         tensor_idx = 0
-#         for i, is_tensor in enumerate(ctx.arg_types):
-#             if is_tensor:
-#                 downstream_per_input.append(downstream_grads[tensor_idx])
-#                 tensor_idx += 1
-#             else:
-#                 downstream_per_input.append(None)
-
-#     return (None, *per_input_grads)
-
-
+# same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
+# useful to provide llm with ability to overwirte stubs
 class StubOverrideDCK(torch.autograd.Function):
+
     @staticmethod
     def forward(ctx, stubs, *all_stub_inputs):
         fwd_stub, bwd_stub = stubs
@@ -326,15 +277,19 @@ class StubOverrideDCK(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, *upstreams):
+    def backward(ctx, *upstreams): # wrt stub outputs
+
+        # reconstruct all fwd kernel args
         it_t = iter(ctx.saved_tensors)
         it_n = iter(ctx.non_ten)
         all_inps = [next(it_t) if t else next(it_n) for t in ctx.is_ten]
+
         # in emit_stub.py i made upstream args (to the generated bwd stub) to be keyword only
         # and then appended the added upstream_* args to the end bwd stub's arg list.
         # becuase I want to preserve defult args which user orig stub might have,
         # and not break python’s rule that non‑default params cannot follow defaulted ones
         kw_up = {f"upstream_{i}": g for i, g in enumerate(upstreams)}
+        # call bwd stub with all fwd stub inputs + upstream grads
         grads_for_tensors = ctx.bwd_stub(*all_inps, **kw_up)
 
         # align to forward inputs (Tensor -> grad, non‑Tensor -> None)
@@ -365,96 +320,45 @@ def get_stub_src_from_module(mod_name, stub_name: str) -> str:
 # closure capture into the StubOverrideDCK.backawrd
 
 
-# # autograd.Function[s] don't support kwargs,
-# # but user might be using their stub with kwargs
-# # this helper adds the kwarg support
-# def add_kwarg_support(spec, kernels):
-#     target_sig = inspect.signature(spec)
-#     params = target_sig.parameters.values()
-
-#     class _Helper(StubOverrideDCK):
-#         __doc__       = StubOverrideDCK.__doc__
-#         __name__      = StubOverrideDCK.__name__
-#         __qualname__  = StubOverrideDCK.__qualname__
-
-#         @classmethod
-#         def apply(cls, *args, **kwargs):
-#             bound = target_sig.bind_partial(*args, **kwargs)
-#             bound.apply_defaults()
-#             # fixed positional order for c++ apply
-#             ordered = [bound.arguments[p.name] for p in params]
-#             return super().apply(kernels, *ordered)
-
-#     return _Helper
-
-
-# # todo-low: can idxs_buffers determine automatically:
-# #   - in AG.fwd -- run kernel once and see which inputs were changed as result of executing kernel;
-# #   - or, in mlir pass output idx of all inputs which are used in store nodes
-# def autodiff(kernel, idxs_buffers): # , overwrite_fp=None
-
-#     # for user it's more natual to specify "kernel=..." (and not "fwd_kernel")
-#     # but fwd_kernel reflects the semantics better
-#     fwd_kernel = kernel
-
-#     def inner(fwd_stub):
-
-#         # nonlocal idxs_buffers
-#         assert isinstance(idxs_buffers, (tuple, int)), f"idxs_buffers must be either tuple or int, got {type(idxs_buffers)}"
-#         # make the most common case slightly more convenient for usr
-#         if isinstance(idxs_buffers, int):
-#             idxs_buffers = (idxs_buffers, )
-
-#         # for bwd stub gen
-#         fwd_kernel.idxs_buffers = idxs_buffers
-#         # fwd_kernel._bwd_kernel = create_new_jitfn(fwd_kernel)
-#         fwd_kernel._is_fwd_kernel = True
-
-
-#         def _bwd_stub_proxy(*args, **kwargs):
-#             fn = getattr(fwd_kernel, "_generated_bwd_stub", None)
-#             if fn is None:
-#                 raise RuntimeError("backward stub not ready; run forward once")
-#             return fn(*args, **kwargs)
-
-#         stubs = (fwd_stub, _bwd_stub_proxy)
-#         op = add_kwarg_support(fwd_stub, stubs)
-
-#         return op # .apply
-
-#     return inner
-
-
-
-
-# api.py
-import inspect, functools
-
-def _make_stub_wrapper(fwd_stub, bwd_proxy):
+# autograd.Function[s] doesn't support kwargs, but user might be
+# using their stub with kwargs this helper adds the kwarg support
+def _add_kwarg_support(fwd_stub, bwd_proxy):
     sig   = inspect.signature(fwd_stub)
     names = [p.name for p in sig.parameters.values()]
 
-    @functools.wraps(fwd_stub)  # keeps __name__/__qualname__/__doc__ and __wrapped__ for inspect.unwrap
+    @functools.wraps(fwd_stub)  # keeps __name__, __qualname__, __doc__ and __wrapped__ for inspect.unwrap
     def wrapped(*args, **kwargs):
         bound = sig.bind_partial(*args, **kwargs); bound.apply_defaults()
+        # fixed positional order for c++ apply
         ordered = [bound.arguments[n] for n in names]
         return StubOverrideDCK.apply((fwd_stub, bwd_proxy), *ordered)
     return wrapped
 
+
+
 def autodiff(kernel, idxs_buffers, stub_name=None):
+    # for user it's more natual to specify "kernel=..." (and not "fwd_kernel")
+    # but fwd_kernel reflects the semantics better
     fwd_kernel = kernel
     def inner(fwd_stub):
+        # assert isinstance(idxs_buffers, (tuple, int)), f"idxs_buffers must be either tuple or int, got {type(idxs_buffers)}"
         idxs = (idxs_buffers,) if isinstance(idxs_buffers, int) else tuple(idxs_buffers)
         # tag kernel for the hook
-        fwd_kernel.idxs_buffers      = idxs
-        fwd_kernel._bwd_kernel       = create_new_jitfn(fwd_kernel)
-        fwd_kernel._is_fwd_kernel    = True
+        fwd_kernel.idxs_buffers = idxs
+        fwd_kernel._is_fwd_kernel = True
         fwd_kernel._autodiff_stub_info = (fwd_stub.__module__, fwd_stub.__name__)  # tell hook which stub
-        # late-resolving proxy that the hook will fill
+        # late-resolving proxy that the hook will fill;
+        # when writting approach which decorates stub (not the kernel as in the legacy api) --
+        # i couldn't easily return StubOverrideDCK from my stub decorator (becuase StubOverrideDCK
+        # gets created only later and from inside the hook) -- but when my autodiff decorator runs
+        # don't yet have access to the bwd generated stub.
+        # Solution is to basically 1) inside the hook (when the bwd stub is created) install it on some
+        # kernel's attribute and 2) make StubOverrideDCK.backward to check for that attribute on the kernel
+        # (to see if the bwd_stub has been installed there by the hook or not)
         def _bwd_stub_proxy(*args, **kwargs):
             fn = getattr(fwd_kernel, "_generated_bwd_stub", None)
             if fn is None:
                 raise RuntimeError("backward stub not ready; run forward once")
             return fn(*args, **kwargs)
-        return _make_stub_wrapper(fwd_stub, _bwd_stub_proxy)   # do not return .apply directly
+        return _add_kwarg_support(fwd_stub, _bwd_stub_proxy)   # do not return .apply directly
     return inner
