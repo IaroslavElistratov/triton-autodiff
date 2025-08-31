@@ -103,6 +103,23 @@ def gen_bwd_stub_auto(
     fn = _find_func(stub_src, stub_name)
     call, grid, posargs, kwargs = _find_kernel_call(fn, stub_src, fwd_kernel_name)
 
+    # add upstream (args to the generated stub) only for values the stub returns;
+    # previsoly emitter asked for upstream for all mutated buffers. In layernorm the stub returns
+    # only y, but the generated bwd stub requires upstream_0, upstream_1, upstream_2 for y, mean, rstd,
+    # so Autograd supplies one upstream and Python raises “missing ... upstream_1 and upstream_2.”
+    def _returned_names(func_node):
+        out = set()
+        class V(ast.NodeVisitor):
+            def visit_Return(self, node):
+                def grab(n):
+                    if isinstance(n, ast.Name): out.add(n.id)
+                    elif isinstance(n, (ast.Tuple, ast.List)):
+                        for e in n.elts: grab(e)
+                if node.value is not None: grab(node.value)
+        V().visit(func_node)
+        return out
+    ret_names = _returned_names(fn)
+
     # find launch stmt index
     launch_idx = None
     for i, s in enumerate(fn.body):
@@ -122,7 +139,10 @@ def gen_bwd_stub_auto(
     folded = sorted(idx_folded)
     kept_posargs = [a for j, a in enumerate(posargs) if j not in folded]
     # shift outputs and pointer indices into kept-args space
-    shifted_upstream = _shift_indices(sorted(idxs_buffers), folded)
+    # positional kernel args whose Names are returned by the stub
+    up_pos = [i for i, a in enumerate(call.args)
+              if isinstance(a, ast.Name) and a.id in ret_names]
+    shifted_upstream = _shift_indices(sorted(set(up_pos)), folded)
     shifted_ptrs     = set(_shift_indices(ptr_arg_idxs, folded))
 
     # name upstream params
