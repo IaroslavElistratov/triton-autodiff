@@ -226,6 +226,11 @@ class Raiser:
         self.registry = self._build_registry()
         # Track current gradient group label to reduce noisy headers
         self._last_grad_of: Optional[str] = None
+        # Python argument names by kernel-arg index for grouping via ad.arg_idx
+        # Inline note: previously headers came from gradOf text and could show
+        # stride_* due to provenance landing on stride args. We now prefer
+        # ad.arg_idx -> python arg name, then ad.of, then legacy gradOf.
+        self._arg_names: List[str] = []
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -281,11 +286,35 @@ class Raiser:
         # except Exception:
         #     return None
 
+    def _int_attr(self, op, name: str) -> Optional[int]:
+        # Prefer typed integer attribute
+        v = op.get_int_attr(name)
+        if v is not None:
+            return int(v)
+        # Fallback: textual attribute like "1 : i64" or "1"
+        # try:
+        #     t = op.get_attr_text(name)
+        #     if t is None:
+        #         return None
+        #     s = str(t).strip()
+        #     s = s.split()[0]
+        #     return int(s)
+        # except Exception:
+        return None
+
+    def _group_label(self, op) -> Optional[str]:
+        # 1) canonical: ad.arg_idx -> python kernel arg name
+        idx = self._int_attr(op, "ad.arg_idx")
+        if idx is not None and 0 <= idx < len(self._arg_names):
+            return self._arg_names[idx]
+        # 2) fallback: explicit human label
+        return self._attr_text(op, "ad.of") or self._attr_text(op, "gradOf")
+
     def _maybe_emit_grad_header(self, op) -> None:
         if not self.opts.emit_grad_groups:
             return
-        # Prefer clean tag 'ad.of'; fall back to legacy 'gradOf'
-        src = self._attr_text(op, "gradOf")
+        # Prefer kernel arg mapping; fallback to explicit label
+        src = self._group_label(op)
         if not src:
             return
         if src != self._last_grad_of:
@@ -738,6 +767,8 @@ class Raiser:
                 v = func.args(i)
                 nm = self._hints.get(self._vid(v), f"arg{i}")
                 arg_names.append(self._bind(v, nm))
+        # Save for grouping labels by kernel-arg index
+        self._arg_names = list(arg_names)
 
         self.lines.append("@triton.jit")
         self.lines.append(f"def backward_{self.func_name}({', '.join(arg_names)}):")

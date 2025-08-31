@@ -188,6 +188,10 @@ namespace triton {
       // if write that exact NameLoc into ad.of, comments would read “grads for bwd_...”, which is incorrect
       NameLoc fwdReadable = createNodeName(op, "fwd_");
       currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
+      // If this op touches a pointer operand, derive the kernel-arg index
+      // Load/Store have ptr at operand(0); for others this is best-effort
+      if (op->getNumOperands() > 0)
+        currentGradArgIdx = labelFromPtr(*builder, op->getOperand(0)).second;
 
       // print only if changed
       std::string initialIR;
@@ -247,6 +251,8 @@ namespace triton {
       currentNodeName = nodeName;
       NameLoc fwdReadable = createNodeName(op, "fwd_");
       currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
+      if (op->getNumOperands() > 0)
+        currentGradArgIdx = labelFromPtr(*builder, op->getOperand(0)).second;
 
       // print only if changed
       std::string initialIR;
@@ -338,6 +344,8 @@ namespace triton {
       currentNodeName = nodeName;
       NameLoc fwdReadable = createNodeName(op, "fwd_");
       currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
+      if (op->getNumOperands() > 0)
+        currentGradArgIdx = labelFromPtr(*builder, op->getOperand(0)).second;
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         handleLoadBackward(loadOp, func, *this);

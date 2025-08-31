@@ -21,6 +21,8 @@
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Signals.h" // report_fatal_error
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace triton {
@@ -115,6 +117,52 @@ namespace triton {
       llvm::report_fatal_error("markVisited invalid visitedType value\n");
     }
     op->setAttrs(attrs);
+  }
+
+  // === helpers to derive kernel-arg provenance from a pointer Value ===
+  // Root-cause note:
+  //   Flash-attn mixes pointer math with stride integers. If we naively accept
+  //   the first BlockArgument as the "owner", we often pick stride_* ints.
+  //   That leads to ad.arg_idx pointing at stride args and the raiser printing
+  //   headers like "stride_kn". Fix: only accept pointer-typed BlockArguments
+  //   as base pointers; skip non-pointer args and keep walking.
+  static Value _findBasePtr(Value anyPtr) {
+    if (!anyPtr)
+      return Value();
+    if (auto ba = dyn_cast<BlockArgument>(anyPtr))
+      return ba;
+    SmallVector<Operation*> worklist;
+    DenseSet<Operation*> seen;
+    if (Operation *op = anyPtr.getDefiningOp())
+      worklist.push_back(op);
+    while (!worklist.empty()) {
+      Operation *cur = worklist.pop_back_val();
+      for (Value v : cur->getOperands()) {
+        if (auto ba = dyn_cast<BlockArgument>(v))
+          return ba;
+        if (Operation *def = v.getDefiningOp())
+          if (seen.insert(def).second)
+            worklist.push_back(def);
+      }
+    }
+    return Value();
+  }
+
+  std::pair<StringAttr, IntegerAttr> labelFromPtr(OpBuilder &builder, Value anyPtr) {
+    StringAttr ofAttr = builder.getStringAttr("arg");
+    IntegerAttr idxAttr;
+    Value base = _findBasePtr(anyPtr);
+    if (auto ba = dyn_cast_or_null<BlockArgument>(base)) {
+      int64_t idx = ba.getArgNumber();
+      idxAttr = builder.getI64IntegerAttr(idx);
+      if (auto nl = dyn_cast<NameLoc>(ba.getLoc())) {
+        ofAttr = builder.getStringAttr(nl.getName().getValue());
+      } else {
+        std::string s = (Twine("arg") + Twine(idx)).str();
+        ofAttr = builder.getStringAttr(s);
+      }
+    }
+    return {ofAttr, idxAttr};
   }
 
   Value getUpstreamGrad(Value result, const llvm::DenseMap<Value, Value> &gradMap) {

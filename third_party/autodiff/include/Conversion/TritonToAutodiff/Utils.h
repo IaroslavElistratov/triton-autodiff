@@ -5,6 +5,7 @@
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Block.h"
 #include "llvm/Support/raw_ostream.h"
+#include <utility>
 
 namespace mlir {
 namespace triton {
@@ -75,6 +76,9 @@ namespace triton {
   Value createBroadcastOrSplat(Value input, Type targetType, Location loc, OpBuilder &builder);
 
   NameLoc createNodeName(Operation *op, std::string prefix);
+
+  // Derive readable label and kernel-arg index from a pointer Value
+  std::pair<StringAttr, IntegerAttr> labelFromPtr(OpBuilder &builder, Value anyPtr);
 
 } // namespace triton
 } // namespace mlir
