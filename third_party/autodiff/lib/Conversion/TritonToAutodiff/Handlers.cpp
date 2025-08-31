@@ -871,8 +871,10 @@ namespace triton {
             pass.currentNodeName,
             combinerBlock->getArgument(0),
             combinerBlock->getArgument(1));
+        pass.tagGradOp(sum);
 
-        blockBuilder.create<triton::ReduceReturnOp>(pass.currentNodeName, sum.getResult());
+        auto ret = blockBuilder.create<triton::ReduceReturnOp>(pass.currentNodeName, sum.getResult());
+        pass.tagGradOp(ret);
 
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1109,8 +1111,10 @@ namespace triton {
           pass.currentNodeName,
           combinerBlock->getArgument(0),
           combinerBlock->getArgument(1));
+      pass.tagGradOp(sum);
 
-      blockBuilder.create<triton::ReduceReturnOp>(pass.currentNodeName, sum.getResult());
+      auto ret = blockBuilder.create<triton::ReduceReturnOp>(pass.currentNodeName, sum.getResult());
+      pass.tagGradOp(ret);
 
       // Update gradient for next reduction
       currentGrad = reduceOp->getResult(0);

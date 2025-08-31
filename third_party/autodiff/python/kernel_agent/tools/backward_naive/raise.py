@@ -25,6 +25,8 @@ from utils import build_value_name_hints
 class RaiserOptions:
     # If True, print arith with symbols (a+b) instead of tl.add(a,b)
     infix_arith: bool = True
+    # Emit headers grouping gradients by their source forward op
+    emit_grad_groups: bool = True
 
 
 # ----------------------------- Type helpers ----------------------------------
@@ -222,6 +224,8 @@ class Raiser:
         self._hints: Dict[int, str] = build_value_name_hints(self.m)
         self.env: Dict[int, str] = {}
         self.registry = self._build_registry()
+        # Track current gradient group label to reduce noisy headers
+        self._last_grad_of: Optional[str] = None
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -258,6 +262,38 @@ class Raiser:
     def _bitcast(self, x: str, dst_ty: mlir.type) -> str:
         dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
         return f"tl.bitcast({x}, {dty})"
+
+    def _attr_text(self, op, name: str) -> Optional[str]:
+        # Prefer typed string attribute when available to avoid parsing quotes
+        s = op.get_str_attr(name)
+        if s is not None:
+            return str(s)
+
+        # # Fallback: textual attr representation
+        # try:
+        #     v = op.get_attr_text(name)
+        #     if v is None:
+        #         return None
+        #     s = str(v).strip()
+        #     if len(s) >= 2 and s[0] == s[-1] and s[0] in ('\"', "'"):
+        #         s = s[1:-1]
+        #     return s or None
+        # except Exception:
+        #     return None
+
+    def _maybe_emit_grad_header(self, op) -> None:
+        if not self.opts.emit_grad_groups:
+            return
+        # Prefer clean tag 'ad.of'; fall back to legacy 'gradOf'
+        src = self._attr_text(op, "gradOf")
+        if not src:
+            return
+        if src != self._last_grad_of:
+            self._last_grad_of = src
+            # Visual spacer between groups
+            if self.lines and not self.lines[-1].strip() == "":
+                self.lines.append("")
+            self.lines.append(f"    # grads for {src}")
 
     # ---- registry
     def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
@@ -665,6 +701,9 @@ class Raiser:
         if name.startswith(("scf.", "cf.")):
             self.lines.append(f"    # TODO: raise structured control-flow: {name}")
             return
+
+        # Emit gradient grouping header if available
+        self._maybe_emit_grad_header(op)
 
         # Pre-bind results with friendly names (or minted as fallback)
         res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]

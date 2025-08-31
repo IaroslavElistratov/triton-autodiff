@@ -184,6 +184,10 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
+      // backward ops use currentNodeName = createNodeName(op, "bwd_") so all inserted grad IR has a backward-scoped NameLoc,
+      // if write that exact NameLoc into ad.of, comments would read “grads for bwd_...”, which is incorrect
+      NameLoc fwdReadable = createNodeName(op, "fwd_");
+      currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
 
       // print only if changed
       std::string initialIR;
@@ -241,6 +245,8 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
+      NameLoc fwdReadable = createNodeName(op, "fwd_");
+      currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
 
       // print only if changed
       std::string initialIR;
@@ -330,6 +336,8 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
+      NameLoc fwdReadable = createNodeName(op, "fwd_");
+      currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         handleLoadBackward(loadOp, func, *this);
