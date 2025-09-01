@@ -185,7 +185,7 @@ namespace triton {
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
       // backward ops use currentNodeName = createNodeName(op, "bwd_") so all inserted grad IR has a backward-scoped NameLoc,
-      // if write that exact NameLoc into ad.of, comments would read “grads for bwd_...”, which is incorrect
+      // if write that exact NameLoc into gradOf, comments would read “grads for bwd_...”, which is incorrect
       NameLoc fwdReadable = createNodeName(op, "fwd_");
       currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
       // If this op touches a pointer operand, derive the kernel-arg index

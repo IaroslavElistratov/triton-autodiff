@@ -226,10 +226,10 @@ class Raiser:
         self.registry = self._build_registry()
         # Track current gradient group label to reduce noisy headers
         self._last_grad_of: Optional[str] = None
-        # Python argument names by kernel-arg index for grouping via ad.arg_idx
-        # Inline note: previously headers came from gradOf text and could show
+        # Python argument names by kernel-arg index for grouping via raise.gradIdx
+        # Inline note: previously headers came from raise.gradOf text and could show
         # stride_* due to provenance landing on stride args. We now prefer
-        # ad.arg_idx -> python arg name, then ad.of, then legacy gradOf.
+        # raise.gradIdx -> python arg name, then raise.gradOf, then legacy raise.gradOf.
         self._arg_names: List[str] = []
 
     # ---- small utils
@@ -303,12 +303,12 @@ class Raiser:
         return None
 
     def _group_label(self, op) -> Optional[str]:
-        # 1) canonical: ad.arg_idx -> python kernel arg name
-        idx = self._int_attr(op, "ad.arg_idx")
+        # 1) canonical: raise.gradIdx -> python kernel arg name
+        idx = self._int_attr(op, "raise.gradIdx")
         if idx is not None and 0 <= idx < len(self._arg_names):
             return self._arg_names[idx]
         # 2) fallback: explicit human label
-        return self._attr_text(op, "ad.of") or self._attr_text(op, "gradOf")
+        return self._attr_text(op, "raise.gradOf")
 
     def _maybe_emit_grad_header(self, op) -> None:
         if not self.opts.emit_grad_groups:

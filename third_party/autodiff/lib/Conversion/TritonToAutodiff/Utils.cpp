@@ -123,7 +123,7 @@ namespace triton {
   // Root-cause note:
   //   Flash-attn mixes pointer math with stride integers. If we naively accept
   //   the first BlockArgument as the "owner", we often pick stride_* ints.
-  //   That leads to ad.arg_idx pointing at stride args and the raiser printing
+  //   That leads to raise.gradIdx pointing at stride args and the raiser printing
   //   headers like "stride_kn". Fix: only accept pointer-typed BlockArguments
   //   as base pointers; skip non-pointer args and keep walking.
   static Value _findBasePtr(Value anyPtr) {

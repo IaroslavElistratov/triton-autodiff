@@ -74,9 +74,9 @@ struct ConvertTritonToAutodiff
   OpTy createGradOp(OpBuilder &builder, Args &&...args) {
     auto op = builder.create<OpTy>(currentNodeName, std::forward<Args>(args)...);
     if (currentGradOf)
-      op->setAttr("ad.of", currentGradOf);
+      op->setAttr("raise.gradOf", currentGradOf);
     if (currentGradArgIdx)
-      op->setAttr("ad.arg_idx", currentGradArgIdx);
+      op->setAttr("raise.gradIdx", currentGradArgIdx);
     return op;
   }
 
@@ -84,9 +84,9 @@ struct ConvertTritonToAutodiff
   template <typename OpTy>
   OpTy tagGradOp(OpTy op) {
     if (currentGradOf)
-      op->setAttr("ad.of", currentGradOf);
+      op->setAttr("raise.gradOf", currentGradOf);
     if (currentGradArgIdx)
-      op->setAttr("ad.arg_idx", currentGradArgIdx);
+      op->setAttr("raise.gradIdx", currentGradArgIdx);
     return op;
   }
 
