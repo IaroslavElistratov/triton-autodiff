@@ -139,7 +139,8 @@ namespace triton {
 
     // raiser: seed the branch provenance: derive the base pointer kernel-arg index once
     // from the atomic/store destination pointer, then all ops created via
-    // createGradOp/tagGradOp inherit it (raise.gradIdx/raise.gradOf).
+    // createGradOp/tagGradOp inherit it (raise.gradIdx/raise.gradOf);
+    // IOW: pointer‑only base‑ptr walk, seeding at sinks
     auto pair = labelFromPtr(builder, clonedPtrRebased);
     pass.currentGradOf = pair.first;
     pass.currentGradArgIdx = pair.second;
@@ -157,7 +158,8 @@ namespace triton {
 
     markVisited(builder, visitedType::Inserted, atomicOp);
 
-    // Propagate the branch index upstream across autodiff-inserted producers
+    // Propagate the branch index upstream across autodiff-inserted producers;
+    // IOW: upstream propagation to fill raise.gradIdxs
     propagateIdxFromSink(atomicOp, pass.currentGradArgIdx, builder);
 
     // note this op does not add anything to the pass.gradMap

@@ -8,6 +8,7 @@ add_triton_library(TritonToAutodiff
     TritonToAutodiffPass.cpp
     Handlers.cpp
     Utils.cpp
+    UtilsRaise.cpp
     UtilsIO.cpp
 
     DEPENDS
