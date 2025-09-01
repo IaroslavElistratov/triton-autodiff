@@ -184,14 +184,9 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      // backward ops use currentNodeName = createNodeName(op, "bwd_") so all inserted grad IR has a backward-scoped NameLoc,
-      // if write that exact NameLoc into gradOf, comments would read “grads for bwd_...”, which is incorrect
-      NameLoc fwdReadable = createNodeName(op, "fwd_");
-      currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
-      // If this op touches a pointer operand, derive the kernel-arg index
-      // Load/Store have ptr at operand(0); for others this is best-effort
-      if (op->getNumOperands() > 0)
-        currentGradArgIdx = labelFromPtr(*builder, op->getOperand(0)).second;
+      // Reset provenance by default; handlers will seed at sinks (atomic/store)
+      currentGradOf = StringAttr();
+      currentGradArgIdx = IntegerAttr();
 
       // print only if changed
       std::string initialIR;
@@ -249,10 +244,8 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      NameLoc fwdReadable = createNodeName(op, "fwd_");
-      currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
-      if (op->getNumOperands() > 0)
-        currentGradArgIdx = labelFromPtr(*builder, op->getOperand(0)).second;
+      currentGradOf = StringAttr();            // clear previous branch label
+      currentGradArgIdx = IntegerAttr();       // clear previous canonical index
 
       // print only if changed
       std::string initialIR;
@@ -342,10 +335,8 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      NameLoc fwdReadable = createNodeName(op, "fwd_");
-      currentGradOf = StringAttr::get(op->getContext(), fwdReadable.getName().str());
-      if (op->getNumOperands() > 0)
-        currentGradArgIdx = labelFromPtr(*builder, op->getOperand(0)).second;
+      currentGradOf = StringAttr();            // clear previous branch label
+      currentGradArgIdx = IntegerAttr();       // clear previous canonical index
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         handleLoadBackward(loadOp, func, *this);

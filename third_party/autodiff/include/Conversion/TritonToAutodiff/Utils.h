@@ -80,6 +80,10 @@ namespace triton {
   // Derive readable label and kernel-arg index from a pointer Value
   std::pair<StringAttr, IntegerAttr> labelFromPtr(OpBuilder &builder, Value anyPtr);
 
+  // Propagate a branch's canonical arg index upstream from a sink (atomic/store)
+  // through autodiff-inserted producers only, unioning into raise.gradIdxs.
+  void propagateIdxFromSink(Operation *sink, IntegerAttr idx, OpBuilder &builder);
+
 } // namespace triton
 } // namespace mlir
 

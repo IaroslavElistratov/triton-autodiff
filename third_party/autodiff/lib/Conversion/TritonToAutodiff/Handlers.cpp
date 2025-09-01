@@ -136,6 +136,14 @@ namespace triton {
     //
     // NOTE: atomics are needed bc e.g. tiled matmul accesses same memory locations
     // of input A from different instances of the kernel -- see Done/6_/my.png
+
+    // raiser: seed the branch provenance: derive the base pointer kernel-arg index once
+    // from the atomic/store destination pointer, then all ops created via
+    // createGradOp/tagGradOp inherit it (raise.gradIdx/raise.gradOf).
+    auto pair = labelFromPtr(builder, clonedPtrRebased);
+    pass.currentGradOf = pair.first;
+    pass.currentGradArgIdx = pair.second;
+
     auto atomicOp = pass.createGradOp<triton::AtomicRMWOp>(
         builder,
         upstream.getType(),  // Result type
@@ -149,18 +157,21 @@ namespace triton {
 
     markVisited(builder, visitedType::Inserted, atomicOp);
 
+    // Propagate the branch index upstream across autodiff-inserted producers
+    propagateIdxFromSink(atomicOp, pass.currentGradArgIdx, builder);
+
     // note this op does not add anything to the pass.gradMap
 
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
 
-    // Record original operation for debugging
-    // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
-    // Use the operation's built-in printer
-    std::string opStr;
-    llvm::raw_string_ostream os(opStr);
-    loadOp->print(os);
-    atomicOp->setAttr("gradOf", builder.getStringAttr(opStr));
+    // // Record original operation for debugging
+    // // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
+    // // Use the operation's built-in printer
+    // std::string opStr;
+    // llvm::raw_string_ostream os(opStr);
+    // loadOp->print(os);
+    // atomicOp->setAttr("gradOf", builder.getStringAttr(opStr));
   }
 
   void handleAddBackward(arith::AddFOp addfOp, ConvertTritonToAutodiff& pass){

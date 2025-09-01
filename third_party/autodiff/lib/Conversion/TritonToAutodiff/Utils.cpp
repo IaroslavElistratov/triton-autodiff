@@ -21,6 +21,7 @@
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Signals.h" // report_fatal_error
+#include "llvm/Support/Casting.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -120,34 +121,38 @@ namespace triton {
   }
 
   // === helpers to derive kernel-arg provenance from a pointer Value ===
-  // Root-cause note:
-  //   Flash-attn mixes pointer math with stride integers. If we naively accept
-  //   the first BlockArgument as the "owner", we often pick stride_* ints.
-  //   That leads to raise.gradIdx pointing at stride args and the raiser printing
-  //   headers like "stride_kn". Fix: only accept pointer-typed BlockArguments
-  //   as base pointers; skip non-pointer args and keep walking.
+  // Pointer-only backtrace: choose only pointer-typed BlockArguments as bases.
+  // This avoids accidentally attributing branches to stride/index integer args.
   static Value _findBasePtr(Value anyPtr) {
     if (!anyPtr)
       return Value();
+    // Fast path: pointer-typed BlockArgument
     if (auto ba = dyn_cast<BlockArgument>(anyPtr))
-      return ba;
-    SmallVector<Operation*> worklist;
-    DenseSet<Operation*> seen;
-    if (Operation *op = anyPtr.getDefiningOp())
-      worklist.push_back(op);
-    while (!worklist.empty()) {
-      Operation *cur = worklist.pop_back_val();
-      for (Value v : cur->getOperands()) {
-        if (auto ba = dyn_cast<BlockArgument>(v))
-          return ba;
-        if (Operation *def = v.getDefiningOp())
-          if (seen.insert(def).second)
-            worklist.push_back(def);
+      if (isa<triton::PointerType>(ba.getType()))
+        return ba;
+    SmallVector<Value, 16> wl{anyPtr};
+    DenseSet<Value> seen;
+    auto isPtrLike = [](Type t) {
+      if (auto rt = dyn_cast<RankedTensorType>(t))
+        return isa<triton::PointerType>(rt.getElementType());
+      return isa<triton::PointerType>(t);
+    };
+    while (!wl.empty()) {
+      Value cur = wl.pop_back_val();
+      if (!seen.insert(cur).second) continue;
+      if (auto ba = dyn_cast<BlockArgument>(cur)) {
+        if (isPtrLike(ba.getType())) return ba;
+        continue;
       }
+      if (Operation *def = cur.getDefiningOp())
+        for (Value opnd : def->getOperands())
+          if (isPtrLike(opnd.getType())) wl.push_back(opnd);
     }
     return Value();
   }
 
+  // From a pointer SSA value, produce both a readable label and the canonical index
+  // of the kernel BlockArgument that is the base pointer.
   std::pair<StringAttr, IntegerAttr> labelFromPtr(OpBuilder &builder, Value anyPtr) {
     StringAttr ofAttr = builder.getStringAttr("arg");
     IntegerAttr idxAttr;
@@ -163,6 +168,47 @@ namespace triton {
       }
     }
     return {ofAttr, idxAttr};
+  }
+
+  // --- Upstream propagation (Solution C): fill in missing labels on autodiff ops
+  static bool isAutodiffOp(Operation *op) {
+    if (!op) return false;
+    auto ins = op->getAttrOfType<BoolAttr>("isInserted");
+    auto reb = op->getAttrOfType<BoolAttr>("isGradPtrRebase");
+    return (ins && ins.getValue()) || (reb && reb.getValue());
+  }
+
+  // Accumulate into raise.gradIdxs (array of i64) without duplicates
+  static void addIdx(Operation *op, IntegerAttr idx, OpBuilder &b) {
+    if (!op || !idx) return;
+    SmallVector<Attribute, 8> vals;
+    if (auto arr = op->getAttrOfType<ArrayAttr>("raise.gradIdxs"))
+      vals.append(arr.begin(), arr.end());
+    int64_t want = idx.getInt();
+    bool present = llvm::any_of(vals, [&](Attribute a){
+      if (auto intAttr = llvm::dyn_cast<IntegerAttr>(a))
+        return intAttr.getInt() == want;
+      return false;
+    });
+    if (!present) vals.push_back(idx);
+    op->setAttr("raise.gradIdxs", b.getArrayAttr(vals));
+  }
+
+  void propagateIdxFromSink(Operation *sink, IntegerAttr idx, OpBuilder &b) {
+    if (!sink || !idx) return;
+    SmallVector<Operation*, 64> wl{sink};
+    DenseSet<Operation*> seen;
+    while (!wl.empty()) {
+      Operation *cur = wl.pop_back_val();
+      if (!seen.insert(cur).second) continue;
+      if (isAutodiffOp(cur)) addIdx(cur, idx, b);
+      // Walk to producers over autodiff-inserted graph only
+      for (Value v : cur->getOperands()) {
+        if (Operation *def = v.getDefiningOp()) {
+          if (isAutodiffOp(def)) wl.push_back(def);
+        }
+      }
+    }
   }
 
   Value getUpstreamGrad(Value result, const llvm::DenseMap<Value, Value> &gradMap) {

@@ -73,6 +73,8 @@ struct ConvertTritonToAutodiff
   template <typename OpTy, typename... Args>
   OpTy createGradOp(OpBuilder &builder, Args &&...args) {
     auto op = builder.create<OpTy>(currentNodeName, std::forward<Args>(args)...);
+    // Stamp provenance on creation: canonical index -> raise.gradIdx, readable label -> raise.gradOf
+    // The currentGradArgIdx/of are set by handlers at the branch sinks (store/atomic) once per branch.
     if (currentGradOf)
       op->setAttr("raise.gradOf", currentGradOf);
     if (currentGradArgIdx)
@@ -83,6 +85,7 @@ struct ConvertTritonToAutodiff
   // Helper to tag ops not created via createGradOp (e.g., nested region builders)
   template <typename OpTy>
   OpTy tagGradOp(OpTy op) {
+    // Some ops are built with local builders (e.g., reduce combiners). Ensure they inherit the branch tag.
     if (currentGradOf)
       op->setAttr("raise.gradOf", currentGradOf);
     if (currentGradArgIdx)

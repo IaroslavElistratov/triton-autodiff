@@ -291,23 +291,29 @@ class Raiser:
         v = op.get_int_attr(name)
         if v is not None:
             return int(v)
-        # Fallback: textual attribute like "1 : i64" or "1"
-        # try:
-        #     t = op.get_attr_text(name)
-        #     if t is None:
-        #         return None
-        #     s = str(t).strip()
-        #     s = s.split()[0]
-        #     return int(s)
-        # except Exception:
         return None
 
     def _group_label(self, op) -> Optional[str]:
-        # 1) canonical: raise.gradIdx -> python kernel arg name
+        # Grouping strategy with union support:
+        # 1) If raise.gradIdxs (array) is present:
+        #    - singleton -> "<arg_name>"
+        #    - multi     -> "shared:{name1,name2}"
+        try:
+            arr = op.get_i64_array_attr("raise.gradIdxs")
+        except Exception:
+            arr = None
+        if arr:
+            uniq = sorted(set(int(x) for x in arr if isinstance(x, int)))
+            if len(uniq) == 1:
+                i = uniq[0]
+                return self._arg_names[i] if 0 <= i < len(self._arg_names) else f"arg{i}"
+            names = [self._arg_names[i] if 0 <= i < len(self._arg_names) else f"arg{i}" for i in uniq]
+            return "shared:{" + ",".join(names) + "}"
+        # 2) Else use canonical index (raise.gradIdx)
         idx = self._int_attr(op, "raise.gradIdx")
         if idx is not None and 0 <= idx < len(self._arg_names):
             return self._arg_names[idx]
-        # 2) fallback: explicit human label
+        # 3) Fallback: explicit human label (legacy/debug path)
         return self._attr_text(op, "raise.gradOf")
 
     def _maybe_emit_grad_header(self, op) -> None:
@@ -322,7 +328,12 @@ class Raiser:
             # Visual spacer between groups
             if self.lines and not self.lines[-1].strip() == "":
                 self.lines.append("")
-            self.lines.append(f"    # grads for {src}")
+            if src.startswith("shared:{"):
+                # Pretty-print union labels: "shared by {a,b}"
+                inner = src[len("shared:"):]  # keep the {...}
+                self.lines.append(f"    # shared by {inner}")
+            else:
+                self.lines.append(f"    # grads for {src}")
 
     # ---- registry
     def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
@@ -731,7 +742,7 @@ class Raiser:
             self.lines.append(f"    # TODO: raise structured control-flow: {name}")
             return
 
-        # Emit gradient grouping header if available
+        # Emit gradient grouping header if available (debounced on change)
         self._maybe_emit_grad_header(op)
 
         # Pre-bind results with friendly names (or minted as fallback)
