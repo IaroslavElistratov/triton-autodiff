@@ -362,30 +362,23 @@ class Raiser:
             tag = self._int_attr(o, "raise.gradOfTag")
             if tag is None:
                 continue
-            # Accept any presence of 'isCloned' attribute; do not depend on its textual form
-            try:
-                has_cloned_attr = (o.get_attr_text("isCloned") is not None)
-            except Exception:
-                has_cloned_attr = False
-            if not has_cloned_attr:
+            # Only consider cloned forward ops
+            if not Attr.bool_attr(o, "isCloned", False):
                 continue
-            # Choose a readable result name; prefer ones starting with "fwd_"
-            best = None
-            fwd_choices: List[str] = []
+            # Deterministic selection: prefer first "fwd_" result name, else first available
+            first_fwd = None
+            first_any = None
             for i in range(o.get_num_results()):
-                v = o.get_result(i)
-                nm = self._hints.get(self._vid(v))
+                nm = self._hints.get(self._vid(o.get_result(i)))
                 if isinstance(nm, str):
-                    if nm.startswith("fwd_"):
-                        fwd_choices.append(nm)
-                    elif best is None:
-                        best = nm
-            if fwd_choices:
-                best = min(fwd_choices, key=len)
-            if best is None:
-                # No readable forward result name -> skip mapping for this tag
+                    if first_any is None:
+                        first_any = nm
+                    if first_fwd is None and nm.startswith("fwd_"):
+                        first_fwd = nm
+            chosen = first_fwd if first_fwd is not None else first_any
+            if chosen is None:
                 continue
-            tag2name[int(tag)] = best
+            tag2name[int(tag)] = chosen
         return tag2name
 
     def _resolve_local_label(self, op, fallback: str) -> str:
@@ -803,10 +796,10 @@ class Raiser:
 
         # Emit gradient grouping header if available (debounced on change)
         self._maybe_emit_grad_header(op)
-        # Emit local per-handler header only for backward-inserted ops (isInserted/GradPtrRebase)
-        is_ins = Attr.bool_attr(op, "isInserted", False)
-        is_reb = Attr.bool_attr(op, "isGradPtrRebase", False)
-        if is_ins or is_reb:
+        # Emit local per-handler header for non-cloned ops carrying a gradOfTag
+        has_tag = (self._int_attr(op, "raise.gradOfTag") is not None)
+        is_cloned = Attr.bool_attr(op, "isCloned", False)
+        if has_tag and not is_cloned:
             self._maybe_emit_local_gradof(op)
 
         # Pre-bind results with friendly names (or minted as fallback)
@@ -837,7 +830,7 @@ class Raiser:
         self.lines.append("")
         self.lines.append("# Legend:")
         self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
-        self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: groups of fine-grained nodes computing grad of input X)")
+        self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: ops contributing to grad of kernel input X)") # groups of fine-grained nodes computing
         self.lines.append("")
         func = self.m.get_function(self.func_name) if self.m.has_function(self.func_name) else None
         arg_names: List[str] = []
