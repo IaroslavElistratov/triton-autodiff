@@ -10,6 +10,8 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
+#include <optional>
+#include <functional>
 
 namespace mlir {
 namespace triton {
@@ -100,6 +102,40 @@ namespace triton {
         }
       }
     }
+  }
+
+
+
+  // Keep the stable, coarse grouping driven by indices (raise.gradIdx /
+  // raise.gradIdxs) and additionally add granular raise.gradOf annotations.
+  // The goal is to print small, local comments (typically 1–4 ops) that say
+  // which forward op these backward ops were generated for (i.e., which
+  // handler matched when they were emitted).
+  // To do this, set currentGradOf once per matched forward op in the pass’s
+  // main loop (so I don’t touch every handler), and createGradOp/tagGradOp
+  // stamp "raise.gradOf" onto every newly created backward op.
+  // This helper extracts that readable label from the op’s Location, preferring
+  // NameLoc (including through CallSiteLoc/FusedLoc) and falling back to the op
+  // ssa name.
+  StringAttr nameFromLoc(Operation *fwd) {
+    auto *ctx = fwd->getContext();
+    std::function<std::optional<StringRef>(Location)> firstNameIn = [&firstNameIn](Location loc) -> std::optional<StringRef> {
+      if (auto nl = dyn_cast<NameLoc>(loc))
+        return nl.getName().getValue();
+      if (auto cs = dyn_cast<CallSiteLoc>(loc)) {
+        if (auto s = firstNameIn(cs.getCallee())) return s;
+        if (auto s = firstNameIn(cs.getCaller())) return s;
+        return std::nullopt;
+      }
+      if (auto fused = dyn_cast<FusedLoc>(loc))
+        for (Location sub : fused.getLocations())
+          if (auto s = firstNameIn(sub)) return s;
+      return std::nullopt;
+    };
+
+    if (auto s = firstNameIn(fwd->getLoc()))
+      return StringAttr::get(ctx, s->str());
+    return StringAttr::get(ctx, fwd->getName().getStringRef());
   }
 
 } // namespace triton

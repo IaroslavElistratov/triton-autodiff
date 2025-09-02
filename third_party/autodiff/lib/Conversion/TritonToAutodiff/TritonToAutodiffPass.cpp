@@ -3,6 +3,7 @@
 
 #include "mlir/IR/Builders.h"
 #include <memory>
+#include <functional>
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -23,6 +24,7 @@
 #include <numeric>
 
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Casting.h"
 
 namespace mlir {
 namespace triton {
@@ -184,8 +186,9 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      // Reset provenance by default; handlers will seed at sinks (atomic/store)
-      currentGradOf = StringAttr();
+      // Set local forward-op label for this handler's emissions; canonical index
+      // is seeded later at sinks (atomic/store) and propagated.
+      currentGradOf = nameFromLoc(op);
       currentGradArgIdx = IntegerAttr();
 
       // print only if changed
@@ -244,8 +247,10 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      currentGradOf = StringAttr();            // clear previous branch label
-      currentGradArgIdx = IntegerAttr();       // clear previous canonical index
+      // Set local forward-op label for this handler's emissions; canonical index
+      // is seeded later at sinks (atomic/store) and propagated.
+      currentGradOf = nameFromLoc(op);
+      currentGradArgIdx = IntegerAttr();
 
       // print only if changed
       std::string initialIR;
@@ -335,8 +340,10 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      currentGradOf = StringAttr();            // clear previous branch label
-      currentGradArgIdx = IntegerAttr();       // clear previous canonical index
+      // Set local forward-op label for this handler's emissions; canonical index
+      // is seeded later at sinks (atomic/store) and propagated.
+      currentGradOf = nameFromLoc(op);
+      currentGradArgIdx = IntegerAttr();
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         handleLoadBackward(loadOp, func, *this);

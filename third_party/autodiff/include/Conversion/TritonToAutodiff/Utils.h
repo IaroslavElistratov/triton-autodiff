@@ -77,6 +77,10 @@ namespace triton {
 
   NameLoc createNodeName(Operation *op, std::string prefix);
 
+  // Extract a readable forward-op label from Location (NameLoc through
+  // CallSiteLoc/FusedLoc); fallback to op mnemonic
+  StringAttr nameFromLoc(Operation *fwd);
+
   // Derive readable label and kernel-arg index from a pointer Value
   std::pair<StringAttr, IntegerAttr> labelFromPtr(OpBuilder &builder, Value anyPtr);
 

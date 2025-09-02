@@ -226,6 +226,8 @@ class Raiser:
         self.registry = self._build_registry()
         # Track current gradient group label to reduce noisy headers
         self._last_grad_of: Optional[str] = None
+        # Track finer-grained per-handler label to show local groups
+        self._last_local_grad_of: Optional[str] = None
         # Python argument names by kernel-arg index for grouping via raise.gradIdx
         # Inline note: previously headers came from raise.gradOf text and could show
         # stride_* due to provenance landing on stride args. We now prefer
@@ -334,6 +336,23 @@ class Raiser:
                 self.lines.append(f"    # shared by {inner}")
             else:
                 self.lines.append(f"    # grads for {src}")
+
+    def _maybe_emit_local_gradof(self, op) -> None:
+        if not self.opts.emit_grad_groups:
+            return
+        # Emit finer-grained header based on pass-scoped raise.gradOf (if present)
+        try:
+            s = op.get_str_attr("raise.gradOf")
+            lbl = str(s) if s is not None else None
+        except Exception:
+            lbl = None
+        if not lbl:
+            return
+        if lbl != self._last_local_grad_of:
+            self._last_local_grad_of = lbl
+            if self.lines and not self.lines[-1].strip() == "":
+                self.lines.append("")
+            self.lines.append(f"    # local grads for {lbl}")
 
     # ---- registry
     def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
@@ -744,6 +763,8 @@ class Raiser:
 
         # Emit gradient grouping header if available (debounced on change)
         self._maybe_emit_grad_header(op)
+        # Emit local per-handler header based on raise.gradOf (debounced)
+        self._maybe_emit_local_gradof(op)
 
         # Pre-bind results with friendly names (or minted as fallback)
         res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
