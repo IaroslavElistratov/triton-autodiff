@@ -186,9 +186,17 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      // Set local forward-op label for this handler's emissions; canonical index
-      // is seeded later at sinks (atomic/store) and propagated.
-      currentGradOf = nameFromLoc(op);
+      // Fine-grained provenance: derive a stable tag id from the cloned forward op
+      // for this matched backward op (via origToCloned). Assign/reuse a small
+      // sequential id per pass and stamp it on all created backward ops; also
+      // stamp it on the cloned forward op so the Python raiser can resolve the
+      // tag to the actual forward Python variable name.
+      (void)nameFromLoc; // no longer used for tagging
+      Operation *clonedFwd = origToCloned.lookupOrNull(op);
+      int64_t tagId = getOrAssignGradOfTag(fwdOpToTagId, nextGradOfTagId, clonedFwd);
+      if (clonedFwd)
+        clonedFwd->setAttr("raise.gradOfTag", builder->getI64IntegerAttr(tagId));
+      currentGradOfTag = builder->getI64IntegerAttr(tagId);
       currentGradArgIdx = IntegerAttr();
 
       // print only if changed
@@ -247,9 +255,14 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      // Set local forward-op label for this handler's emissions; canonical index
-      // is seeded later at sinks (atomic/store) and propagated.
-      currentGradOf = nameFromLoc(op);
+      (void)nameFromLoc; // no longer used for tagging
+      {
+        Operation *clonedFwd = origToCloned.lookupOrNull(op);
+        int64_t tagId = getOrAssignGradOfTag(fwdOpToTagId, nextGradOfTagId, clonedFwd);
+        if (clonedFwd)
+          clonedFwd->setAttr("raise.gradOfTag", builder->getI64IntegerAttr(tagId));
+        currentGradOfTag = builder->getI64IntegerAttr(tagId);
+      }
       currentGradArgIdx = IntegerAttr();
 
       // print only if changed
@@ -340,9 +353,14 @@ namespace triton {
       NameLoc nodeName = createNodeName(op, "bwd_");
       // Store the name in the member variable for use in handlers
       currentNodeName = nodeName;
-      // Set local forward-op label for this handler's emissions; canonical index
-      // is seeded later at sinks (atomic/store) and propagated.
-      currentGradOf = nameFromLoc(op);
+      (void)nameFromLoc; // no longer used for tagging
+      {
+        Operation *clonedFwd = origToCloned.lookupOrNull(op);
+        int64_t tagId = getOrAssignGradOfTag(fwdOpToTagId, nextGradOfTagId, clonedFwd);
+        if (clonedFwd)
+          clonedFwd->setAttr("raise.gradOfTag", builder->getI64IntegerAttr(tagId));
+        currentGradOfTag = builder->getI64IntegerAttr(tagId);
+      }
       currentGradArgIdx = IntegerAttr();
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){

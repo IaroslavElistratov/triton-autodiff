@@ -103,7 +103,7 @@ namespace triton {
       llvm::report_fatal_error("markVisited received null operation pointer\n");
     }
 
-    // preserve existing attributes (e.g. "gradOf") when setting new ones
+    // preserve existing attributes (e.g. "gradIdx") when setting new ones
     NamedAttrList attrs(op->getAttrs());
     attrs.set("autogradVisited", builder.getBoolAttr(true));
     if (mode == visitedType::Original)

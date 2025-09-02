@@ -16,6 +16,16 @@
 namespace mlir {
 namespace triton {
 
+  // High-level note :
+  // Coarse grouping (raise.gradIdx/raise.gradIdxs) tells which kernel argument
+  // a derivative contributes to. Fine-grained grouping (raise.gradOfTag) tells
+  // which matched forward op a small cluster of backward ops came from.
+  // I generate raise.gradOfTag per matched backward op by looking up its
+  // corresponding cloned forward op via origToCloned and assigning a small,
+  // sequential id per pass. Every created backward op inherits this tag, and I
+  // also stamp it on the cloned forward op so the Python raiser can resolve the
+  // tag to the actual generated Python variable name.
+
   // Pointer-only backtrace: choose only pointer-typed BlockArguments as bases.
   static Value _findBasePtr(Value anyPtr) {
     if (!anyPtr)
@@ -107,13 +117,13 @@ namespace triton {
 
 
   // Keep the stable, coarse grouping driven by indices (raise.gradIdx /
-  // raise.gradIdxs) and additionally add granular raise.gradOf annotations.
+  // raise.gradIdxs) and additionally add granular per-op tags (raise.gradOfTag).
   // The goal is to print small, local comments (typically 1–4 ops) that say
   // which forward op these backward ops were generated for (i.e., which
   // handler matched when they were emitted).
-  // To do this, set currentGradOf once per matched forward op in the pass’s
-  // main loop (so I don’t touch every handler), and createGradOp/tagGradOp
-  // stamp "raise.gradOf" onto every newly created backward op.
+  // To do this, assign a sequential tag (currentGradOfTag) once per matched
+  // forward op (resolved via origToCloned) and createGradOp/tagGradOp stamp
+  // "raise.gradOfTag" onto every newly created backward op.
   // This helper extracts that readable label from the op’s Location, preferring
   // NameLoc (including through CallSiteLoc/FusedLoc) and falling back to the op
   // ssa name.
@@ -136,6 +146,18 @@ namespace triton {
     if (auto s = firstNameIn(fwd->getLoc()))
       return StringAttr::get(ctx, s->str());
     return StringAttr::get(ctx, fwd->getName().getStringRef());
+  }
+
+  // Compute or reuse a stable per-pass tag id for a given cloned forward op
+  int64_t getOrAssignGradOfTag(llvm::DenseMap<Operation*, int64_t> &map,
+                               int64_t &nextId,
+                               Operation *clonedFwd) {
+    if (!clonedFwd) return 0;
+    auto it = map.find(clonedFwd);
+    if (it != map.end()) return it->second;
+    int64_t id = nextId++;
+    map[clonedFwd] = id;
+    return id;
   }
 
 } // namespace triton

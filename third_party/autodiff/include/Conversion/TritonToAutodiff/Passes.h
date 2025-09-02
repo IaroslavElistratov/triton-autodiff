@@ -53,10 +53,13 @@ struct ConvertTritonToAutodiff
   // To make nodeName accessible across all handler functions without changing their signatures, add it as a member variable to the ConvertTritonToAutodiff struct
   // Member variable to store current node name
   NameLoc currentNodeName;
-  // Human-readable forward op name for tagging gradient ops
-  StringAttr currentGradOf;
   // Canonical kernel-argument index that gradients contribute to
   IntegerAttr currentGradArgIdx;
+  // Stable per-forward-op tag to map to raised Python var names
+  IntegerAttr currentGradOfTag;
+  // Map cloned forward op -> stable tag id and a counter for new tags
+  llvm::DenseMap<Operation*, int64_t> fwdOpToTagId;
+  int64_t nextGradOfTagId = 1;
 
   // Member variables for the pass state
   llvm::DenseMap<Value, Value> gradMap;
@@ -73,12 +76,12 @@ struct ConvertTritonToAutodiff
   template <typename OpTy, typename... Args>
   OpTy createGradOp(OpBuilder &builder, Args &&...args) {
     auto op = builder.create<OpTy>(currentNodeName, std::forward<Args>(args)...);
-    // Stamp provenance on creation: canonical index -> raise.gradIdx, readable label -> raise.gradOf
-    // The currentGradArgIdx/of are set by handlers at the branch sinks (store/atomic) once per branch.
-    if (currentGradOf)
-      op->setAttr("raise.gradOf", currentGradOf);
+    // Stamp provenance on creation: canonical index -> raise.gradIdx, stable tag -> raise.gradOfTag
+    // The currentGradArgIdx/tag are set by handlers at the branch sinks (store/atomic) once per branch.
     if (currentGradArgIdx)
       op->setAttr("raise.gradIdx", currentGradArgIdx);
+    if (currentGradOfTag)
+      op->setAttr("raise.gradOfTag", currentGradOfTag);
     return op;
   }
 
@@ -86,10 +89,10 @@ struct ConvertTritonToAutodiff
   template <typename OpTy>
   OpTy tagGradOp(OpTy op) {
     // Some ops are built with local builders (e.g., reduce combiners). Ensure they inherit the branch tag.
-    if (currentGradOf)
-      op->setAttr("raise.gradOf", currentGradOf);
     if (currentGradArgIdx)
       op->setAttr("raise.gradIdx", currentGradArgIdx);
+    if (currentGradOfTag)
+      op->setAttr("raise.gradOfTag", currentGradOfTag);
     return op;
   }
 

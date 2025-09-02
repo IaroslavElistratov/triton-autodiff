@@ -139,10 +139,9 @@ namespace triton {
 
     // raiser: seed the branch provenance: derive the base pointer kernel-arg index once
     // from the atomic/store destination pointer, then all ops created via
-    // createGradOp/tagGradOp inherit it (raise.gradIdx/raise.gradOf);
+    // createGradOp/tagGradOp inherit it (raise.gradIdx/raise.gradOfTag);
     // IOW: pointer‑only base‑ptr walk, seeding at sinks
     auto pair = labelFromPtr(builder, clonedPtrRebased);
-    pass.currentGradOf = pair.first;
     pass.currentGradArgIdx = pair.second;
 
     auto atomicOp = pass.createGradOp<triton::AtomicRMWOp>(
@@ -166,14 +165,6 @@ namespace triton {
 
     // fixes mismatch between the type of the value we're trying to store and the pointee type of the pointer we're storing to.
     // ensure the type of upstream matches what ptr points to.
-
-    // // Record original operation for debugging
-    // // loadOp.getOperation()->getName().getStringRef() -- does not include operands so result value
-    // // Use the operation's built-in printer
-    // std::string opStr;
-    // llvm::raw_string_ostream os(opStr);
-    // loadOp->print(os);
-    // atomicOp->setAttr("gradOf", builder.getStringAttr(opStr));
   }
 
   void handleAddBackward(arith::AddFOp addfOp, ConvertTritonToAutodiff& pass){

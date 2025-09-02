@@ -88,6 +88,11 @@ namespace triton {
   // through autodiff-inserted producers only, unioning into raise.gradIdxs.
   void propagateIdxFromSink(Operation *sink, IntegerAttr idx, OpBuilder &builder);
 
+  // Compute or reuse a stable per-pass tag id for a given cloned forward op
+  int64_t getOrAssignGradOfTag(llvm::DenseMap<Operation*, int64_t> &map,
+                               int64_t &nextId,
+                               Operation *clonedFwd);
+
 } // namespace triton
 } // namespace mlir
 

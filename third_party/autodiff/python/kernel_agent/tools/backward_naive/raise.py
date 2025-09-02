@@ -233,6 +233,11 @@ class Raiser:
         # stride_* due to provenance landing on stride args. We now prefer
         # raise.gradIdx -> python arg name, then raise.gradOf, then legacy raise.gradOf.
         self._arg_names: List[str] = []
+        # Map from a stable forward-op tag id (raise.gradOfTag) -> chosen Python name.
+        # High-level: tags identify cloned forward ops; I resolve tags to the
+        # actual minted Python names for those forward values so local headers can
+        # show readable identifiers without re-deriving names here.
+        self._fwd_tag_to_py: Dict[int, str] = self._build_tag_to_py_map()
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -315,13 +320,13 @@ class Raiser:
         idx = self._int_attr(op, "raise.gradIdx")
         if idx is not None and 0 <= idx < len(self._arg_names):
             return self._arg_names[idx]
-        # 3) Fallback: explicit human label (legacy/debug path)
-        return self._attr_text(op, "raise.gradOf")
+        # 3) No explicit human label fallback (legacy path removed)
+        return None
 
     def _maybe_emit_grad_header(self, op) -> None:
         if not self.opts.emit_grad_groups:
             return
-        # Prefer kernel arg mapping; fallback to explicit label
+        # Prefer kernel arg mapping; fallback removed (only idx-based grouping)
         src = self._group_label(op)
         if not src:
             return
@@ -331,28 +336,63 @@ class Raiser:
             if self.lines and not self.lines[-1].strip() == "":
                 self.lines.append("")
             if src.startswith("shared:{"):
-                # Pretty-print union labels: "shared by {a,b}"
                 inner = src[len("shared:"):]  # keep the {...}
-                self.lines.append(f"    # shared by {inner}")
+                self.lines.append(f"    # ~~~~~~~~~~ grad branch for {inner} ~~~~~~~~~~")
             else:
-                self.lines.append(f"    # grads for {src}")
+                self.lines.append(f"    # ~~~~~~~~~~ grad branch for {src} ~~~~~~~~~~")
 
     def _maybe_emit_local_gradof(self, op) -> None:
         if not self.opts.emit_grad_groups:
             return
-        # Emit finer-grained header based on pass-scoped raise.gradOf (if present)
-        try:
-            s = op.get_str_attr("raise.gradOf")
-            lbl = str(s) if s is not None else None
-        except Exception:
-            lbl = None
-        if not lbl:
+        # Emit finer-grained header based on raise.gradOfTag (stable id)
+        py_lbl = self._resolve_local_label(op, None)
+        if not py_lbl:
             return
-        if lbl != self._last_local_grad_of:
-            self._last_local_grad_of = lbl
+        if py_lbl != self._last_local_grad_of:
+            self._last_local_grad_of = py_lbl
             if self.lines and not self.lines[-1].strip() == "":
                 self.lines.append("")
-            self.lines.append(f"    # local grads for {lbl}")
+            self.lines.append(f"    # local grads for {py_lbl}")
+
+    def _build_tag_to_py_map(self) -> Dict[int, str]:
+        tag2name: Dict[int, str] = {}
+        ops: List[mlir.operation] = []
+        self.m.walk(lambda o: ops.append(o))
+        for o in ops:
+            tag = self._int_attr(o, "raise.gradOfTag")
+            if tag is None:
+                continue
+            # Accept any presence of 'isCloned' attribute; do not depend on its textual form
+            try:
+                has_cloned_attr = (o.get_attr_text("isCloned") is not None)
+            except Exception:
+                has_cloned_attr = False
+            if not has_cloned_attr:
+                continue
+            # Choose a readable result name; prefer ones starting with "fwd_"
+            best = None
+            fwd_choices: List[str] = []
+            for i in range(o.get_num_results()):
+                v = o.get_result(i)
+                nm = self._hints.get(self._vid(v))
+                if isinstance(nm, str):
+                    if nm.startswith("fwd_"):
+                        fwd_choices.append(nm)
+                    elif best is None:
+                        best = nm
+            if fwd_choices:
+                best = min(fwd_choices, key=len)
+            if best is None:
+                # No readable forward result name -> skip mapping for this tag
+                continue
+            tag2name[int(tag)] = best
+        return tag2name
+
+    def _resolve_local_label(self, op, fallback: str) -> str:
+        tag = self._int_attr(op, "raise.gradOfTag")
+        if tag is None:
+            return fallback
+        return self._fwd_tag_to_py.get(int(tag), fallback)
 
     # ---- registry
     def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
@@ -763,8 +803,11 @@ class Raiser:
 
         # Emit gradient grouping header if available (debounced on change)
         self._maybe_emit_grad_header(op)
-        # Emit local per-handler header based on raise.gradOf (debounced)
-        self._maybe_emit_local_gradof(op)
+        # Emit local per-handler header only for backward-inserted ops (isInserted/GradPtrRebase)
+        is_ins = Attr.bool_attr(op, "isInserted", False)
+        is_reb = Attr.bool_attr(op, "isGradPtrRebase", False)
+        if is_ins or is_reb:
+            self._maybe_emit_local_gradof(op)
 
         # Pre-bind results with friendly names (or minted as fallback)
         res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
@@ -791,6 +834,10 @@ class Raiser:
     def raise_kernel(self) -> str:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
+        self.lines.append("")
+        self.lines.append("# Legend:")
+        self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
+        self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: groups of fine-grained nodes computing grad of input X)")
         self.lines.append("")
         func = self.m.get_function(self.func_name) if self.m.has_function(self.func_name) else None
         arg_names: List[str] = []
