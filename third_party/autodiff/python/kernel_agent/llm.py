@@ -294,6 +294,7 @@ class _GenerateSampler:
         # streaming controls (single toggle)
         parse_every = 8
         emitted_chars = 0
+        stopped_on_end_patch = False
 
         for idx, out in enumerate(self.generator.generate(
             input_tokens,
@@ -313,6 +314,7 @@ class _GenerateSampler:
                         on_thinking_chunk(decoded[emitted_chars:])
                         emitted_chars = len(decoded)
                     if "*** End Patch" in decoded:
+                        stopped_on_end_patch = True
                         break
                 except Exception:
                     # streaming should never be fatal
@@ -331,6 +333,8 @@ class _GenerateSampler:
             elif channel and channel != "tool":
                 thinking_parts.extend(parts)
         text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
+        # Detect if we likely hit the token limit without finishing the patch
+        hit_token_limit = (not stopped_on_end_patch) and (len(generated) >= int(self.max_tokens or 0))
         # Cap thinking for metadata only (do not re-stream to avoid duplicates).
         all_thinking = "".join(thinking_parts)
         max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
@@ -343,6 +347,9 @@ class _GenerateSampler:
         return SamplerResponse(
             response_text=text,
             actual_queried_message_list=message_list,
-            response_metadata={"thinking": (all_thinking if capture_thinking else "")},
+            response_metadata={
+                "thinking": (all_thinking if capture_thinking else ""),
+                "stop_reason": ("max_tokens" if hit_token_limit else ("end_patch" if stopped_on_end_patch else "eos")),
+            },
         )
 
