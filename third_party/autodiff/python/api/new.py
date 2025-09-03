@@ -172,6 +172,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # this is runtime overwrite
         raised_py_path = _AD_OVERWRITE_FP.get()
 
+        mod_name, stub_name = jit_fn._autodiff_stub_info
+
         # run the mlir pass to generate TTIR,
         # and then raise that ttir to triton-lang
         # (via raise_to_triton_lang below)
@@ -192,10 +194,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # which fwd-call args carry upstream
             idxs_bufs = getattr(jit_fn, "idxs_buffers", ())
 
-            # get user stub source lazily (module is fully initialized now)
-            # mod_name = jit_fn.fn.__module__
-            # stub_name = getattr(jit_fn, "stub_name", "stub")
-            mod_name, stub_name = jit_fn._autodiff_stub_info
             # user stub lives in the same module as their kenrel
             stub_src = get_stub_src_from_module(mod_name, stub_name)
 
@@ -212,21 +210,31 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             )
 
 
-            bwd_fn = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
+            bwd_stub = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
             # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
-            setattr(jit_fn, "_generated_bwd_stub", bwd_fn)
+            setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
 
+            # expose artifacts in context store
+            # publish raised.py as the backward file pointer
+            _AD_ARTIFACTS.set(raised_py_path)
+
+        else:
+
+            # ensure the bwd stub is installed on the forward JITFunction when overwrite_fp is used
+            # so StubOverrideDCK.backward can find it without regenerating. The hook already does this
+            # on fresh generations; we add a defensive install here for overwrite path.
+            bwd_stub = runpy.run_path(bwd_fp)[f"backward_{stub_name}"]
+            assert callable(bwd_stub)
+            setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
 
         # if overwrite_fp is provided then raise the kernel stored in the provided file
         # bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
         # print("bwd_jit_fn._raised", bwd_jit_fn._raised)
 
-        jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
+        # jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
         # print("jit_fn._raised", jit_fn._raised)
 
-        # expose artifacts in context store
-        # publish raised.py as the backward file pointer
-        _AD_ARTIFACTS.set(raised_py_path)
+
 
         # comment:
         # for this path, don't need to attach any entry into the cache of the backward_jit_fucntion

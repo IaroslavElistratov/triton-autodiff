@@ -128,7 +128,7 @@ class MinimalLLMPatchProvider:
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
             "You can rewrite backward kernel from scratch; but preserve function names/signatures and pointer/mask semantics. "
-            "You cannot modify the stub yet. "
+            "You can modify the stub as well. "
             # "Do not add a stub for that kernel, this is already handled outside of this file -- just assume the stub is present"
             "More details about the initial backward kernel: "
             "1. signature: `backward(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "

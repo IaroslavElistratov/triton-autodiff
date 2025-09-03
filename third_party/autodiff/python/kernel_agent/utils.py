@@ -34,85 +34,78 @@ from triton.runtime.jit import JITFunction
 
 
 
-def compile_kernel(file_path, overwrite_fp=None):
 
-    # no need for extract_request -- instead make input file to be a python not json
+def compile_kernel(file_path: str, overwrite_fp: str | None = None):
+    """
+    Execute user's forward module, run its setup(), and return:
+        (op_fn, backward_file_pointer, module_namespace)
 
-    def load_function_from_code(code: str) -> dict[str, Any]:
-        """
-        Execute the provided Python `code` and extract top-level Triton JITFunction.
-        * executes code in an isolated namespace,
-        * enumerates ALL JITFunction instances,
-        """
+    - file_path: path to the original forward user file (e.g., matmul.py)
+    - overwrite_fp: path to an existing _raised.py with edited bwd kernel+stub.
+      If provided, do not re-run the MLIR pass; reuse that file instead.
+    """
 
+    def exec_module(src: str) -> dict[str, Any]:
         local_ns: dict[str, Any] = {}
-        try:
-            # execute user-provided code in an isolated namespace
-            run_with_timeout(lambda: exec(code, local_ns), CODE_EXEC_TIMEOUT_S)
-        except Exception as e:
-            raise RuntimeError(
-                "Failed to execute `code`. Ensure it is valid Python and defines a Triton kernel decorated with @triton.jit.\n"
-                "Tip: Import triton and triton.language as tl, and bind the kernel to a top-level name.\n"
-                f"Exec error: {e}"
-            ) from e
-
-        # accept a Triton JITFunction decorated with autodiff-wrapped helper class
-        from triton.backends.autodiff import DifferentiatedCompiledKernel as DCK
-
-        has_dck = any(isinstance(v, type) and issubclass(v, DCK) for v in local_ns.values())
-        if not has_dck:
-            raise RuntimeError(
-                "No Triton JITFunction decorated with @autodiff found.\n"
-                "Expected your code to define top-level function decorated with @triton.jit and @autodiff, e.g.:\n"
-                "@autodiff(...)\n"
-                "@triton.jit\n"
-                "def my_kernel(...): ...\n"
-            )
-
+        code = compile(src, file_path, "exec")
+        # execute user-provided code in an isolated namespace
+        run_with_timeout(lambda: exec(code, local_ns), CODE_EXEC_TIMEOUT_S)
         return local_ns
 
     with open(file_path, "r", encoding="utf-8") as f:
         src = f.read()
 
-    # todo: use "mod = importlib.import_module(file_path)" instead of the below?
-    code = compile(src, file_path, "exec")
-    ns = load_function_from_code(code)
+    # todo: use "importlib.import_module(file_path)" below?
+    ns = exec_module(src)
 
-    setup_fn = ns.get("setup", None)
-    try:
-        bwd_fp = None
-        def _exec_setup():
-            nonlocal bwd_fp
-            if overwrite_fp:
-                from triton.backends.autodiff import autodiff_overwrite_fp
-                # this adds the "overwrite_fp" argument to my autograd function
-                # so that the hook knows to use the backward from "overwrite_fp",
-                # and not the backward created by my mlir pass
-                with autodiff_overwrite_fp(overwrite_fp):
-                    # execute the function body in the same namespace so it can populate
-                    # names like `compiled_kernel` directly into `ns`
-                    exec(setup_fn.__code__, ns, ns)
-                    # not used, keeping for clarity
-                    bwd_fp = overwrite_fp
-            else:
-                from triton.backends.autodiff import record_autodiff_artifacts, get_last_bwd_fp
-                with record_autodiff_artifacts():
-                    exec(setup_fn.__code__, ns, ns)
-                    # record path to the last generated/selected backward before context resets
-                    bwd_fp = get_last_bwd_fp()
+    # accept a Triton JITFunction decorated with autodiff-wrapped helper class
+    from third_party.autodiff.python.api.new import StubOverrideDCK as StubDCK
 
-        # comment: this triggers the callback
-        run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
-
-    except Exception as e:
+    has_dck = any(isinstance(v, type) and issubclass(v, Stub) for v in ns.values())
+    has_kernel = any(isinstance(v, JITFunction) for v in ns.values())
+    if not (has_dck or has_kernel):
         raise RuntimeError(
-            "Failed to execute `setup`. Ensure it creates CUDA tensors and launches the kernel once.\n"
-            f"Setup error: {e}"
-        ) from e
+            "Expected your code to define (1) top-level kernel decorated with @triton.jit and (2) a stub function decorated with @autodiff, e.g.:\n"
+            "@triton.jit\n"
+            "def my_kernel(...): ...\n\n"
+            "@autodiff(kernel=my_kernel, ...)\n"
+            "@my_stub(...): ...\n"
+        )
+
+    setup_fn = ns.get("setup")
+    if not callable(setup_fn):
+        raise RuntimeError("Expected a top-level setup() that runs the stub once. The stub must call the kernel.")
 
 
-    # stub now calls my "kernel" which is my _Helper(DifferentiatedCompiledKernel)
-    return ns["stub"], bwd_fp, ns
+    bwd_fp = None
+    def _exec_setup():
+        nonlocal bwd_fp
+        if overwrite_fp:
+            from triton.backends.autodiff import autodiff_overwrite_fp
+            # this adds the "overwrite_fp" argument to my autograd function
+            # so that the hook knows to use the backward from "overwrite_fp",
+            # and not the backward created by my mlir pass
+            with autodiff_overwrite_fp(overwrite_fp):
+                # execute the function body in the same namespace so it can populate
+                # names like `compiled_kernel` directly into `ns`
+                exec(setup_fn.__code__, ns, ns)
+                # not used, keeping for clarity
+                bwd_fp = overwrite_fp
+        else:
+            from triton.backends.autodiff import record_autodiff_artifacts, get_last_bwd_fp
+            with record_autodiff_artifacts():
+                exec(setup_fn.__code__, ns, ns)
+                # record path to the last generated/selected backward before context resets
+                bwd_fp = get_last_bwd_fp()
+
+    # comment: this triggers my callback
+    run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
+
+    op = ns.get("stub")
+    if not callable(op):
+        raise RuntimeError("Expected a top-level stub(...) to call the kernel.")
+
+    return op, bwd_fp, ns
 
 
 
