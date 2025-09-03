@@ -16,7 +16,6 @@ DEVICE = torch.device("cuda:0")
 #   - masks
 #   - % M, % N
 
-@autodiff(idxs_buffers=2)
 @triton.jit
 def kernel(
         # Pointers to matrices
@@ -79,6 +78,8 @@ def kernel(
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     tl.store(c_ptrs, c)
 
+
+@autodiff(kernel=kernel, idxs_buffers=2)
 def stub(
         a,
         b,

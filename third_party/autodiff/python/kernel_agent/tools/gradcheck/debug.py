@@ -1,4 +1,4 @@
-# python -m third_party.autodiff.python.kernel_agent.tools.gradcheck.debug --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py  --verbose
+# python -m kernel_agent.tools.gradcheck.debug --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --verbose
 
 from __future__ import annotations
 import argparse
@@ -8,9 +8,8 @@ from typing import Any, Tuple
 
 import torch
 
-# Changed to absolute imports matching project structure
-from third_party.autodiff.python.kernel_agent.utils import compile_kernel as create_op
-from third_party.autodiff.python.kernel_agent.tools.gradcheck.core import check_op_backward_parity
+from kernel_agent.utils import compile_kernel as create_op
+from kernel_agent.tools.gradcheck.core import check_op_backward_parity
 
 
 def main() -> None:

@@ -93,7 +93,7 @@ class KernelOptimizer:
             fwd_fp: str,
             # benchmark,
             # profile,
-            get_user_dvice_info,
+            get_user_device_info,
             ) -> dict:
 
         if not os.path.isfile(fwd_fp):
@@ -121,7 +121,7 @@ class KernelOptimizer:
 
 
         # best_metrics: dict[str, float] | None = None
-        device = get_user_dvice_info()
+        device = get_user_device_info()
         best_path = bwd_fp
         # non_improve = 0
 

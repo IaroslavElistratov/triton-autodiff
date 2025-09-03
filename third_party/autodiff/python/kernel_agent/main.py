@@ -16,7 +16,7 @@ def main() -> None:
     ap.add_argument("--max-iters", type=int, default=6)
     ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
-    ap.add_argument("--file-path", metavar="FILE", type=str, help="Path to the forward kernel to be optimized")
+    ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
 
     ap.add_argument("--backend", type=str, default="stub", choices=["stub", "triton", "torch", "vllm"], help="Inference backend for local sampler")
     ap.add_argument("--checkpoint", metavar="FILE", type=str, help="Path to the SafeTensors checkpoint")
@@ -54,7 +54,7 @@ def main() -> None:
         # benchmark=benchmark,
         # profile=profile,
         # todo:
-        get_user_dvice_info=(lambda: "N/A"),
+        get_user_device_info=(lambda: "N/A"),
     )
     print("Best metrics:", out.get("best_metrics", {}))
     print("Best backward kernel:", out["best_backward_fp"])

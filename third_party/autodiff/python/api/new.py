@@ -193,7 +193,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             idxs_bufs = getattr(jit_fn, "idxs_buffers", ())
 
             # get user stub source lazily (module is fully initialized now)
-            mod_name = jit_fn.fn.__module__
+            # mod_name = jit_fn.fn.__module__
             # stub_name = getattr(jit_fn, "stub_name", "stub")
             mod_name, stub_name = jit_fn._autodiff_stub_info
             # user stub lives in the same module as their kenrel
