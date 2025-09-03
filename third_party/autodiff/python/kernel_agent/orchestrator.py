@@ -163,8 +163,11 @@ class KernelOptimizer:
             # No change required to check_op_backward_parity.
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Running gradient_check (parity)")
+            torch_fn = ns.get("torch_fn")
+            if not torch_fn:
+                raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
             ok, stats = check_op_backward_parity(
-                ref_fwd=ns["torch_fn"],
+                ref_fwd=torch_fn,
                 my_op=op,
                 inputs=args,
                 outputs="auto",

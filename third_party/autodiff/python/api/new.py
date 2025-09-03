@@ -220,10 +220,14 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         else:
 
+            # compile_kernel(..., overwrite_fp=...) path already re‑executes the user module, runs setup(),
+            # and attaches the edited stub from the on disk generated/[sha]/raised.py even when the JIT hook doesn’t fire
+            # because the forward specialization is cached. Allows for reload without re‑running the MLIR pass
+
             # ensure the bwd stub is installed on the forward JITFunction when overwrite_fp is used
             # so StubOverrideDCK.backward can find it without regenerating. The hook already does this
             # on fresh generations; we add a defensive install here for overwrite path.
-            bwd_stub = runpy.run_path(bwd_fp)[f"backward_{stub_name}"]
+            bwd_stub = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
             assert callable(bwd_stub)
             setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
 

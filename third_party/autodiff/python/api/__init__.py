@@ -5,9 +5,15 @@ USE_LEGACY_API = False
 if USE_LEGACY_API:
     from .legacy import autodiff
 else:
-    from .new import autodiff
+    from .new import autodiff, StubOverrideDCK, record_autodiff_artifacts, autodiff_overwrite_fp, get_last_bwd_fp
 
-__all__ = ["autodiff"]
+__all__ = [
+    "autodiff",
+    "StubOverrideDCK",
+    "record_autodiff_artifacts",
+    "autodiff_overwrite_fp",
+    "get_last_bwd_fp",
+]
 
 
 # todo-low: maybe polymorphic over the old/new APIs?

@@ -1,3 +1,4 @@
+# todo: ugly, fix this when re-organizing folders; problem is that current python package tries to import from above its path
 try:
     from third_party.autodiff.python.api import autodiff
 except ModuleNotFoundError:  # third_party not on sys.path, load by file path

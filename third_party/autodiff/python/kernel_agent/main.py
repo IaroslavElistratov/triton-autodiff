@@ -1,6 +1,7 @@
-# python -m pip install -e /root/triton-autodiff/third_party/autodiff/python && export KERNEL_AGENT_VERBOSE=1 && export TRITON_AUTODIFF_DIR=/root/triton-autodiff
+# python -m pip install -e /root/triton-autodiff/third_party/autodiff/python
 # cd /root/triton-autodiff/third_party/autodiff/python/kernel_agent
-# kernel-agent --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/
+# export KERNEL_AGENT_VERBOSE=1 KERNEL_AGENT_CAPTURE_THINKING=1 KERNEL_AGENT_STREAM=1 TRITON_AUTODIFF_DIR=/root/triton-autodiff
+# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py
 
 
 from __future__ import annotations

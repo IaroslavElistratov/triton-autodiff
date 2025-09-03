@@ -205,7 +205,7 @@ def gen_bwd_stub_auto(
              "DEVICE = torch.device('cuda:0')",
             f"def {bwd_name}({header_params}):",
              *pre_lines,
-             "    # --- codegen stub ---",
+            #  "    # --- codegen stub ---",
              *grad_lines,
              bwd_call,
              *post_lines,

@@ -46,11 +46,18 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     """
 
     def exec_module(src: str) -> dict[str, Any]:
-        local_ns: dict[str, Any] = {}
+        import types, sys  # local to avoid polluting module scope
+        module_name = "__kernel_agent_user__"
+        # previsoly, the hook crashed due to fwd_stub.__module__ being None because user code was executed in a plain dict,
+        # changed utils.exec_module to create a real module (types.ModuleType("__kernel_agent_user__")), insert it into
+        # sys.modules, and execute code in that module’s dict. This guarantees functions (including the stub) have a valid __module__
+        mod = types.ModuleType(module_name)
+        mod.__file__ = file_path
+        sys.modules[module_name] = mod
         code = compile(src, file_path, "exec")
-        # execute user-provided code in an isolated namespace
-        run_with_timeout(lambda: exec(code, local_ns), CODE_EXEC_TIMEOUT_S)
-        return local_ns
+        # execute user code in a real module namespace (gives functions a stable __module__)
+        run_with_timeout(lambda: exec(code, mod.__dict__, mod.__dict__), CODE_EXEC_TIMEOUT_S)
+        return mod.__dict__
 
     with open(file_path, "r", encoding="utf-8") as f:
         src = f.read()
@@ -59,7 +66,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     ns = exec_module(src)
 
     # accept a Triton JITFunction decorated with autodiff-wrapped helper class
-    from third_party.autodiff.python.api.new import StubOverrideDCK as StubDCK
+    from ._autodiff_api import StubOverrideDCK as StubDCK
 
     has_dck = any(isinstance(v, type) and issubclass(v, Stub) for v in ns.values())
     has_kernel = any(isinstance(v, JITFunction) for v in ns.values())
@@ -81,7 +88,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     def _exec_setup():
         nonlocal bwd_fp
         if overwrite_fp:
-            from triton.backends.autodiff import autodiff_overwrite_fp
+            from ._autodiff_api import autodiff_overwrite_fp
             # this adds the "overwrite_fp" argument to my autograd function
             # so that the hook knows to use the backward from "overwrite_fp",
             # and not the backward created by my mlir pass
@@ -92,7 +99,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
                 # not used, keeping for clarity
                 bwd_fp = overwrite_fp
         else:
-            from triton.backends.autodiff import record_autodiff_artifacts, get_last_bwd_fp
+            from ._autodiff_api import record_autodiff_artifacts, get_last_bwd_fp
             with record_autodiff_artifacts():
                 exec(setup_fn.__code__, ns, ns)
                 # record path to the last generated/selected backward before context resets

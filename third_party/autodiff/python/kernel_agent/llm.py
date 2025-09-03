@@ -117,24 +117,22 @@ class MinimalLLMPatchProvider:
                       fwd_kernel_snippet: str,
                       bwd_file: str, bwd_kernel_snippet: str,
                       grad_summary: str) -> str:
-        """
-        Ask the LLM to propose an apply_patch.md patch for the current backward kernel.
-        """
                     #   bench_summary: str, profile_hint: str) -> str:
+
         system = (
             "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
-            "Output ONLY an apply_patch.md patch. No prose. "
-            "If you wrote any analysis above, end with exactly one apply_patch.md block. "
+            "Output ONLY an apply_patch.md patch. No prose. If you wrote any analysis above, end with exactly one apply_patch.md block. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
-            "You can rewrite backward kernel from scratch; but preserve function names/signatures and pointer/mask semantics. "
-            "You can modify the stub as well. "
-            # "Do not add a stub for that kernel, this is already handled outside of this file -- just assume the stub is present"
+            # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference."
+            "You can rewrite backward kernel from scratch; but preserve function names and pointer/mask semantics. "
+            "The backward file contains BOTH the backward Triton kernel and a generated backward stub; you can (and likely should) edit both. "
+            "You can change function signatures (but you must preserve function args prefixed with backward_*). Do not rename or move the file. "
             "More details about the initial backward kernel: "
             "1. signature: `backward(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "
-            "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermideate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formular of some forward operator. "
+            "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator. "
             "3. heavily unrolled: for loops from the forward kernel were unrolled -- can start by fixing that, as it'll clearly improvement the performance "
-            # "4. atomics: kernel uses atomics -- try privataize the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
+            "4. atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
             "If gradient summary is OK, don't second guess it -- assume the gradient is correct. "
             "Reply with substantive code changes, not with comment/docstring 'touch' patches. "
             # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
