@@ -71,7 +71,8 @@ class Config:
     max_iters: int = 6
     patience: int = 2
     min_rel_improvement: float = 0.10   # require >= +10% throughput to accept
-    snippet_max_lines: int = 120        # bound context shown to the LLM
+    # todo: a better way?
+    snippet_max_lines: int = 400        # bound context shown to the LLM
 
 
 

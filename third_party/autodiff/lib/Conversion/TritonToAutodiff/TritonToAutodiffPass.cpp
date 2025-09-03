@@ -73,7 +73,7 @@ namespace triton {
 
     enableNameLocSSA();
 
-    // todo-now: undo
+    // todo-now: enforce only 1 iteration, otherwise confuses the LLM
     unrollAllForOps(func);
     // func.getBody().front().dump();
     // exit(1);

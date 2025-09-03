@@ -131,7 +131,7 @@ class MinimalLLMPatchProvider:
             "More details about the initial backward kernel: "
             "1. signature: `backward(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i'). "
             "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator. "
-            "3. heavily unrolled: for loops from the forward kernel were unrolled -- can start by fixing that, as it'll clearly improvement the performance "
+            "3. heavily unrolled: for loops from the forward kernel were unrolled -- you should re-introduce back the for-loops, as it'll clearly improvement the performance "
             "4. atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
             "If gradient summary is OK, don't second guess it -- assume the gradient is correct. "
             "Reply with substantive code changes, not with comment/docstring 'touch' patches. "

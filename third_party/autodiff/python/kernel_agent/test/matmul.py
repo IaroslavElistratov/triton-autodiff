@@ -35,6 +35,8 @@ def kernel(
         BLOCK_SIZE_M: tl.constexpr,
         BLOCK_SIZE_N: tl.constexpr,
         BLOCK_SIZE_K: tl.constexpr,
+        # using static bounds for simplicity
+        NUM_ITERS: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -56,9 +58,7 @@ def kernel(
 
     # -----------------------------------------------------------
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    # for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-    # todo-now: for now using static bounds for simplicity
-    for k in range(0, 2):
+    for k in range(0, NUM_ITERS):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
         a = tl.load(a_ptrs)
@@ -97,6 +97,7 @@ def stub(
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     # 1D launch kernel where each block gets its own program.
     # todo: passing grid with meta args isn't supported yet
+    num_iters = triton.cdiv(K, BLOCK_SIZE_K)
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
     print("grid: ", grid)
     kernel[grid](
@@ -105,10 +106,10 @@ def stub(
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
+        num_iters,
     )
     return c
 
@@ -126,7 +127,8 @@ def torch_fn(a, b):
 
 
 SWEEP = [
-    {"M": size, "N": size, "K": 32}
+    # todo: enforce only 1 iteration
+    {"M": size, "N": size, "K": 16}
     for size in (256, 512, 1024, 2048)
 ]
 
