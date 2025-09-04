@@ -166,7 +166,7 @@ class MinimalLLMPatchProvider:
         # system prompt
         system = (
             "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
-            "You will be called multiple times to try to improve your kernel, so don't try to output final solution in one shot. You will have opportunities to refine it later."
+            "Do not propose large overly-eager kernel rewrites. You will be called multiple times to refine your kernel, so don't try to output final solution in one shot."
             "Output ONLY an apply_patch.md patch. No prose. If you wrote any analysis above, end with exactly one apply_patch.md block. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
@@ -184,7 +184,8 @@ class MinimalLLMPatchProvider:
             # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
-            "Emit ONE apply_patch.md patch only. "
+            "Emit ONE apply_patch.md patch only. Do not echo patch instruction rules instead you should produce a real diff. "
+            "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
         )
         # user prompt
         spec_text = _APPLY_PATCH_SPEC
