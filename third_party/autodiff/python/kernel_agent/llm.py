@@ -219,10 +219,9 @@ class MinimalLLMPatchProvider:
             # breadcrumb for visibility in next prompt and logs
             self.remember("llm.stop_reason", self.last_stop_reason)
 
-        # Prefer patch from final text; otherwise try thinking; otherwise retry once; otherwise return no-op
+        # Prefer patch from final text only; if absent, retry once below
+        # Do not try to extract from thinking channel
         patch_text = extract_patch(text)
-        if patch_text is None:
-            patch_text = extract_patch(self.last_thinking)
 
         # One strict retry if the model ignored the format or produced an empty/no-op patch.
         # Also capture the retry's stop_reason to distinguish true truncation.
@@ -232,13 +231,7 @@ class MinimalLLMPatchProvider:
             retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
-            patch2 = extract_patch(text2) or extract_patch((getattr(resp2, "response_metadata", {}) or {}).get("thinking", ""))
-            if patch2 is None:
-                try:
-                    thinking2 = (resp2.response_metadata or {}).get("thinking", "")
-                except Exception:
-                    thinking2 = ""
-                patch2 = extract_patch(thinking2)
+            patch2 = extract_patch(text2)
             # Update stop reason from retry attempt as well
             try:
                 stop2 = (resp2.response_metadata or {}).get("stop_reason", "")
