@@ -48,11 +48,26 @@ def has_real_change(patch_text: str | None) -> bool:
     return False
 
 def _ensure_update_file_target(patch_text: str, target_file: str) -> str:
+    """Ensure patch targets exactly one file by inserting/replacing the Update header.
+
+    - If an "*** Update File:" header exists, rewrite its path to target_file
+    - If no file header exists at all, insert "*** Update File: {target_file}"
+      immediately after "*** Begin Patch". Intentionally do not support
+      Add/Delete/Move in this workflow to keep the LLM output minimal.
+    """
     lines = patch_text.splitlines()
+    begin_idx = None
+    updated = False
     for i, ln in enumerate(lines):
+        if ln.startswith("*** Begin Patch"):
+            begin_idx = i
         if ln.startswith("*** Update File:"):
             lines[i] = f"*** Update File: {target_file}"
+            updated = True
             break
+    if not updated and begin_idx is not None:
+        insert_at = begin_idx + 1
+        lines.insert(insert_at, f"*** Update File: {target_file}")
     return "\n".join(lines)
 
 
@@ -67,15 +82,15 @@ def _env_truthy(name: str, default: str = "0") -> bool:
 _APPLY_PATCH_SPEC = """
 Return ONE apply_patch.md block. No prose.
 
-Use this exact envelope and headers:
+Use this exact envelope (do NOT include file headers; the system will add them):
 *** Begin Patch
-*** Update File: <path>
 @@ [optional hunk header]
 - old line from the current file
 + new line to write
 *** End Patch
 
 Rules:
+- Do not include any of: "*** Update File:", "*** Add File:", "*** Delete File:", or "*** Move to:".
 - At least one '-' line per hunk to anchor to real lines (no pure insert-only hunks).
 - Hunk lines must be prefixed with one of:
   - blank space ( ) for unchanged context
@@ -85,7 +100,6 @@ Rules:
 
 Minimal example:
 *** Begin Patch
-*** Update File: <path>
 @@ def some_function(...):
 -    x = old_value
 +    x = new_value
@@ -182,8 +196,8 @@ class MinimalLLMPatchProvider:
             + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
             # Benchmark summary: {bench_summary}
             # Profiler hint: {profile_hint}
-            # todo: hide path from the model complitely
-            + f"Backward file: {bwd_file}\nBackward snippet:\n" + bwd_kernel_snippet + "\n"
+            # path is not shown to the model; the workflow injects the target file name
+            + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
             + f"Gradcheck: {grad_summary}\n"
         )
 
