@@ -5,7 +5,7 @@ import os, re, json
 import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
-from .utils import _read_snippet, compile_kernel as create_op
+from .utils import _read_snippet, compile_kernel as create_op, CompileError
 from .tools.gradcheck.core import check_op_backward_parity
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
@@ -153,6 +153,19 @@ class KernelOptimizer:
             changed, targets = _apply_and_report(patch, it, f"{stage}-retry")
             self.patcher.remember(f"apply.{stage}-retry", f"changed={changed}, targets={targets}")
 
+    def _create_op_with_fix(self, it: int, fwd_fp: str, overwrite_fp: str | None):
+        try:
+            return create_op(fwd_fp, overwrite_fp=overwrite_fp)
+        except CompileError as ce:
+            info = ce.info
+            target = info.get("bwd_file") or info.get("fwd_file") or (overwrite_fp or fwd_fp)
+            summary = f"compile_error[{info.get('phase','?')}]: {info.get('error_type')}: {info.get('error_message')}"
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] {summary}")
+            # Pass the full info dict; _llm_request_and_apply accepts any object as grad_summary
+            self._llm_request_and_apply(it, "fix", bwd_fp=str(target), fwd_fp=fwd_fp, grad_summary=info)
+            return create_op(fwd_fp, overwrite_fp=overwrite_fp)
+
     def run(self, *,
             fwd_fp: str,
             # benchmark,
@@ -168,7 +181,7 @@ class KernelOptimizer:
         #     raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
 
         # TTIR from autodiff then raise to Python once; use as seed and target
-        # using output of triton-autograd directly as the initial version of the backward kernel
+        # using output of triton-autodiff directly as the initial version of the backward kernel
         # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodif instead just using output of trtion-autodiff as patcher.kernel_snippet)
 
         # todo-high: support overwritting stub (current api.py integration doens't support it)
@@ -179,7 +192,7 @@ class KernelOptimizer:
             print("[kernel-agent] Starting run")
             print(f"[kernel-agent] Forward file: {fwd_fp}")
             print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
-        op, bwd_fp, ns = create_op(fwd_fp, overwrite_fp=None)
+        op, bwd_fp, ns = self._create_op_with_fix(0, fwd_fp, overwrite_fp=None)
         if VERBOSE:
             print(f"[kernel-agent] Initial backward path: {bwd_fp}")
 
@@ -198,7 +211,7 @@ class KernelOptimizer:
             if it > 0:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
-                op, _, _ = create_op(fwd_fp, overwrite_fp=bwd_fp)
+                op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
 
             # Build inputs for parity check from user's helpers
             make_args = ns.get("make_args")

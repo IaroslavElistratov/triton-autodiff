@@ -1,7 +1,7 @@
 import os
 import queue
 import threading
-from typing import Any, Callable
+from typing import Any
 from triton.runtime.jit import JITFunction
 
 # def _norm_bench(x) -> dict[str, float]:
@@ -33,6 +33,12 @@ from triton.runtime.jit import JITFunction
 #     return ", ".join(f"{k}={v:.4g}" for k, v in m.items() if isinstance(v, (int, float)))
 
 
+
+
+class CompileError(Exception):
+    def __init__(self, info: dict):
+        self.info = info
+        super().__init__(f"compile_error: {info.get('error_type')}: {info.get('error_message')}")
 
 
 def compile_kernel(file_path: str, overwrite_fp: str | None = None):
@@ -71,6 +77,8 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     has_dck = any(isinstance(v, type) and issubclass(v, Stub) for v in ns.values())
     has_kernel = any(isinstance(v, JITFunction) for v in ns.values())
     if not (has_dck or has_kernel):
+        # these errors for invalid *fwd* kernel -- these aren't designed for llm, but for a human
+        # so not wrapping into CompileError
         raise RuntimeError(
             "Expected your code to define (1) top-level kernel decorated with @triton.jit and (2) a stub function decorated with @autodiff, e.g.:\n"
             "@triton.jit\n"
@@ -106,7 +114,22 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
                 bwd_fp = get_last_bwd_fp()
 
     # comment: this triggers my callback
-    run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
+    try:
+        run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
+    except BaseException as e:
+        # Surface structured error upwards; let the orchestrator decide how to recover.
+        import traceback
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        msg = str(e)
+        err = {
+            "phase": "setup_run",
+            "error_type": type(e).__name__,
+            "error_message": msg,
+            "fwd_file": file_path,
+            "traceback": tb,
+            "context_snippet": _read_snippet(file_path, 200),
+        }
+        raise CompileError(err) from e
 
     op = ns.get("stub")
     if not callable(op):
