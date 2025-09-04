@@ -7,6 +7,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
 from .tools.gradcheck.core import check_op_backward_parity
+from .tools.benchmark import bench_from_file, reduce_bench
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
 VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
@@ -267,27 +268,36 @@ class KernelOptimizer:
                 # retry correctness in next iteration
                 continue
 
+            # Benchmark current backward
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] Benchmarking backward")
+            bench_records = bench_from_file(
+                fwd_fp,
+                overwrite_bwd_fp=bwd_fp,
+                mode="bwd",
+            )
+            cand = reduce_bench(bench_records)
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] bench: {cand}")
 
-            # todo-now: add benchmark; initially, without re-trace; only then with re-trace
+            # simple plateau logic
+            if 'best_metrics' not in locals():
+                best_metrics = None
+            if 'non_improve' not in locals():
+                non_improve = 0
 
-            # # 2) performance
-            # cand = _norm_bench(benchmark(bwd_fp))
-            # # (optional) profile to get a hint—but don't depend on it
-            # try:
-            #     prof_path = profile(bwd_fp)
-            #     prof_hint = f"profile: {os.path.basename(prof_path)}" if prof_path else "(no profile)"
-            # except Exception:
-            #     prof_hint = "(no profile)"
+            improved = (best_metrics is None) or (
+                cand["median_ms"] <= (1.0 - self.cfg.min_rel_improvement) * best_metrics["median_ms"]
+            )
 
-            # improved = _better(cand, best_metrics, self.cfg.min_rel_improvement)
-            # if improved:
-            #     best_metrics = cand
-            #     best_path = bwd_fp
-            #     non_improve = 0
-            # else:
-            #     non_improve += 1
-            #     if non_improve >= self.cfg.patience:
-            #         break  # plateau
+            if improved:
+                best_metrics = cand
+                best_path = bwd_fp
+                non_improve = 0
+            else:
+                non_improve += 1
+                if non_improve >= self.cfg.patience:
+                    break
 
             # 3) ask for an optimization patch and apply
             if VERBOSE:
@@ -297,7 +307,7 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] End iteration")
 
         return {
-            # "best_metrics": best_metrics or {},
+            "best_metrics": best_metrics or {},
             "best_backward_fp": best_path,
             "device_info": device,
         }
