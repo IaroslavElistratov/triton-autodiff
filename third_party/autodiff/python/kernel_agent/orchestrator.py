@@ -204,11 +204,47 @@ class KernelOptimizer:
                     print(f"[kernel-agent][it={it}] LLM thinking (fix):\n{getattr(self.patcher, 'last_thinking', '')}")
                     print(f"[kernel-agent][it={it}] LLM patch (fix) preview:\n{preview}")
                 if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
-                    print("[kernel-agent] LLM returned non-patch content; skipping apply for 'fix' phase")
-                    break
+                    # Retry once for empty/invalid patch. If the LLM was truncated due
+                    # to max_tokens, record that specifically so logs are accurate.
+                    stop_reason = getattr(self.patcher, "last_stop_reason", "")
+                    if stop_reason.lower() == "max_tokens":
+                        self.patcher.remember("llm.patch.fix.error", "generation truncated (max_tokens); retrying once")
+                    else:
+                        self.patcher.remember("llm.patch.fix.error", "invalid or empty patch; retrying once")
+                    patch = self.patcher.propose_patch(
+                        phase="fix",
+                        bwd_file=bwd_fp,
+                        fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                        bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                        grad_summary=stats,
+                    )
+                    if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
+                        # Hard-fail this iteration with a precise message on truncation.
+                        stop_reason = getattr(self.patcher, "last_stop_reason", "")
+                        if stop_reason.lower() == "max_tokens":
+                            raise RuntimeError("LLM stopped due to max_tokens during fix; no patch produced")
+                        raise RuntimeError("LLM returned invalid/empty patch twice for 'fix'")
                 self.patcher.remember("llm.patch.fix", patch[:1200])
-                changed, targets = _apply_and_report(patch, it, "fix")
-                self.patcher.remember("apply.fix", f"changed={changed}, targets={targets}")
+                try:
+                    changed, targets = _apply_and_report(patch, it, "fix")
+                    self.patcher.remember("apply.fix", f"changed={changed}, targets={targets}")
+                except Exception as e:
+                    # Surface patcher error to model and let it repair the patch once
+                    msg = f"apply_error: {type(e).__name__}: {e}"
+                    self.patcher.remember("apply.fix.error", msg)
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] Apply error (fix): {msg}")
+                    patch = self.patcher.propose_patch(
+                        phase="fix",
+                        bwd_file=bwd_fp,
+                        fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                        bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                        grad_summary=stats,
+                    )
+                    if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
+                        raise RuntimeError("LLM returned invalid/empty patch on fix-retry after apply error")
+                    changed, targets = _apply_and_report(patch, it, "fix-retry")
+                    self.patcher.remember("apply.fix-retry", f"changed={changed}, targets={targets}")
                 # retry correctness in next iteration
                 continue
 
@@ -251,12 +287,46 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] LLM thinking (optimize):\n{getattr(self.patcher, 'last_thinking', '')}")
                 print(f"[kernel-agent][it={it}] LLM patch (optimize) preview:\n{preview}")
             if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
-                print("[kernel-agent] LLM returned non-patch content; skipping apply for 'optimize' phase")
-                break
+                # Retry once for empty/invalid patch. Distinguish truncation in logs.
+                stop_reason = getattr(self.patcher, "last_stop_reason", "")
+                if stop_reason.lower() == "max_tokens":
+                    self.patcher.remember("llm.patch.optimize.error", "generation truncated (max_tokens); retrying once")
+                else:
+                    self.patcher.remember("llm.patch.optimize.error", "invalid or empty patch; retrying once")
+                patch = self.patcher.propose_patch(
+                    phase="optimize",
+                    bwd_file=bwd_fp,
+                    fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                    bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                    grad_summary="OK",
+                )
+                if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
+                    # Hard-fail this iteration with a precise message on truncation.
+                    stop_reason = getattr(self.patcher, "last_stop_reason", "")
+                    if stop_reason.lower() == "max_tokens":
+                        raise RuntimeError("LLM stopped due to max_tokens during optimize; no patch produced")
+                    raise RuntimeError("LLM returned invalid/empty patch twice for 'optimize'")
 
             self.patcher.remember("llm.patch.optimize", patch[:1200])
-            changed, targets = _apply_and_report(patch, it, "optimize")  # in-place
-            self.patcher.remember("apply.optimize", f"changed={changed}, targets={targets}")
+            try:
+                changed, targets = _apply_and_report(patch, it, "optimize")  # in-place
+                self.patcher.remember("apply.optimize", f"changed={changed}, targets={targets}")
+            except Exception as e:
+                msg = f"apply_error: {type(e).__name__}: {e}"
+                self.patcher.remember("apply.optimize.error", msg)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Apply error (optimize): {msg}")
+                patch = self.patcher.propose_patch(
+                    phase="optimize",
+                    bwd_file=bwd_fp,
+                    fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                    bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                    grad_summary="OK",
+                )
+                if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
+                    raise RuntimeError("LLM returned invalid/empty patch on optimize-retry after apply error")
+                changed, targets = _apply_and_report(patch, it, "optimize-retry")
+                self.patcher.remember("apply.optimize-retry", f"changed={changed}, targets={targets}")
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] End iteration")
 

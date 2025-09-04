@@ -16,10 +16,18 @@ from openai_harmony import (
 )
 
 
+VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
+
 BEGIN_PATCH = "*** Begin Patch"
 END_PATCH = "*** End Patch"
 
-# --- helpers (strict hunk check + target normalization) ----------------------
+# helpers (strict hunk check + target normalization)
+
+def print_model_prompt(msg):
+    RED, RESET = "\x1b[31m", "\x1b[0m"
+    print("=" * 60 + " MODEL SEES" + "=" * 60)
+    print(f"{RED}{msg}{RESET}\n")
+    print("=" * 130)
 
 def extract_patch(text: str | None) -> str | None:
     if not text:
@@ -54,14 +62,33 @@ def _env_truthy(name: str, default: str = "0") -> bool:
     return str(val).lower() not in ("0", "", "false", "no", "off")
 
 
-_APPLY_PATCH_MD_SPEC = """
-Return ONLY one patch in apply_patch.md format (no prose):
+# Canonical apply_patch.md contract presented to the model;
+# the patcher is the source of truth for validation and application.
+_APPLY_PATCH_SPEC = """
+Return ONE apply_patch.md block. No prose.
 
+Use this exact envelope and headers:
 *** Begin Patch
-*** Update File: <relative/path/to/file.py>
-@@
-- old line
-+ new line
+*** Update File: <path>
+@@ [optional hunk header]
+- old line from the current file
++ new line to write
+*** End Patch
+
+Rules:
+- At least one '-' line per hunk to anchor to real lines (no pure insert-only hunks).
+- Hunk lines must be prefixed with one of:
+  - blank space ( ) for unchanged context
+  - '-' for removed text (from the current file)
+  - '+' for inserted text
+- Do not include any text outside the patch block.
+
+Minimal example:
+*** Begin Patch
+*** Update File: <path>
+@@ def some_function(...):
+-    x = old_value
++    x = new_value
 *** End Patch
 """
 
@@ -73,6 +100,9 @@ class MinimalLLMPatchProvider:
     max_tokens: int = 1536
     context: int | None = None
     last_thinking: str = ""
+    # Tracks backend stop reason (e.g., "max_tokens") to disambiguate truncation
+    # from other failure modes and report errors upstream.
+    last_stop_reason: str = ""
     # Max breadcrumbs kept for prompt context; small to avoid token bloat.
     history_max_items: int = 8
 
@@ -119,8 +149,10 @@ class MinimalLLMPatchProvider:
                       grad_summary: str) -> str:
                     #   bench_summary: str, profile_hint: str) -> str:
 
+        # system prompt
         system = (
             "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
+            "You will be called multiple times to try to improve your kernel, so don't try to output final solution in one shot. You will have opportunities to refine it later."
             "Output ONLY an apply_patch.md patch. No prose. If you wrote any analysis above, end with exactly one apply_patch.md block. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
@@ -133,33 +165,31 @@ class MinimalLLMPatchProvider:
             "2. recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator. "
             "3. heavily unrolled: for loops from the forward kernel were unrolled -- you should re-introduce back the for-loops, as it'll clearly improvement the performance "
             "4. atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
-            "If gradient summary is OK, don't second guess it -- assume the gradient is correct. "
+            "If gradient summary is OK assume the kernel and stub compute gradients correctly -- do not second guess it. "
             "Reply with substantive code changes, not with comment/docstring 'touch' patches. "
             # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
+            # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
+            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
+            "Emit ONE apply_patch.md patch only. "
         )
-        user = f'''{_APPLY_PATCH_MD_SPEC}
+        # user prompt
+        spec_text = _APPLY_PATCH_SPEC
+        user = (
+            spec_text
+            + f"\n\nPhase: {phase}\n"
+            # todo-high: maybe don't manually save it but let llm an option to write a note for the next iteration and work done in the current iteration
+            + f"Context from previous iterations:\n{self._history_block()}\n\n"
+            + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
+            # Benchmark summary: {bench_summary}
+            # Profiler hint: {profile_hint}
+            # todo: hide path from the model complitely
+            + f"Backward file: {bwd_file}\nBackward snippet:\n" + bwd_kernel_snippet + "\n"
+            + f"Gradcheck: {grad_summary}\n"
+        )
 
-Phase: {phase}
-
-Context from previous iterations:
-{self._history_block()}
-
-Forward kernel:
-{fwd_kernel_snippet}
-
-Backward file: {bwd_file}
-Backward kernel:
-{bwd_kernel_snippet}
-
-Gradient check summary:
-{grad_summary}
-
-'''
-# Benchmark summary:
-# {bench_summary}
-
-# Profiler hint:
-# {profile_hint}
+        if VERBOSE:
+            # colored preview of the prompt for debugging
+            print_model_prompt(user)
 
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -180,31 +210,53 @@ Gradient check summary:
         except Exception:
             self.last_thinking = ""
 
+        # Record stop reason to distinguish truncation vs normal stops
+        try:
+            self.last_stop_reason = (resp.response_metadata or {}).get("stop_reason", "")  # type: ignore[attr-defined]
+        except Exception:
+            self.last_stop_reason = ""
+        if self.last_stop_reason:
+            # breadcrumb for visibility in next prompt and logs
+            self.remember("llm.stop_reason", self.last_stop_reason)
+
         # Prefer patch from final text; otherwise try thinking; otherwise retry once; otherwise return no-op
         patch_text = extract_patch(text)
         if patch_text is None:
             patch_text = extract_patch(self.last_thinking)
 
-        # One strict retry if the model ignored the format or produced a no-op.
-        if (patch_text is None or not has_real_change(patch_text)): #  and _env_truthy("KERNEL_AGENT_PATCH_RETRY", "1"):
-            retry_system = "Return ONLY one apply_patch.md patch that modifies the target backward file; no analysis, no commentary."
-            retry_user = user + "\nIMPORTANT: Your previous attempt did not include a non-empty patch. Emit exactly one patch with at least one real hunk."
+        # One strict retry if the model ignored the format or produced an empty/no-op patch.
+        # Also capture the retry's stop_reason to distinguish true truncation.
+        if (patch_text is None or not has_real_change(patch_text)):
+            retry_system = "Return ONE non-empty apply_patch.md block. No prose."
+            retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block."
             retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
-            patch2 = extract_patch(text2)
+            patch2 = extract_patch(text2) or extract_patch((getattr(resp2, "response_metadata", {}) or {}).get("thinking", ""))
             if patch2 is None:
                 try:
                     thinking2 = (resp2.response_metadata or {}).get("thinking", "")
                 except Exception:
                     thinking2 = ""
                 patch2 = extract_patch(thinking2)
+            # Update stop reason from retry attempt as well
+            try:
+                stop2 = (resp2.response_metadata or {}).get("stop_reason", "")
+            except Exception:
+                stop2 = ""
+            if stop2:
+                self.last_stop_reason = stop2
+                self.remember("llm.stop_reason.retry", self.last_stop_reason)
             if patch2:
                 patch_text = patch2
 
-        # If still nothing, return a true no-op apply_patch block.
-        if patch_text is None:
-            patch_text = f"{BEGIN_PATCH}\n{END_PATCH}"
+        # If still invalid, fail fast. If hit the token limit, report that
+        # explicitly so the orchestrator can avoid misclassifying it as a
+        # patching/apply failure.
+        if (patch_text is None or not has_real_change(patch_text)):
+            if (self.last_stop_reason or "").lower() == "max_tokens":
+                raise RuntimeError("LLM stopped due to max_tokens; output truncated; no patch produced")
+            raise RuntimeError("LLM returned no actionable patch")
 
         # Ensure target file line points to requested file (fix any mismatched path)
         patch_text = _ensure_update_file_target(patch_text, bwd_file)
