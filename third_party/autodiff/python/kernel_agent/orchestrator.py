@@ -8,6 +8,7 @@ from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
 from .tools.gradcheck.core import check_op_backward_parity
 from .tools.benchmark import bench_op, reduce_bench
+from .strategy import make_strategy
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
 VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
@@ -90,6 +91,11 @@ class KernelOptimizer:
     def __init__(self, cfg: Config, patcher):
         self.cfg = cfg
         self.patcher = patcher
+        # Strategy encapsulates per-step phase text and temperature; keeps the
+        # main loop clean and allows switching behavior via env
+        self.strategy = make_strategy(os.environ.get("KERNEL_AGENT_STRATEGY", "regular"))
+        # Toggle optimize path: "simple" (strategy + error echo, default) or "legacy" (original _llm_request_and_apply helper)
+        self.optimize_mode = str(os.environ.get("KERNEL_AGENT_OPTIMIZE_MODE", "simple")).strip().lower()
 
     def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, grad_summary: object) -> None:
         """Request a patch from the LLM with one retry for empty/invalid output,
@@ -275,14 +281,12 @@ class KernelOptimizer:
                 op,              # autograd-backed op from create_op(...)
                 ns,              # sidecar providing SWEEP and make_args
                 mode="bwd",
-                outputs="auto",  # selector if your op returns auxiliaries
-                seed=0,
             )
             cand = reduce_bench(bench_records)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
 
-            # simple plateau logic
+            # Simple plateau logic governed by cfg.patience and min_rel_improvement.
             if 'best_metrics' not in locals():
                 best_metrics = None
             if 'non_improve' not in locals():
@@ -301,10 +305,58 @@ class KernelOptimizer:
                 if non_improve >= self.cfg.patience:
                     break
 
-            # 3) ask for an optimization patch and apply
+            # 3) Optimize step (toggleable to keep loop disentangled from policy)
+            if self.optimize_mode == "legacy":
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM (legacy path)")
+                self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, grad_summary="OK")
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] End iteration")
+                continue
+
+            # Strategy-based path: generate phase text + temp, request patch, and
+            # let the patcher apply/raise; echo apply errors back into next prompt.
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
-            self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, grad_summary="OK")
+
+            phase_text, temp = self.strategy.next_phase(parity_ok=ok, last_runtime=cand.get("median_ms"))
+            self.patcher.temperature = float(temp)
+
+            last_error = ""
+            for attempt in range(2):
+                patch = self.patcher.propose_patch(
+                    phase=phase_text,
+                    bwd_file=bwd_fp,
+                    fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                    bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
+                    grad_summary="OK",
+                    # todo-low: fold grad_summary, perf_summary, etc into a single dict?
+                    # state_facts={"gradcheck_ok": ok, "dims": dims},
+                    last_error=last_error,
+                )
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
+
+                try:
+                    self.patcher.apply(patch)
+                    else:
+                        _apply_patch_raw(patch)
+                    last_error = ""
+                    break
+                except Exception as e:
+                    last_error = f"{type(e).__name__}: {e}"
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] apply error: {last_error}")
+                    continue
+
+            if last_error:
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Skipping apply after repeated errors")
+                self.strategy.advance(changed=False, parity_ok=ok)
+                continue
+
+            self.patcher.remember("llm.patch.optimize", str(patch)[:1200])
+            self.strategy.advance(changed=True, parity_ok=ok)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] End iteration")
 

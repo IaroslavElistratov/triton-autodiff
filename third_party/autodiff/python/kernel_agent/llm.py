@@ -135,6 +135,21 @@ class MinimalLLMPatchProvider:
         # Stored as small text snippets. Not a chat transcript.
         self._history: list[str] = []
 
+    # Allow per-phase temperature overrides (optional)
+    def set_phase_temperature(self, mapping: dict[str, float]) -> None:
+        self._phase_temp = getattr(self, "_phase_temp", {})
+        self._phase_temp.update(mapping)
+
+    def _phase_temperature(self, phase_key: str) -> float:
+        if hasattr(self, "_phase_temp"):
+            for key, val in self._phase_temp.items():
+                if key in str(phase_key):
+                    try:
+                        return float(val)
+                    except Exception:
+                        pass
+        return getattr(self, "temperature", 0.3)
+
     # breadcrumb API for per-iteration context used by the orchestrator.
     def remember(self, kind: str, text: str) -> None:
         """Record a compact breadcrumb for later prompts."""
@@ -160,7 +175,8 @@ class MinimalLLMPatchProvider:
     def propose_patch(self, *, phase: str,
                       fwd_kernel_snippet: str,
                       bwd_file: str, bwd_kernel_snippet: str,
-                      grad_summary: str) -> str:
+                      grad_summary: str,
+                      last_error: str = "") -> str:
                     #   bench_summary: str, profile_hint: str) -> str:
 
         # system prompt
@@ -186,9 +202,11 @@ class MinimalLLMPatchProvider:
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
             "Emit ONE apply_patch.md patch only. Do not echo patch instruction rules instead you should produce a real diff. "
             "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
+            "Do not print the envelope/rules; output only the patch block. "
         )
         # user prompt
         spec_text = _APPLY_PATCH_SPEC
+        # err = f"\nPrevious apply error:\n{last_error}\n" if last_error else ""
         user = (
             spec_text
             + f"\n\nPhase: {phase}\n"
@@ -200,6 +218,7 @@ class MinimalLLMPatchProvider:
             # path is not shown to the model; the workflow injects the target file name
             + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
             + f"Gradcheck: {grad_summary}\n"
+            # + err
         )
 
         if VERBOSE:
@@ -215,6 +234,12 @@ class MinimalLLMPatchProvider:
                 # keep minimal/no prefix to avoid noisy logs; orchestrator can add one
                 print(chunk, end="", flush=True)
             thinking_sink = _print_sink
+
+        # Adjust generator temperature per phase when available.
+        try:
+            self._sampler.temperature = self._phase_temperature(header)
+        except Exception:
+            pass
 
         resp = self._sampler(msgs, on_thinking_chunk=thinking_sink)
         text = (getattr(resp, "response_text", "") or "").strip()
