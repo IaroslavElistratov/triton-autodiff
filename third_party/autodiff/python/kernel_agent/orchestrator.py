@@ -7,7 +7,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
 from .tools.gradcheck.core import check_op_backward_parity
-from .tools.benchmark import bench_triton, reduce_bench
+from .tools.benchmark import bench_op, reduce_bench
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
 VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
@@ -271,7 +271,13 @@ class KernelOptimizer:
             # Benchmark current backward using the already-compiled autograd op
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
-            bench_records = bench_triton(op, ns, mode="bwd")
+            bench_records = bench_op(
+                op,              # autograd-backed op from create_op(...)
+                ns,              # sidecar providing SWEEP and make_args
+                mode="bwd",
+                outputs="auto",  # selector if your op returns auxiliaries
+                seed=0,
+            )
             cand = reduce_bench(bench_records)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")

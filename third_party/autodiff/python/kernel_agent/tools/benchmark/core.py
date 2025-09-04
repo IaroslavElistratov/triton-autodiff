@@ -1,12 +1,26 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
-import triton
 import triton.testing as tt
 
-from ...utils import compile_kernel as create_op
+Tensor = torch.Tensor
+MaybeTensors = Union[Tensor, Sequence[Tensor]]
+OutputSel = Union[str, int, Sequence[int], Callable[[MaybeTensors], MaybeTensors]]
+
+def _as_tuple(x: MaybeTensors) -> Tuple[Tensor, ...]:
+    return (x,) if isinstance(x, torch.Tensor) else tuple(x)
+
+def _select_outputs(y: MaybeTensors, sel: OutputSel) -> Tuple[Tensor, ...]:
+    yt = _as_tuple(y)
+    if sel == "auto":
+        return yt
+    if isinstance(sel, int):
+        return (yt[sel],)
+    if callable(sel):
+        return _as_tuple(sel(y))
+    return tuple(yt[i] for i in sel)
 
 @dataclass(frozen=True)
 class BenchRecord:
@@ -14,23 +28,23 @@ class BenchRecord:
     time_ms: float
     tflops: Optional[float] = None
 
-
-def bench_triton(
-    my_op: Callable[..., Any],
-    sidecar,
+def bench_op(
+    my_op: Callable[..., MaybeTensors],
+    sidecar: Any,
     *,
-    mode: str = "fwd",
+    mode: str = "fwd",                  # "fwd" | "bwd"
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
+    outputs: OutputSel = "auto",        # which tensors to drive backward through
+    seed: int = 0,
 ) -> List[BenchRecord]:
     """
-    Benchmark the autograd-wrapped op that composes forward+backward.
+    Benchmark an autograd-backed op.
 
     sidecar must expose:
-      SWEEP: list[dict]
-      make_args(dims, device, dtype) -> (args, kwargs)
-    optional:
-      flops(dims, mode) -> float
+      - SWEEP: Iterable[dict]
+      - make_args(dims, device, dtype) -> (args, kwargs)
+      - optional flops(dims, mode) -> int|float for TFLOPS reporting
     """
     if mode not in ("fwd", "bwd"):
         raise ValueError("mode must be 'fwd' or 'bwd'")
@@ -42,24 +56,19 @@ def bench_triton(
     for dims in sweep:
         args, kwargs = sidecar.make_args(dims, device=device, dtype=dtype)
 
-        # warm compile outside timed region
-        warm = my_op(*args, **kwargs)
-        warm = warm[0] if isinstance(warm, (tuple, list)) else warm
+        # Warm compile outside the timed region
+        y_warm = my_op(*args, **kwargs)
 
         if mode == "fwd":
             def run():
                 _ = my_op(*args, **kwargs)
         else:
-            # Build graph once, time only autograd backward through op outputs
-            out = my_op(*args, **kwargs)
-            outs: List[torch.Tensor] = list(out) if isinstance(out, (tuple, list)) else [out]
-            upstreams = [torch.randn_like(o) for o in outs]
+            ys = _select_outputs(y_warm, outputs)
+            torch.manual_seed(seed)
+            ups = tuple(torch.randn_like(t) for t in ys)
 
             def run():
-                if len(outs) == 1:
-                    outs[0].backward(upstreams[0], retain_graph=True)
-                else:
-                    torch.autograd.backward(tuple(outs), tuple(upstreams), retain_graph=True)
+                torch.autograd.backward(ys, ups, retain_graph=True)
 
         ms = float(tt.do_bench(run))
         flop = float(sidecar.flops(dims, mode)) if has_flops else None
@@ -67,7 +76,6 @@ def bench_triton(
         results.append(BenchRecord(dims=dict(dims), time_ms=ms, tflops=tflops))
 
     return results
-
 
 def reduce_bench(records: Sequence[BenchRecord]) -> Dict[str, float]:
     import statistics as st
@@ -82,7 +90,6 @@ def reduce_bench(records: Sequence[BenchRecord]) -> Dict[str, float]:
     if mx is not None:
         out["max_tflops"] = float(mx)
     return out
-
 
 
 
