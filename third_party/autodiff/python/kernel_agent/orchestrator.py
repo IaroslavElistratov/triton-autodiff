@@ -97,7 +97,7 @@ class KernelOptimizer:
         # Toggle optimize path: "simple" (strategy + error echo, default) or "legacy" (original _llm_request_and_apply helper)
         self.optimize_mode = str(os.environ.get("KERNEL_AGENT_OPTIMIZE_MODE", "simple")).strip().lower()
 
-    def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, grad_summary: object) -> None:
+    def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, state_facts: object) -> None:
         """Request a patch from the LLM with one retry for empty/invalid output,
         apply it, and if apply fails, request a one-shot repair patch and apply.
         Distinguishes max_tokens truncation from generic invalid patch.
@@ -115,7 +115,7 @@ class KernelOptimizer:
                 bwd_file=bwd_fp,
                 fwd_kernel_snippet=fwd_snip,
                 bwd_kernel_snippet=bwd_snip,
-                state_facts={"grad_summary": grad_summary},
+                state_facts=state_facts,
             )
 
         # Initial snippets
@@ -168,15 +168,9 @@ class KernelOptimizer:
             target = info.get("bwd_file") or info.get("fwd_file") or (overwrite_fp or fwd_fp)
             summary = f"compile_error[{info.get('phase','?')}]: {info.get('error_type')}: {info.get('error_message')}"
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] {summary}")
-            # pass compile error via state_facts
-            self.patcher.propose_patch(
-                phase="fix",
-                bwd_file=str(target),
-                fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
-                bwd_kernel_snippet=_read_snippet(str(target), self.cfg.snippet_max_lines),
-                state_facts={"compile_error": info},
-            )
+                print(f"[kernel-agent][it={it}] compile_error[{summary}")
+            # route via helper with state_facts
+            self._llm_request_and_apply(it, "fix", bwd_fp=str(target), fwd_fp=fwd_fp, state_facts={"compile_error": info})
             return create_op(fwd_fp, overwrite_fp=overwrite_fp)
 
     def run(self, *,
@@ -276,7 +270,8 @@ class KernelOptimizer:
             if not ok:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed — requesting 'fix' patch from LLM")
-                self._llm_request_and_apply(it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp, grad_summary=stats)
+                # request fix via helper with state_facts only
+                self._llm_request_and_apply(it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp, state_facts={"grad_summary": stats})
                 # retry correctness in next iteration
                 continue
 
@@ -315,7 +310,7 @@ class KernelOptimizer:
             if self.optimize_mode == "legacy":
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM (legacy path)")
-                self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, grad_summary="OK")
+                self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, state_facts={"gradcheck_ok": ok})
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] End iteration")
                 continue
@@ -327,37 +322,8 @@ class KernelOptimizer:
 
             phase_text, temp = self.strategy.next_phase(parity_ok=ok, last_runtime=cand.get("median_ms"))
             self.patcher.temperature = float(temp)
-
-            last_error = ""
-            for attempt in range(2):
-                patch = self.patcher.propose_patch(
-                    phase=phase_text,
-                    bwd_file=bwd_fp,
-                    fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
-                    bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
-                    state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand},
-                )
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
-
-                try:
-                    self.patcher.apply(patch)
-                except Exception as e:
-                    last_error = f"{type(e).__name__}: {e}"
-                    # breadcrumb apply error for next prompt context
-                    self.patcher.remember("apply.error", last_error)
-                    if VERBOSE:
-                        print(f"[kernel-agent][it={it}] apply error: {last_error}")
-                    continue
-                break
-
-            if last_error:
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Skipping apply after repeated errors")
-                self.strategy.advance(changed=False, parity_ok=ok)
-                continue
-
-            self.patcher.remember("llm.patch.optimize", str(patch)[:1200])
+            # route optimize via helper with state_facts (dims + bench + gate)
+            self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand})
             self.strategy.advance(changed=True, parity_ok=ok)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] End iteration")
