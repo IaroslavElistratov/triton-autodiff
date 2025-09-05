@@ -175,8 +175,7 @@ class MinimalLLMPatchProvider:
     def propose_patch(self, *, phase: str,
                       fwd_kernel_snippet: str,
                       bwd_file: str, bwd_kernel_snippet: str,
-                      grad_summary: str,
-                      last_error: str = "") -> str:
+                      state_facts=None) -> str:
                     #   bench_summary: str, profile_hint: str) -> str:
 
         # system prompt
@@ -206,19 +205,17 @@ class MinimalLLMPatchProvider:
         )
         # user prompt
         spec_text = _APPLY_PATCH_SPEC
-        # err = f"\nPrevious apply error:\n{last_error}\n" if last_error else ""
+        facts_lines = "\n".join(f"{k}={v}" for k, v in (state_facts or {}).items())
         user = (
             spec_text
-            + f"\n\nPhase: {phase}\n"
+            + f"\n\n{phase}\n"
             # todo-high: maybe don't manually save it but let llm an option to write a note for the next iteration and work done in the current iteration
             + f"Context from previous iterations:\n{self._history_block()}\n\n"
             + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
-            # Benchmark summary: {bench_summary}
-            # Profiler hint: {profile_hint}
             # path is not shown to the model; the workflow injects the target file name
             + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
-            + f"Gradcheck: {grad_summary}\n"
-            # + err
+            # optional: gradcheck, profiler hint, bench -- info is carried in state_facts below
+            + (f"State:\n{facts_lines}\n" if facts_lines else "")
         )
 
         if VERBOSE:
@@ -237,7 +234,7 @@ class MinimalLLMPatchProvider:
 
         # Adjust generator temperature per phase when available.
         try:
-            self._sampler.temperature = self._phase_temperature(header)
+            self._sampler.temperature = self._phase_temperature(phase)
         except Exception:
             pass
 

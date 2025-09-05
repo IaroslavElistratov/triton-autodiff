@@ -24,6 +24,7 @@ def main() -> None:
 
     ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=32768, help="Max context length (tokens)")
     ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="high", choices=["high", "medium", "low"], help="Reasoning effort")
+    ap.add_argument("--mode", type=str, default="regular", choices=["regular", "phased"], help="Optimization strategy mode")
     args = ap.parse_args()
 
     # Map selected backend options into environment for the local sampler
@@ -31,6 +32,8 @@ def main() -> None:
         os.environ["KERNEL_AGENT_BACKEND"] = args.backend
     if args.checkpoint:
         os.environ["KERNEL_AGENT_CHECKPOINT"] = args.checkpoint
+    # Strategy toggle (regular | phased)
+    os.environ["KERNEL_AGENT_STRATEGY"] = args.mode
 
     cfg = Config(max_iters=args.max_iters, patience=args.patience,
                  min_rel_improvement=args.min_rel_impr)

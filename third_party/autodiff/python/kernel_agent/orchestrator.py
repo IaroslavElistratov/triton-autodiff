@@ -115,7 +115,7 @@ class KernelOptimizer:
                 bwd_file=bwd_fp,
                 fwd_kernel_snippet=fwd_snip,
                 bwd_kernel_snippet=bwd_snip,
-                grad_summary=grad_summary,
+                state_facts={"grad_summary": grad_summary},
             )
 
         # Initial snippets
@@ -169,8 +169,14 @@ class KernelOptimizer:
             summary = f"compile_error[{info.get('phase','?')}]: {info.get('error_type')}: {info.get('error_message')}"
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] {summary}")
-            # Pass the full info dict; _llm_request_and_apply accepts any object as grad_summary
-            self._llm_request_and_apply(it, "fix", bwd_fp=str(target), fwd_fp=fwd_fp, grad_summary=info)
+            # pass compile error via state_facts
+            self.patcher.propose_patch(
+                phase="fix",
+                bwd_file=str(target),
+                fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
+                bwd_kernel_snippet=_read_snippet(str(target), self.cfg.snippet_max_lines),
+                state_facts={"compile_error": info},
+            )
             return create_op(fwd_fp, overwrite_fp=overwrite_fp)
 
     def run(self, *,
@@ -274,7 +280,7 @@ class KernelOptimizer:
                 # retry correctness in next iteration
                 continue
 
-            # Benchmark current backward using the already-compiled autograd op
+            # Benchmark the current autograd op (backward), independent of optimize path
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
             bench_records = bench_op(
@@ -329,25 +335,21 @@ class KernelOptimizer:
                     bwd_file=bwd_fp,
                     fwd_kernel_snippet=_read_snippet(fwd_fp, self.cfg.snippet_max_lines),
                     bwd_kernel_snippet=_read_snippet(bwd_fp, self.cfg.snippet_max_lines),
-                    grad_summary="OK",
-                    # todo-low: fold grad_summary, perf_summary, etc into a single dict?
-                    # state_facts={"gradcheck_ok": ok, "dims": dims},
-                    last_error=last_error,
+                    state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand},
                 )
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
 
                 try:
                     self.patcher.apply(patch)
-                    else:
-                        _apply_patch_raw(patch)
-                    last_error = ""
-                    break
                 except Exception as e:
                     last_error = f"{type(e).__name__}: {e}"
+                    # breadcrumb apply error for next prompt context
+                    self.patcher.remember("apply.error", last_error)
                     if VERBOSE:
                         print(f"[kernel-agent][it={it}] apply error: {last_error}")
                     continue
+                break
 
             if last_error:
                 if VERBOSE:
