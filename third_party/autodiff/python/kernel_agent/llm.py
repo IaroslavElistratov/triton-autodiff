@@ -257,10 +257,16 @@ class MinimalLLMPatchProvider:
         patch_text = extract_patch(text)
 
         # One strict retry if the model ignored the format or produced an empty/no-op patch.
-        # Also capture the retry's stop_reason to distinguish true truncation.
+        # If the first attempt hit the token limit, explicitly instruct the model to
+        # emit ONLY the patch block on retry.
         if (patch_text is None or not has_real_change(patch_text)):
-            retry_system = "Return ONE non-empty apply_patch.md block. No prose."
-            retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block."
+            reached_limit = (self.last_stop_reason or "").lower() == "max_tokens"
+            if reached_limit:
+                retry_system = "Previous output truncated (max_tokens). Return ONE complete apply_patch.md block only. No prose."
+                retry_user = user + "\nIMPORTANT: Your previous response truncated at the token limit. Emit exactly one apply_patch.md patch now. Do not include any analysis text."
+            else:
+                retry_system = "Return ONE non-empty apply_patch.md block. No prose."
+                retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block."
             retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
