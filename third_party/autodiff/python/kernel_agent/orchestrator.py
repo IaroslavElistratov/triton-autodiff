@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import os, re, json
+import os, re, json, sys
 
 import torch
 
@@ -8,34 +8,10 @@ from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
 from .tools.gradcheck.core import check_op_backward_parity
 from .tools.benchmark import bench_op, reduce_bench
-from .strategy import make_strategy
+from .strategy import make_strategy, GLOBAL_GUARDRAILS
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
 VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
-
-# Parse target file paths from patch headers (Update/Add/Delete).
-def _extract_update_paths(patch_text: str) -> list[str]:
-    paths: list[str] = []
-    for ln in patch_text.splitlines():
-        s = ln.strip()
-        if s.startswith("*** Update File:") or s.startswith("*** Add File:") or s.startswith("*** Delete File:"):
-            try:
-                paths.append(s.split(":", 1)[1].strip())
-            except Exception:
-                pass
-    return paths
-
-def _patch_has_effect(patch_text: str) -> bool:
-    """Detect whether patch contains any real change hunks or add/delete ops."""
-    lines = [ln.strip() for ln in patch_text.splitlines()]
-    if any(ln.startswith(("*** Add File:", "*** Delete File:")) for ln in lines):
-        return True
-    if any(ln.startswith("@@") for ln in lines):
-        return True
-    for ln in lines:
-        if ln and ln[0] in "+-" and not ln.startswith("***"):
-            return True
-    return False
 
 def _read_bytes(path: str) -> bytes:
     try:
@@ -44,27 +20,12 @@ def _read_bytes(path: str) -> bytes:
     except Exception:
         return b""
 
-def _apply_and_report(patch_text: str, it: int, stage: str) -> tuple[bool, list[str]]:
-    """Apply patch iff it has effect; report whether any bytes changed and which targets were touched."""
-    # 1) Parse targets from patch headers.
-    targets = _extract_update_paths(patch_text)
-    # 0) Skip apply if patch has no effect (prevents false positives in change detection).
-    if not _patch_has_effect(patch_text):
-        if VERBOSE:
-            print(f"[kernel-agent][it={it}] No-op '{stage}' patch; no hunks/add/delete — skipping apply")
-        return False, targets
-    # 2) Snapshot raw bytes of each target before applying the patch.
-    before = {p: _read_bytes(p) for p in targets}
-    # 3) Apply the patch in-tree.
-    _apply_patch_raw(patch_text)
-    # 4) Re-read bytes and mark changed if any target differs.
-    changed = any(_read_bytes(p) != before.get(p, b"") for p in targets)
-    if VERBOSE:
-        if changed:
-            print(f"[kernel-agent][it={it}] Applied '{stage}' patch; changed: {targets or ['(no explicit targets)']}")
-        else:
-            print(f"[kernel-agent][it={it}] No-op '{stage}' patch; nothing changed for: {targets or ['(no explicit targets)']}")
-    return changed, targets
+
+def _file_mtime_ns(p: str) -> int | None:
+    try:
+        return os.stat(p).st_mtime_ns
+    except Exception:
+        return None
 
 
 
@@ -77,6 +38,10 @@ class Config:
     snippet_max_lines: int = 400        # bound context shown to the LLM
 
 
+FIX_HEADER = (
+    "Phase = fix. ONLY restore correctness to pass gradcheck.\n"
+    + GLOBAL_GUARDRAILS
+)
 
 class KernelOptimizer:
     """
@@ -97,68 +62,87 @@ class KernelOptimizer:
         # Toggle optimize path: "simple" (strategy + error echo, default) or "legacy" (original _llm_request_and_apply helper)
         self.optimize_mode = str(os.environ.get("KERNEL_AGENT_OPTIMIZE_MODE", "simple")).strip().lower()
 
-    def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, state_facts: object) -> None:
-        """Request a patch from the LLM with one retry for empty/invalid output,
-        apply it, and if apply fails, request a one-shot repair patch and apply.
-        Distinguishes max_tokens truncation from generic invalid patch.
+    def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, header: str, state_facts: dict, temperature: float | None = None) -> bool:
+        """Ask for one patch, apply with one retry on apply error, return True if apply succeeded.
 
-        Side-effects:
-          - Remembers breadcrumbs for llm.patch.<stage>, apply.<stage>, and errors
-          - Prints verbose previews when VERBOSE=true
+        Separation of concerns:
+          - llm.propose_patch: ensures a non-empty apply_patch.md block, normalizes target path,
+            and distinguishes max_tokens vs generic no-patch. It may raise on generation failure.
+          - _llm_request_and_apply (this): applies the patch via patcher, performs one
+            apply-repair retry on failure, detects change via before/after bytes, and breadcrumbs errors.
+            No preflight/anchors; no prompt error injection; no generation retry duplication.
+            These are brital, instead for patch application errors just realy on the patcher to raise an error.
         """
         assert stage in ("fix", "optimize")
-        phase = "fix" if stage == "fix" else "optimize"
+        if VERBOSE:
+            print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
-        def _propose(fwd_snip: str, bwd_snip: str) -> str:
-            return self.patcher.propose_patch(
-                phase=phase,
-                bwd_file=bwd_fp,
-                fwd_kernel_snippet=fwd_snip,
-                bwd_kernel_snippet=bwd_snip,
-                state_facts=state_facts,
-            )
-
-        # Initial snippets
+        # context shown to LLM
         fwd_snip = _read_snippet(fwd_fp, self.cfg.snippet_max_lines)
         bwd_snip = _read_snippet(bwd_fp, self.cfg.snippet_max_lines)
 
-        # First request
-        patch = _propose(fwd_snip, bwd_snip)
+        if temperature is not None:
+            try:
+                self.patcher.temperature = float(temperature)
+            except Exception:
+                pass
+
+        # 1) Propose once (provider already does one strict retry on empty/no-op and may raise,
+        #    including a specific max_tokens error). Avoid duplicate generation retries here
+        patch = self.patcher.propose_patch(
+            phase=header,
+            bwd_file=bwd_fp,
+            fwd_kernel_snippet=fwd_snip,
+            bwd_kernel_snippet=bwd_snip,
+            state_facts=state_facts or {},
+        )
+
         if VERBOSE:
-            preview = str(patch)[:800]
-            print(f"[kernel-agent][it={it}] LLM thinking ({stage}):\n{getattr(self.patcher, 'last_thinking', '')}")
-            print(f"[kernel-agent][it={it}] LLM patch ({stage}) preview:\n{preview}")
+            print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
 
-        # Retry once for empty/invalid patch
-        if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
-            stop_reason = getattr(self.patcher, "last_stop_reason", "")
-            if stop_reason.lower() == "max_tokens":
-                self.patcher.remember(f"llm.patch.{stage}.error", "generation truncated (max_tokens); retrying once")
+        # 2) Apply with one repair attempt on failure.
+        #    rely on the patcher to surface validation errors at apply time; no preflight checks
+        before = _read_bytes(bwd_fp)
+
+        # todo: use gpt_oss.tools.apply_patch
+        def _apply(p: str) -> None:
+            if hasattr(self.patcher, "apply"):
+                self.patcher.apply(p)
             else:
-                self.patcher.remember(f"llm.patch.{stage}.error", "invalid or empty patch; retrying once")
-            patch = _propose(fwd_snip, bwd_snip)
-            if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
-                stop_reason = getattr(self.patcher, "last_stop_reason", "")
-                if stop_reason.lower() == "max_tokens":
-                    raise RuntimeError(f"LLM stopped due to max_tokens during {stage}; no patch produced")
-                raise RuntimeError(f"LLM returned invalid/empty patch twice for '{stage}'")
+                _apply_patch_raw(p)
 
-        # Remember and attempt apply
-        self.patcher.remember(f"llm.patch.{stage}", patch[:1200])
         try:
-            changed, targets = _apply_and_report(patch, it, stage)
-            self.patcher.remember(f"apply.{stage}", f"changed={changed}, targets={targets}")
+            _apply(patch)
         except Exception as e:
-            # Surface patcher error to model and let it repair the patch once
-            msg = f"apply_error: {type(e).__name__}: {e}"
-            self.patcher.remember(f"apply.{stage}.error", msg)
+            err = f"{type(e).__name__}: {e}"
+            self.patcher.remember(f"apply.{stage}.error", err)
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] Apply error ({stage}): {msg}")
-            patch = _propose(fwd_snip, bwd_snip)
-            if not isinstance(patch, str) or not patch.lstrip().startswith("*** Begin Patch"):
-                raise RuntimeError(f"LLM returned invalid/empty patch on {stage}-retry after apply error")
-            changed, targets = _apply_and_report(patch, it, f"{stage}-retry")
-            self.patcher.remember(f"apply.{stage}-retry", f"changed={changed}, targets={targets}")
+                print(f"[kernel-agent][it={it}] apply error: {err}")
+            # One repair attempt: ask again with same header/context; still keep errors out of prompt and in the breadcrumb
+            patch = self.patcher.propose_patch(
+                phase=header,
+                bwd_file=bwd_fp,
+                fwd_kernel_snippet=fwd_snip,
+                bwd_kernel_snippet=bwd_snip,
+                state_facts=state_facts or {},
+            )
+            try:
+                _apply(patch)
+            except Exception as e2:
+                # Surface patcher error to model and let it repair the patch once
+                self.patcher.remember(f"apply.{stage}.error.retry", f"{type(e2).__name__}: {e2}")
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] apply error (retry): {type(e2).__name__}: {e2}")
+                return False
+
+        # 3) Record + report change. Detect change on raw bytes for simplicity
+        after = _read_bytes(bwd_fp)
+        changed = (after != before)
+        self.patcher.remember(f"llm.patch.{stage}", str(patch)[:1200])
+        self.patcher.remember(f"apply.{stage}", ("ok" if changed else "no-change"))
+        if VERBOSE:
+            print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
+        return changed
 
     def _create_op_with_fix(self, it: int, fwd_fp: str, overwrite_fp: str | None):
         try:
@@ -168,9 +152,14 @@ class KernelOptimizer:
             target = info.get("bwd_file") or info.get("fwd_file") or (overwrite_fp or fwd_fp)
             summary = f"compile_error[{info.get('phase','?')}]: {info.get('error_type')}: {info.get('error_message')}"
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] compile_error[{summary}")
-            # route via helper with state_facts
-            self._llm_request_and_apply(it, "fix", bwd_fp=str(target), fwd_fp=fwd_fp, state_facts={"compile_error": info})
+                print(f"[kernel-agent][it={it}] {summary}")
+            # route via helper with explicit fix header and state_facts
+            _ = self._llm_request_and_apply(
+                it, "fix", bwd_fp=str(target), fwd_fp=fwd_fp,
+                header=FIX_HEADER,
+                state_facts={"compile_error": info},
+                temperature=0.25,
+            )
             return create_op(fwd_fp, overwrite_fp=overwrite_fp)
 
     def run(self, *,
@@ -270,8 +259,12 @@ class KernelOptimizer:
             if not ok:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed — requesting 'fix' patch from LLM")
-                # request fix via helper with state_facts only
-                self._llm_request_and_apply(it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp, state_facts={"grad_summary": stats})
+                _ = self._llm_request_and_apply(
+                    it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                    header=FIX_HEADER,
+                    state_facts={"grad_summary": stats, "dims": dims},
+                    temperature=0.35,
+                )
                 # retry correctness in next iteration
                 continue
 
@@ -310,7 +303,14 @@ class KernelOptimizer:
             if self.optimize_mode == "legacy":
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM (legacy path)")
-                self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, state_facts={"gradcheck_ok": ok})
+                phase_text, temp = self.strategy.next_phase(parity_ok=ok, last_runtime=cand.get("median_ms"))
+                changed = self._llm_request_and_apply(
+                    it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                    header=phase_text,
+                    state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand},
+                    temperature=temp,
+                )
+                self.strategy.advance(changed=changed, parity_ok=ok)
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] End iteration")
                 continue
@@ -321,10 +321,13 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
 
             phase_text, temp = self.strategy.next_phase(parity_ok=ok, last_runtime=cand.get("median_ms"))
-            self.patcher.temperature = float(temp)
-            # route optimize via helper with state_facts (dims + bench + gate)
-            self._llm_request_and_apply(it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp, state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand})
-            self.strategy.advance(changed=True, parity_ok=ok)
+            changed = self._llm_request_and_apply(
+                it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                header=phase_text,
+                state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand},
+                temperature=temp,
+            )
+            self.strategy.advance(changed=changed, parity_ok=ok)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] End iteration")
 

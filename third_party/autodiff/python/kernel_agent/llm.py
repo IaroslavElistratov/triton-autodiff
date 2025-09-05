@@ -232,11 +232,7 @@ class MinimalLLMPatchProvider:
                 print(chunk, end="", flush=True)
             thinking_sink = _print_sink
 
-        # Adjust generator temperature per phase when available.
-        try:
-            self._sampler.temperature = self._phase_temperature(phase)
-        except Exception:
-            pass
+        # Temperature is controlled by the orchestrator
 
         resp = self._sampler(msgs, on_thinking_chunk=thinking_sink)
         text = (getattr(resp, "response_text", "") or "").strip()
