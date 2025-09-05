@@ -177,10 +177,10 @@ def stub(q, k, v, causal=False, sm_scale=0.5, BLOCK_M=16, BLOCK_N=16):
     assert HEAD_DIM_K in {16, 32, 64, 128, 256}
     o = torch.empty_like(q)
     stage = 3 if causal else 1
-    print("stage: ", stage)
+    # print("stage: ", stage)
 
     grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
-    print("grid: ", grid)
+    # print("grid: ", grid)
 
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
     _attn_fwd[grid](

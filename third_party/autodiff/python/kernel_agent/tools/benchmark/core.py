@@ -30,7 +30,7 @@ class BenchRecord:
 
 def bench_op(
     my_op: Callable[..., MaybeTensors],
-    sidecar: Any,
+    sidecar: Dict[str, Any],
     *,
     mode: str = "fwd",                  # "fwd" | "bwd"
     device: str = "cuda",
@@ -50,11 +50,38 @@ def bench_op(
         raise ValueError("mode must be 'fwd' or 'bwd'")
 
     results: List[BenchRecord] = []
-    has_flops = hasattr(sidecar, "flops")
-    sweep = list(getattr(sidecar, "SWEEP", [{}]))
+
+    if not isinstance(sidecar, dict):
+        raise TypeError("bench_op expects sidecar as a dict namespace")
+
+    sweep = list(sidecar.get("SWEEP", [{}]))
+    make_args_fn = sidecar.get("make_args")
+    if not callable(make_args_fn):
+        raise RuntimeError("sidecar['make_args'] must be callable")
+
+    def _ensure_requires_grad(x: Any) -> Any:
+        try:
+            if isinstance(x, torch.Tensor):
+                x.requires_grad_(True)
+                return x
+            # Shallow map for simple sequences of tensors
+            if isinstance(x, (list, tuple)):
+                seq = [(_ensure_requires_grad(t)) for t in x]
+                return type(x)(seq)
+        except Exception:
+            pass
+        return x
 
     for dims in sweep:
-        args, kwargs = sidecar.make_args(dims, device=device, dtype=dtype)
+        args, kwargs = make_args_fn(dims, device=device, dtype=dtype)
+        # Ensure autograd is enabled on inputs so outputs require grad
+        try:
+            args = tuple(_ensure_requires_grad(t) for t in args)
+        except Exception:
+            args = (_ensure_requires_grad(args),)
+        if isinstance(kwargs, dict):
+            for k, v in list(kwargs.items()):
+                kwargs[k] = _ensure_requires_grad(v)
 
         # Warm compile outside the timed region
         y_warm = my_op(*args, **kwargs)
@@ -71,7 +98,8 @@ def bench_op(
                 torch.autograd.backward(ys, ups, retain_graph=True)
 
         ms = float(tt.do_bench(run))
-        flop = float(sidecar.flops(dims, mode)) if has_flops else None
+        flops_fn = sidecar.get("flops")
+        flop = float(flops_fn(dims, mode)) if callable(flops_fn) else None
         tflops = flop * 1e-12 / (ms * 1e-3) if flop is not None else None
         results.append(BenchRecord(dims=dict(dims), time_ms=ms, tflops=tflops))
 

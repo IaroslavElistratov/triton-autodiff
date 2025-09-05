@@ -99,7 +99,7 @@ def stub(
     # todo: passing grid with meta args isn't supported yet
     num_iters = triton.cdiv(K, BLOCK_SIZE_K)
     grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N), 1, 1)
-    print("grid: ", grid)
+    # print("grid: ", grid)
     kernel[grid](
         a, b, c,
         M, N, K,
@@ -116,14 +116,6 @@ def stub(
 
 def torch_fn(a, b):
     return torch.matmul(a, b)
-
-# triton_output = stub(a, b)
-# torch_output = torch_fn(a, b)
-
-# if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
-#     print("✅ Triton and Torch match")
-# else:
-#     print("❌ Triton and Torch differ")
 
 
 SWEEP = [

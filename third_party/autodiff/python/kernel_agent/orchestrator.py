@@ -207,7 +207,7 @@ class KernelOptimizer:
             if it > 0:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
-                op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
+                op, _, ns = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
 
             # Build inputs for parity check from user's helpers
             make_args = ns.get("make_args")
