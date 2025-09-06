@@ -229,7 +229,7 @@ def torch_fn(q, k, v, causal=False, sm_scale=0.5):
 
 SWEEP = [
     {"B": 256, "NUM_HEADS": 64, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
-    for N in (16, 128, 256, 512, 1024, 2048, 4096)
+    for N in (16, ) # (16, 128, 256, 512, 1024, 2048, 4096)
 ]
 
 # todo-now:
@@ -247,7 +247,7 @@ def make_args(dims, device="cuda", dtype=torch.float16):
 
 # optional
 def flops(dims, mode):
-    B, H, N, D = dims["Z"], dims["H"], dims["N_CTX"], dims["HEAD_DIM"]
+    B, H, N, D = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
     total = 2.0 * (2.0 * B * H * N * N * D)  # forward+backward baseline
     if dims.get("causal", False):
         total *= 0.5
