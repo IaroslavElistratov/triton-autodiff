@@ -405,22 +405,36 @@ class _GenerateSampler:
                     pass
 
         # Parse the completion tokens into Harmony messages and extract final text
-        entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
-        final_text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        for entry in entries:
-            entry_dict = entry.to_dict()
-            channel = entry_dict.get("channel")
-            parts = [c.get("text", "") for c in entry_dict.get("content", []) if isinstance(c, dict) and c.get("text")]
-            if channel == "final":
-                final_text_parts.extend(parts)
-            elif channel and channel != "tool":
-                thinking_parts.extend(parts)
-        text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
+
+        # generated token stream leaks Harmony control tokens (e.g., 200002) before the expected start token (200006), so the Harmony parser errors. Root causes: special-token re-encoding or EOS token injection.
+        # Fix: avoid re-encoding specials/stop injecting EOS; also added a parse fallback to raw decode.
+
+        # The failure comes from calling parse_messages_from_completion_tokens(...) on a stream that begins with a control token like <|return|> (200002) instead of <|start|> (200006).
+        # The ampler sets stop_tokens = [], streams, breaks on the patch terminator, then tries to parse an incomplete envelope, which throws the error.
+
+        # On any exception (e.g., Unexpected token 200002), fall back to self.encoding.decode(generated) to get raw text and continue with extract_patch(...)
+        try:
+            entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
+            final_text_parts: list[str] = []
+            thinking_parts: list[str] = []
+            for entry in entries:
+                entry_dict = entry.to_dict()
+                channel = entry_dict.get("channel")
+                parts = [c.get("text", "") for c in entry_dict.get("content", []) if isinstance(c, dict) and c.get("text")]
+                if channel == "final":
+                    final_text_parts.extend(parts)
+                elif channel and channel != "tool":
+                    thinking_parts.extend(parts)
+            text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
+            all_thinking = "".join(thinking_parts)
+        except Exception:
+            # bypass Harmony parsing and still extract the patch from the raw decoded text
+            # Fallback: raw decode if Harmony parsing fails (e.g., unexpected control token ordering)
+            text = self.encoding.decode(generated)
+            all_thinking = ""
         # Detect if we likely hit the token limit without finishing the patch
         hit_token_limit = (not stopped_on_end_patch) and (len(generated) >= int(self.max_tokens or 0))
         # Cap thinking for metadata only (do not re-stream to avoid duplicates).
-        all_thinking = "".join(thinking_parts)
         max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
         if max_thinking_chars > 0 and len(all_thinking) > max_thinking_chars:
             all_thinking = all_thinking[-max_thinking_chars:]
