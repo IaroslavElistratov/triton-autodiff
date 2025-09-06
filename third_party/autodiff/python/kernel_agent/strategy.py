@@ -14,7 +14,7 @@ class Phase:
 # Shared guardrails injected every turn (regular and phased).
 GLOBAL_GUARDRAILS = (
     "Guardrails:\n"
-    "- Exactly one apply_patch.md block in final channel only. No patch text in analysis.\n"
+    "- Exactly one apply_patch.md block.\n"
     "- No rule echoing; diff only.\n"
     "- ≤120 changed lines per patch.\n"
     "- Include at least one '-' anchor line per hunk.\n"

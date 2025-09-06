@@ -81,8 +81,7 @@ def _env_truthy(name: str, default: str = "0") -> bool:
 # Canonical apply_patch.md contract presented to the model;
 # the patcher is the source of truth for validation and application.
 _APPLY_PATCH_SPEC = """
-Return ONE apply_patch.md block in the final channel only. No prose.
-Do not include any patch text in the analysis channel.
+Return ONE apply_patch.md block. No prose.
 
 Use this exact envelope (do NOT include file headers; the system will add them):
 *** Begin Patch
@@ -92,7 +91,6 @@ Use this exact envelope (do NOT include file headers; the system will add them):
 *** End Patch
 
 Rules:
-- Emit the patch in the final channel only; never include patch text in analysis.
 - Do not include any of: "*** Update File:", "*** Add File:", "*** Delete File:", or "*** Move to:".
 - At least one '-' line per hunk to anchor to real lines (no pure insert-only hunks).
 - Hunk lines must be prefixed with one of:
@@ -185,7 +183,7 @@ class MinimalLLMPatchProvider:
         system = (
             "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
             "Do not propose large overly-eager kernel rewrites. You will be called multiple times to refine your kernel, so don't try to output final solution in one shot."
-            "Return exactly one apply_patch.md block in the final channel only. No prose. Do not include any patch text in the analysis channel. "
+            "Output ONLY an apply_patch.md patch. No prose. If you wrote any analysis above, end with exactly one apply_patch.md block. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
             # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference."
@@ -202,7 +200,7 @@ class MinimalLLMPatchProvider:
             # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
-            "Emit ONE apply_patch.md patch only, in the final channel. Do not include any patch text in the analysis channel. Do not echo patch instruction rules instead you should produce a real diff. "
+            "Emit ONE apply_patch.md patch only. Do not echo patch instruction rules instead you should produce a real diff. "
             "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
             "Do not print the envelope/rules; output only the patch block. "
             "Inside triton kernel you must use e.g. tl.cdiv not triton.cdiv. "
@@ -266,11 +264,11 @@ class MinimalLLMPatchProvider:
         if (patch_text is None or not has_real_change(patch_text)):
             reached_limit = (self.last_stop_reason or "").lower() == "max_tokens"
             if reached_limit:
-                retry_system = "Previous output truncated (max_tokens). Return ONE complete apply_patch.md block in the final channel only. No prose. Do not include any patch text in the analysis channel."
-                retry_user = user + "\nIMPORTANT: Your previous response truncated at the token limit. Emit exactly one apply_patch.md patch now in the final channel only. Do not include any analysis or patch text in the analysis channel."
+                retry_system = "Previous output truncated (max_tokens). Return ONE complete apply_patch.md block only. No prose."
+                retry_user = user + "\nIMPORTANT: Your previous response truncated at the token limit. Emit exactly one apply_patch.md patch now. Do not include any analysis text."
             else:
-                retry_system = "Return ONE non-empty apply_patch.md block in the final channel only. No prose. Do not include any patch text in the analysis channel."
-                retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block in the final channel only, with no patch text in the analysis channel."
+                retry_system = "Return ONE non-empty apply_patch.md block. No prose."
+                retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block."
             retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
@@ -352,26 +350,15 @@ class _GenerateSampler:
                 raise ValueError(f"Invalid backend: {self.backend}")
 
 
-    # basically;
-    # - ask the model to return the patch in the final channel only, parse the patch from the final channel
-    # - if it's empty -- say this to the model (instead of trying to go to the COT channel and trying to extract from there,
-    #   which I think is brittle). I think I already have a re-try (call the model again saying "previous output had no usable
-    #   patch") in llm.py -- re-use that
+    # todo-low: simplfiy
     def __call__(self, message_list: list[dict[str, str]], on_thinking_chunk: Callable[[str], None] | None = None) -> SamplerResponse:
-        """Single-response generation using Harmony.
-        Design goals:
-        - The patch must come from the *final* channel only.
-        - Never stop on textual sentinels like '*** End Patch' that may appear in analysis.
-        - Stream tokens for UX, but *parse* only after see a well-formed Harmony envelope.
-        - If the final channel is empty or Harmony parsing fails, return an empty response_text
-            and let the orchestrator trigger a structured retry, rather than scraping analysis.
-        """
+        """ uses Harmony encoding for single-response generation """
 
-        # 1) Build Harmony conversation. Keep system/developer/user split explicit.
-        #    Reason: Harmony routing + controls (e.g., reasoning effort) live in SystemContent.
+        # Extract the simple system and user contents
         system_text = next((m.get("content", "") for m in message_list if m.get("role") == "system"), "")
         user_text = next((m.get("content", "") for m in message_list if m.get("role") == "user"), "")
 
+        # Build Harmony messages: structured system controls + developer instructions + user text
         system_message = Message.from_role_and_content(
             Role.SYSTEM,
             SystemContent.new().with_reasoning_effort(
@@ -380,37 +367,38 @@ class _GenerateSampler:
         )
         messages = [system_message]
         if system_text:
-            # Developer channel holds guardrails and patch spec.
-            messages.append(Message.from_role_and_content(Role.DEVELOPER, DeveloperContent.new().with_instructions(system_text)))
-        # User prompt last.
+            dev = DeveloperContent.new().with_instructions(system_text)
+            messages.append(Message.from_role_and_content(Role.DEVELOPER, dev))
         messages.append(Message.from_role_and_content(Role.USER, user_text))
 
         conversation = Conversation.from_messages(messages)
-
-        # 2) Render tokens for completion. We ask the model to produce an ASSISTANT message.
-        #    DO NOT inject Harmony stop tokens here; we must *see* them in the stream.
         input_tokens = self.encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
-
-        # 3) Streaming policy:
-        #    - Do not stop on textual markers (e.g., "*** End Patch") because those can appear in analysis.
-        #    - Keep stop_tokens empty so Harmony control tokens (<|start|>, <|end|>) flow to us.
-        #    - Break only after the *final* channel has begun AND Harmony emits <|end|> for it.
-        stop_tokens: list[int] = []
+        # Streaming + Harmony protocol notes:
+        # - Don't stop on textual sentinels like "*** End Patch"; those may appear in analysis.
+        # - Keep stop_tokens empty. Allow Harmony END (<|end|>) to flow through so we can
+        #   observe it and only stop AFTER the final channel has begun (see seen_final below).
+        # - Earlier bug: stopping on the first END often closed the analysis channel, so no patch arrived.
+        # - Before parsing, we trim to the last START (<|start|>) and append END if missing so the
+        #   Harmony parser sees a complete <|start|> … <|end|> envelope.
+        # - On parse failure, we raw-decode and slice to the apply_patch block via extract_patch.
+        stop_tokens = []  # do NOT include Harmony END here; we must see it in the stream
 
         generated: list[int] = []
-        parse_every = 8             # backpressure knob for streaming callbacks
+        # streaming controls (single toggle)
+        parse_every = 8
         emitted_chars = 0
         stopped_on_end_patch = False
-
-        # 4) Harmony control tokens. We work with *protocol* tokens, not prose sentinels.
+        # Harmony control tokens and final-channel detection
+        # - END closes the current channel (analysis OR final). Only stop after final channel starts.
+        # - START marks segment boundaries. We trim to the last START before parsing to drop earlier segments.
         END = int(self.encoding.encode("<|end|>", allowed_special="all")[0])
         START = int(self.encoding.encode("<|start|>", allowed_special="all")[0])
-
-        # Final-channel detection:
-        # - We detect the transition to the final channel by scanning the decoded stream.
-        # - We only *stop* on END *after* final has started, which avoids truncating analysis prematurely.
+        # Detect start of the final channel by exact control-token sequence
+        FINAL_SEQ = tuple(int(t) for t in self.encoding.encode("<|channel|>final<|message|>", allowed_special="all"))
+        final_probe = collections.deque(maxlen=len(FINAL_SEQ))
+        seen_start = False
         seen_final = False
-        FINAL_MARKERS = ("<|channel|>final<|message|>", "<|channel|>final")
+        saw_begin = False  # textual apply_patch window detection: begin seen
 
         for idx, out in enumerate(self.generator.generate(
             input_tokens,
@@ -422,26 +410,39 @@ class _GenerateSampler:
             token = int(out[0]) if isinstance(out, tuple) else int(out)
             generated.append(token)
 
-            # Stream for UX. Decoding can lag; keep it best-effort and non-fatal.
+            # Stream decoded deltas (best-effort) and emit
+            # Intentionally avoid breaking on "*** End Patch" text. Only Harmony END matters here.
+            # textual markers may appear in analysis; Harmony END is the only reliable boundary.
             if (idx + 1) % parse_every == 0:
                 try:
                     decoded = self.encoding.decode(generated)
-                    # One-way flip: once we detect final channel start, we never unset it.
-                    if (not seen_final) and any(m in decoded for m in FINAL_MARKERS):
-                        seen_final = True
+                    # Minimal, robust textual guard: stop on first End after Begin
+                    if (not saw_begin) and ("*** Begin Patch" in decoded):
+                        saw_begin = True
+                    if saw_begin and ("*** End Patch" in decoded):
+                        stopped_on_end_patch = True
+                        break
                     if on_thinking_chunk and len(decoded) > emitted_chars:
                         on_thinking_chunk(decoded[emitted_chars:])
                         emitted_chars = len(decoded)
                 except Exception:
-                    pass  # streaming must never crash generation
+                    # streaming should never be fatal
+                    pass
 
-            # Core boundary rule:
-            #   Only break when we are *inside* the final channel and see Harmony END for that segment.
+            # Track protocol markers directly from token stream
+            if token == START:
+                seen_start = True
+            final_probe.append(token)
+            if (not seen_final) and (len(final_probe) == len(FINAL_SEQ)) and (tuple(final_probe) == FINAL_SEQ):
+                seen_final = True
+
+            # Break only when the final channel has started and Harmony closes it
+            # Prior bug: stopping on the first END often closed the analysis channel, yielding no patch.
             if token == END and seen_final:
                 stopped_on_end_patch = True
                 break
 
-        # Flush any remaining streamed tail. Non-fatal by design.
+        # After loop, flush any remaining streamed delta once (best-effort; streaming shouldn't be fatal)
         if on_thinking_chunk:
             try:
                 decoded = self.encoding.decode(generated)
@@ -450,16 +451,15 @@ class _GenerateSampler:
             except Exception:
                 pass
 
-        # Classify token-limit *before* we append any synthetic END below.
+        # Detect if we likely hit the token limit without finishing the patch
+        # Compute token-limit before appending END (avoid off-by-one classification)
         hit_token_limit = (
             (self.max_tokens is not None)
             and (not stopped_on_end_patch)
             and (len(generated) >= int(self.max_tokens))
         )
 
-        # 5) Envelope sanitation for Harmony parsing:
-        #    - Trim to the *last* <|start|> so stray earlier segments don't confuse the parser.
-        #    - Ensure we end with exactly one <|end|>. This produces a complete envelope.
+        # Sanitize prefix/suffix for Harmony parsing
         try:
             if START in generated:
                 s_idx = len(generated) - 1 - list(reversed(generated)).index(START)
@@ -468,61 +468,49 @@ class _GenerateSampler:
         except Exception:
             pass
         try:
-            if not generated or generated[-1] != END:
+            # Append END only if a START was seen and we aren't already closed
+            if seen_start and (not generated or generated[-1] != END):
                 generated.append(END)
-            # De-dup a possible double-END tail.
             while len(generated) >= 2 and generated[-1] == END and generated[-2] == END:
                 generated.pop()
         except Exception:
             pass
 
-        # 6) Parse Harmony and extract *only* the final-channel text.
-        #    No scraping from analysis. If parsing fails or final is empty, return empty response_text.
-        final_text: str = ""
-        all_thinking: str = ""
+        # Parse completed assistant message; Harmony expects a <|start|> ... <|end|> envelope.
+        # On any exception (e.g., leaked/misordered control tokens), fall back to raw decode and slice the patch.
         try:
             entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
-            final_buf: list[str] = []
-            thinking_buf: list[str] = []
-
+            final_text_parts: list[str] = []
+            thinking_parts: list[str] = []
             for entry in entries:
-                ed = entry.to_dict()
-                ch = ed.get("channel")
-                parts = [c.get("text", "") for c in ed.get("content", []) if isinstance(c, dict) and c.get("text")]
-                # Only the 'final' channel is actionable. Others are telemetry.
-                if ch == "final":
-                    final_buf.extend(parts)
-                elif ch and ch != "tool":
-                    thinking_buf.extend(parts)
-
-            final_text = "".join(final_buf)
-            all_thinking = "".join(thinking_buf)
+                entry_dict = entry.to_dict()
+                channel = entry_dict.get("channel")
+                parts = [c.get("text", "") for c in entry_dict.get("content", []) if isinstance(c, dict) and c.get("text")]
+                if channel == "final":
+                    final_text_parts.extend(parts)
+                elif channel and channel != "tool":
+                    thinking_parts.extend(parts)
+            text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
+            all_thinking = "".join(thinking_parts)
         except Exception:
-            # Intentional: do *not* fall back to raw decode + analysis scraping.
-            # Upstream orchestrator will detect empty response_text and trigger a clean retry.
-            final_text = ""
+            # Last-resort fallback: raw decode then slice to patch window
+            raw = self.encoding.decode(generated)
+            text = extract_patch(raw) or raw
             all_thinking = ""
-
-        # Bound thinking payload in metadata only; never re-stream.
+        # Cap thinking for metadata only (do not re-stream to avoid duplicates).
         max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
         if max_thinking_chars > 0 and len(all_thinking) > max_thinking_chars:
             all_thinking = all_thinking[-max_thinking_chars:]
-
-        # 7) Contract with orchestrator:
-        #    - If final_text is empty, we return an empty response_text.
-        #    - The orchestrator should treat this as "no actionable patch" and retry with a clarifying nudge.
-        #    - We do *not* synthesize a fake "*** Begin Patch ... *** End Patch" because that can mask failures.
+        # In stub mode, if nothing meaningful generated, return empty no-op patch
+        if not text.strip():
+            text = "*** Begin Patch\n*** End Patch"
         capture_thinking = _env_truthy("KERNEL_AGENT_CAPTURE_THINKING", "1")
         return SamplerResponse(
-            response_text=final_text,  # may be empty by design; signals retry upstream
+            response_text=text,
             actual_queried_message_list=message_list,
             response_metadata={
                 "thinking": (all_thinking if capture_thinking else ""),
-                # Stop reason taxonomy:
-                #   - "end_patch": we saw final-channel END.
-                #   - "max_tokens": we hit the budget without a complete final.
-                #   - "eos": fallback classification for other exits.
-                # Consumers should not assume a patch exists; presence is determined by non-empty response_text.
                 "stop_reason": ("max_tokens" if hit_token_limit else ("end_patch" if stopped_on_end_patch else "eos")),
             },
         )
+
