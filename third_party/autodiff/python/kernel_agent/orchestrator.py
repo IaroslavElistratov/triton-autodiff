@@ -239,17 +239,34 @@ class KernelOptimizer:
             torch_fn = ns.get("torch_fn")
             if not torch_fn:
                 raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
-            ok, stats = check_op_backward_parity(
-                ref_fwd=torch_fn,
-                my_op=op,
-                inputs=args,
-                outputs="auto",
-                # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
-                # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
-                # todo-high: rm; too-high deltas
-                atol=0.07,
-                rtol=0.02,
-            )
+            try:
+                ok, stats = check_op_backward_parity(
+                    ref_fwd=torch_fn,
+                    my_op=op,
+                    inputs=args,
+                    outputs="auto",
+                    # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
+                    # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
+                    # todo-high: rm; too-high deltas
+                    atol=0.07,
+                    rtol=0.02,
+                )
+            # todo-now:
+            # because I don't run backward in create_op. Although we have code there to catch errors, backward isn't invoked, so the error isn't caught and it hard-fails later when .backward is called (e.g., during gradcheck).
+            # so maybe cleaner to re-emptively run backward in create_op -- so that there's taht concrete boundray, in which if create_op ran then can be certain that both fwd and bwd well formed
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] gradcheck error: {err}")
+                self.patcher.remember("gradcheck.error", err)
+                _ = self._llm_request_and_apply(
+                    it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                    header=FIX_HEADER,
+                    state_facts={"runtime_error": {"stage": "gradcheck", "error": err}, "dims": dims},
+                    temperature=0.35,
+                )
+                # retry correctness in next iteration
+                continue
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] gradient_check ok={ok}")
                 print(f"[kernel-agent][it={it}] gradient_check stats={json.dumps(stats, default=str) if isinstance(stats, (dict, list)) else stats}")
@@ -271,11 +288,24 @@ class KernelOptimizer:
             # Benchmark the current autograd op (backward), independent of optimize path
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
-            bench_records = bench_op(
-                op,              # autograd-backed op from create_op(...)
-                ns,              # sidecar providing SWEEP and make_args
-                mode="bwd",
-            )
+            try:
+                bench_records = bench_op(
+                    op,              # autograd-backed op from create_op(...)
+                    ns,              # sidecar providing SWEEP and make_args
+                    mode="bwd",
+                )
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] bench error: {err}")
+                self.patcher.remember("bench.error", err)
+                _ = self._llm_request_and_apply(
+                    it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                    header=FIX_HEADER,
+                    state_facts={"runtime_error": {"stage": "bench", "error": err}, "dims": dims},
+                    temperature=0.35,
+                )
+                continue
             cand = reduce_bench(bench_records)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
