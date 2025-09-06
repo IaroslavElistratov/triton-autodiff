@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from typing import Any, Callable
+import collections
 
 from gpt_oss.evals.types import SamplerResponse
 from openai_harmony import (
@@ -202,6 +203,7 @@ class MinimalLLMPatchProvider:
             "Emit ONE apply_patch.md patch only. Do not echo patch instruction rules instead you should produce a real diff. "
             "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
             "Do not print the envelope/rules; output only the patch block. "
+            "Inside triton kernel you must use e.g. tl.cdiv not triton.cdiv. "
         )
         # user prompt
         spec_text = _APPLY_PATCH_SPEC
@@ -391,8 +393,12 @@ class _GenerateSampler:
         # - START marks segment boundaries. We trim to the last START before parsing to drop earlier segments.
         END = int(self.encoding.encode("<|end|>", allowed_special="all")[0])
         START = int(self.encoding.encode("<|start|>", allowed_special="all")[0])
+        # Detect start of the final channel by exact control-token sequence
+        FINAL_SEQ = tuple(int(t) for t in self.encoding.encode("<|channel|>final<|message|>", allowed_special="all"))
+        final_probe = collections.deque(maxlen=len(FINAL_SEQ))
+        seen_start = False
         seen_final = False
-        FINAL_MARKERS = ("<|channel|>final<|message|>", "<|channel|>final")
+        saw_begin = False  # textual apply_patch window detection: begin seen
 
         for idx, out in enumerate(self.generator.generate(
             input_tokens,
@@ -404,20 +410,31 @@ class _GenerateSampler:
             token = int(out[0]) if isinstance(out, tuple) else int(out)
             generated.append(token)
 
-            # Stream decoded deltas; detect final-channel start; do not stop on textual sentinels
+            # Stream decoded deltas (best-effort) and emit
             # Intentionally avoid breaking on "*** End Patch" text. Only Harmony END matters here.
             # textual markers may appear in analysis; Harmony END is the only reliable boundary.
             if (idx + 1) % parse_every == 0:
                 try:
                     decoded = self.encoding.decode(generated)
-                    if (not seen_final) and any(m in decoded for m in FINAL_MARKERS):
-                        seen_final = True
+                    # Minimal, robust textual guard: stop on first End after Begin
+                    if (not saw_begin) and ("*** Begin Patch" in decoded):
+                        saw_begin = True
+                    if saw_begin and ("*** End Patch" in decoded):
+                        stopped_on_end_patch = True
+                        break
                     if on_thinking_chunk and len(decoded) > emitted_chars:
                         on_thinking_chunk(decoded[emitted_chars:])
                         emitted_chars = len(decoded)
                 except Exception:
                     # streaming should never be fatal
                     pass
+
+            # Track protocol markers directly from token stream
+            if token == START:
+                seen_start = True
+            final_probe.append(token)
+            if (not seen_final) and (len(final_probe) == len(FINAL_SEQ)) and (tuple(final_probe) == FINAL_SEQ):
+                seen_final = True
 
             # Break only when the final channel has started and Harmony closes it
             # Prior bug: stopping on the first END often closed the analysis channel, yielding no patch.
@@ -451,7 +468,8 @@ class _GenerateSampler:
         except Exception:
             pass
         try:
-            if not generated or generated[-1] != END:
+            # Append END only if a START was seen and we aren't already closed
+            if seen_start and (not generated or generated[-1] != END):
                 generated.append(END)
             while len(generated) >= 2 and generated[-1] == END and generated[-2] == END:
                 generated.pop()
