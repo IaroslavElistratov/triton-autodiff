@@ -371,19 +371,28 @@ class _GenerateSampler:
 
         conversation = Conversation.from_messages(messages)
         input_tokens = self.encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
-        # Avoid stopping at channel boundaries; let the model emit the final patch block
-        stop_tokens = []
+        # Streaming + Harmony protocol notes:
+        # - Don't stop on textual sentinels like "*** End Patch"; those may appear in analysis.
+        # - Keep stop_tokens empty. Allow Harmony END (<|end|>) to flow through so we can
+        #   observe it and only stop AFTER the final channel has begun (see seen_final below).
+        # - Earlier bug: stopping on the first END often closed the analysis channel, so no patch arrived.
+        # - Before parsing, we trim to the last START (<|start|>) and append END if missing so the
+        #   Harmony parser sees a complete <|start|> … <|end|> envelope.
+        # - On parse failure, we raw-decode and slice to the apply_patch block via extract_patch.
+        stop_tokens = []  # do NOT include Harmony END here; we must see it in the stream
 
         generated: list[int] = []
         # streaming controls (single toggle)
         parse_every = 8
         emitted_chars = 0
         stopped_on_end_patch = False
-        # Harmony control tokens: prefer protocol tokens over textual sentinels
-        # - <|end|> closes the assistant message cleanly for the Harmony parser
-        # - <|start|> marks the last assistant segment; we trim to it before parsing
+        # Harmony control tokens and final-channel detection
+        # - END closes the current channel (analysis OR final). Only stop after final channel starts.
+        # - START marks segment boundaries. We trim to the last START before parsing to drop earlier segments.
         END = int(self.encoding.encode("<|end|>", allowed_special="all")[0])
         START = int(self.encoding.encode("<|start|>", allowed_special="all")[0])
+        seen_final = False
+        FINAL_MARKERS = ("<|channel|>final<|message|>", "<|channel|>final")
 
         for idx, out in enumerate(self.generator.generate(
             input_tokens,
@@ -395,23 +404,28 @@ class _GenerateSampler:
             token = int(out[0]) if isinstance(out, tuple) else int(out)
             generated.append(token)
 
-            # Stop only on Harmony end-of-message token; do NOT stop on textual markers
-            if token == END:
-                stopped_on_end_patch = True
-                break
-
-            # Stream decoded deltas. Do NOT early-stop on textual "*** End Patch"; rely on Harmony <|end|>.
-            if on_thinking_chunk and (idx + 1) % parse_every == 0:
+            # Stream decoded deltas; detect final-channel start; do not stop on textual sentinels
+            # Intentionally avoid breaking on "*** End Patch" text. Only Harmony END matters here.
+            # textual markers may appear in analysis; Harmony END is the only reliable boundary.
+            if (idx + 1) % parse_every == 0:
                 try:
                     decoded = self.encoding.decode(generated)
-                    if len(decoded) > emitted_chars:
+                    if (not seen_final) and any(m in decoded for m in FINAL_MARKERS):
+                        seen_final = True
+                    if on_thinking_chunk and len(decoded) > emitted_chars:
                         on_thinking_chunk(decoded[emitted_chars:])
                         emitted_chars = len(decoded)
                 except Exception:
                     # streaming should never be fatal
                     pass
 
-        # After loop, flush any remaining streamed delta once
+            # Break only when the final channel has started and Harmony closes it
+            # Prior bug: stopping on the first END often closed the analysis channel, yielding no patch.
+            if token == END and seen_final:
+                stopped_on_end_patch = True
+                break
+
+        # After loop, flush any remaining streamed delta once (best-effort; streaming shouldn't be fatal)
         if on_thinking_chunk:
             try:
                 decoded = self.encoding.decode(generated)
@@ -420,17 +434,22 @@ class _GenerateSampler:
             except Exception:
                 pass
 
-        # Sanitize prefix once before parsing: trim to the last <|start|>; if absent, keep as-is
-        # This prevents "Unexpected token ... expecting 200006" when textual sentinels leaked
+        # Detect if we likely hit the token limit without finishing the patch
+        # Compute token-limit before appending END (avoid off-by-one classification)
+        hit_token_limit = (
+            (self.max_tokens is not None)
+            and (not stopped_on_end_patch)
+            and (len(generated) >= int(self.max_tokens))
+        )
+
+        # Sanitize prefix/suffix for Harmony parsing
         try:
-            START = int(self.encoding.encode("<|start|>", allowed_special="all")[0])
             if START in generated:
                 s_idx = len(generated) - 1 - list(reversed(generated)).index(START)
                 if s_idx > 0:
                     generated = generated[s_idx:]
         except Exception:
             pass
-        # Ensure trailing <|end|>; de-dup if model already emitted it
         try:
             if not generated or generated[-1] != END:
                 generated.append(END)
@@ -439,7 +458,8 @@ class _GenerateSampler:
         except Exception:
             pass
 
-        # On any exception (e.g., Unexpected token 200002), fall back to self.encoding.decode(generated) to get raw text and continue with extract_patch(...)
+        # Parse completed assistant message; Harmony expects a <|start|> ... <|end|> envelope.
+        # On any exception (e.g., leaked/misordered control tokens), fall back to raw decode and slice the patch.
         try:
             entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
             final_text_parts: list[str] = []
@@ -455,16 +475,10 @@ class _GenerateSampler:
             text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
             all_thinking = "".join(thinking_parts)
         except Exception:
-            # Fallback when Harmony parse fails: raw decode then slice to the patch block
+            # Last-resort fallback: raw decode then slice to patch window
             raw = self.encoding.decode(generated)
             text = extract_patch(raw) or raw
             all_thinking = ""
-        # Detect if we likely hit the token limit without finishing the patch
-        hit_token_limit = (
-            (self.max_tokens is not None)
-            and (not stopped_on_end_patch)
-            and (len(generated) >= int(self.max_tokens))
-        )
         # Cap thinking for metadata only (do not re-stream to avoid duplicates).
         max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
         if max_thinking_chars > 0 and len(all_thinking) > max_thinking_chars:
