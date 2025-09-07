@@ -137,8 +137,21 @@ class KernelOptimizer:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] still empty after apply error reprompt")
                 return False
-            # Re-normalize header on retry and apply again.
-            _apply_patch_raw(_ensure_update_file_target(patch2, bwd_fp))
+
+            # retry once on apply error; if the second attempt still fails, do not crash the process—treat as failed iteration;
+            # keep this under its own try/except because the application of the 2nd patch
+            # can independantly fail and it did happen in the past
+            try:
+                # Re-normalize header on retry and apply again.
+                _apply_patch_raw(_ensure_update_file_target(patch2, bwd_fp))
+            except Exception as e2:
+                err2 = f"{type(e2).__name__}: {e2}"
+                self.patcher.remember("apply.error.retry", err2)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] apply retry error: {err2}")
+                # Optimize path: uses the boolean to control phase advancement (no advance on False), in both legacy and phased modes;
+                # Fix paths: (compile/gradcheck/bench errors) intentionally ignore the return bool and proceed to next iteration
+                return False
 
         # 3) Record + report change. Detect change on raw bytes for simplicity.
         after = _read_bytes(bwd_fp)
