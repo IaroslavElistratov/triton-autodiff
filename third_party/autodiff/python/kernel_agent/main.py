@@ -63,6 +63,9 @@ def main() -> None:
     print("Best metrics:", out.get("best_metrics", {}))
     print("Best backward kernel:", out["best_backward_fp"])
     print("Device:", out["device_info"])
+    stop_reason = out.get("stop_reason", "")
+    if stop_reason:
+        print("Stop reason:", stop_reason)
 
 if __name__ == "__main__":
     main()

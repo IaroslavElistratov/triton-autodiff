@@ -216,6 +216,7 @@ class KernelOptimizer:
         device = get_user_device_info()
         best_path = bwd_fp
         # non_improve = 0
+        stop_reason = "max_iters"
 
         # optimization loop
         for it in range(self.cfg.max_iters):
@@ -346,6 +347,9 @@ class KernelOptimizer:
             else:
                 non_improve += 1
                 if non_improve >= self.cfg.patience:
+                    stop_reason = "patience"
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] Early stop: patience reached (non_improve={non_improve})")
                     break
 
             # 3) Optimize step (toggleable to keep loop disentangled from policy)
@@ -384,4 +388,5 @@ class KernelOptimizer:
             "best_metrics": best_metrics or {},
             "best_backward_fp": best_path,
             "device_info": device,
+            "stop_reason": stop_reason,
         }

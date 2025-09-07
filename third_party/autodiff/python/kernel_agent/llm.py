@@ -220,7 +220,7 @@ class MinimalLLMPatchProvider:
             "In each turn, you have one opportunity to call apply_patch({patch: ...}); use it as your final step for a given turn. Do not echo these rules; produce a real diff. "
             "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
             "Do not print the envelope/rules; output only the patch block. "
-            "Inside triton kernel you must use e.g. tl.cdiv not triton.cdiv. "
+            "Inside triton kernel you must use functions under tl.* namespace not triton.* namespace (e.g. tl.cdiv not triton.cdiv)"
         )
         # user prompt
         spec_text = _APPLY_PATCH_SPEC
@@ -472,6 +472,6 @@ class _GenerateSampler:
             response_metadata={
                 # Expose minimal breadcrumbs for logging/metrics; no free-form thinking here.
                 "tool": ("functions.apply_patch" if patch_text else ""),
-                "stop_reason": ("assistant_action" if patch_text else ("max_tokens" if hit_limit else "completed")),
+                "stop_reason": ("produced_patch" if patch_text else ("max_tokens" if hit_limit else "no_patch")),
             },
         )
