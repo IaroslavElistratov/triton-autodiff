@@ -90,6 +90,9 @@ class KernelOptimizer:
 
         # 1) Propose once (provider already does one strict retry on empty/no-op and may raise,
         #    including a specific max_tokens error). Avoid duplicate generation retries here
+        #
+        # Provider already did a strict retry and raised/returned accordingly.
+        # Avoid duplicate generation retries here.
         patch = self.patcher.propose_patch(
             phase=header,
             bwd_file=bwd_fp,
@@ -101,42 +104,17 @@ class KernelOptimizer:
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
 
-        # 2) Apply once using the OSS patcher. No preflight; strict boundary.
-        # Why once: generation already did a strict one-shot retry; duplicating retries here
-        # increases drift and token bloat. Keep responsibilities cleanly separated.
-        ptxt = (patch or "").strip()
-        if not ptxt:
-            # Strict one-shot reprompt that DEMANDS the tool call.
-            # This addresses pure compliance failures (no tool action), not content errors.
-            strict_header = header + (
-                "\nRETRY: Previous reply had no usable patch. "
-                "Call functions.apply_patch now with exactly one apply_patch.md block. "
-                "Do not print the patch in text."
-            )
-            patch = self.patcher.propose_patch(
-                phase=strict_header,
-                bwd_file=bwd_fp,
-                fwd_kernel_snippet=fwd_snip,
-                bwd_kernel_snippet=bwd_snip,
-                state_facts=state_facts or {},
-            )
-            ptxt = (patch or "").strip()
-            if not ptxt:
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] empty tool payload after retry")
-                return False
-
         # Normalize the file header so the model doesn't spend tokens on it and
         # we avoid target-path drift in apply.
-        ptxt = _ensure_update_file_target(ptxt, bwd_fp)
+        patch = _ensure_update_file_target(patch, bwd_fp)
 
         # Detect change on raw bytes
         before = _read_bytes(bwd_fp)
 
         try:
-            _apply_patch_raw(ptxt)
+            _apply_patch_raw(patch)
         except Exception as e:
-            # Surface exact patcher error and reprompt once with the error attached.
+            # 2. Surface exact patcher error and reprompt once with the error attached.
             # rely on the patcher to surface validation errors at apply time; no preflight checks; the patcher remains the source of truth
             err_msg = f"{type(e).__name__}: {e}"
             self.patcher.remember("apply.error", err_msg)
@@ -154,19 +132,19 @@ class KernelOptimizer:
                 bwd_kernel_snippet=bwd_snip,
                 state_facts=state_facts or {},
             )
-            ptxt2 = (patch or "").strip()
-            if not ptxt2:
+            patch2 = (patch or "").strip()
+            if not patch2:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] still empty after apply error reprompt")
                 return False
             # Re-normalize header on retry and apply again.
-            _apply_patch_raw(_ensure_update_file_target(ptxt2, bwd_fp))
+            _apply_patch_raw(_ensure_update_file_target(patch2, bwd_fp))
 
         # 3) Record + report change. Detect change on raw bytes for simplicity.
         after = _read_bytes(bwd_fp)
         changed = (after != before)
         # Keep a compact preview for breadcrumbs while avoiding token bloat.
-        self.patcher.remember(f"llm.patch.{stage}", str(ptxt)[:1200])
+        self.patcher.remember(f"llm.patch.{stage}", str(patch)[:1200])
         self.patcher.remember(f"apply.{stage}", ("ok" if changed else "no-change"))
         if VERBOSE:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")

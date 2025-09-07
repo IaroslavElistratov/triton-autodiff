@@ -94,7 +94,8 @@ def _env_truthy(name: str, default: str = "0") -> bool:
 # protocol-level boundaries (no "*** End Patch" loops; no early <|end|> cuts),
 # and lets the host take control immediately after the tool payload arrives.
 _APPLY_PATCH_SPEC = """
-Contract: Call the function tool functions.apply_patch once with arguments {"patch": "<one apply_patch.md block>"}. No prose. No patch text in analysis or final.
+Contract: Call the function tool functions.apply_patch once with arguments {"patch": "<one apply_patch.md block>"}. No prose.
+You may use the analysis channel for planning, but do not include the patcher tool call in analysis.
 
 Use this exact envelope (do NOT include file headers; the system will add them):
 *** Begin Patch
@@ -105,7 +106,7 @@ Use this exact envelope (do NOT include file headers; the system will add them):
 
 Rules:
 - Emit exactly one tool call: functions.apply_patch({"patch": "..."}).
-- Do not place any patch text in analysis or final channels.
+- Use analysis for reasoning; do not place the patcher tool call in analysis.
 - Do not include any of: "*** Update File:", "*** Add File:", "*** Delete File:", or "*** Move to:".
 - At least one '-' line per hunk to anchor to real lines (no pure insert-only hunks).
 - Hunk lines must be prefixed with one of:
@@ -199,8 +200,7 @@ class MinimalLLMPatchProvider:
         system = (
             "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
             "Do not propose large overly-eager kernel rewrites. You will be called multiple times to refine your kernel, so don't try to output final solution in one shot."
-            "Emit your patch via the function tool apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}.  No prose. Do not include any patch text in the analysis channel (analysis must contain no patch content). "
-            # If tools are unavailable, return exactly one apply_patch.md block in the final channel only.
+            "Use the analysis channel for planning (no patcher tool call). Then, as your final action, call the function tool apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}. No prose. "
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
             # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference."
@@ -217,7 +217,7 @@ class MinimalLLMPatchProvider:
             # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
-            "Prefer a single tool call apply_patch({patch: ...}). If tools are unavailable, emit ONE apply_patch.md patch only, in the final channel. Do not include any patch text in the analysis channel. Do not echo patch instruction rules; produce a real diff. "
+            "In each turn, you have one opportunity to call apply_patch({patch: ...}); use it as your final step for a given turn. Do not echo these rules; produce a real diff. "
             "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
             "Do not print the envelope/rules; output only the patch block. "
             "Inside triton kernel you must use e.g. tl.cdiv not triton.cdiv. "
@@ -259,18 +259,10 @@ class MinimalLLMPatchProvider:
         text = (getattr(resp, "response_text", "") or "").strip()
 
         # Capture thinking, if provided by backend (may contain patch when final was truncated)
-        try:
-            self.last_thinking = (resp.response_metadata or {}).get("thinking", "")  # type: ignore[attr-defined]
-        except Exception:
-            self.last_thinking = ""
-
-        # Record stop reason to distinguish truncation vs normal stops
-        try:
-            self.last_stop_reason = (resp.response_metadata or {}).get("stop_reason", "")  # type: ignore[attr-defined]
-        except Exception:
-            self.last_stop_reason = ""
+        # self.last_thinking = resp.response_metadata.get("thinking", "")
+        self.last_stop_reason = resp.response_metadata.get("stop_reason", "")  # type: ignore[attr-defined]
         if self.last_stop_reason:
-            # breadcrumb for visibility in next prompt and logs
+            # minimal breadcrumbs: persist the backend stop reason for visibility across turns
             self.remember("llm.stop_reason", self.last_stop_reason)
 
         # The sampler returns the tool payload; extract_patch double-checks
@@ -281,31 +273,33 @@ class MinimalLLMPatchProvider:
         # If the first attempt hit the token limit, explicitly instruct the model to
         # emit ONLY the patch block on retry.
         if (patch_text is None or not has_real_change(patch_text)):
+
+            # this isn't really needed becuase above we save "remember" stop reason anyway
+            # # If the sampler hit the token cap with no tool call, surface that explicitly.
+            # reason_line = "Previous output truncated (max_tokens). " if (self.last_stop_reason == "max_tokens") else ""
+
             # Minimal second attempt: demand the tool call and forbid analysis patch text.
             # This is intentionally terse to reduce drift and token bloat.
             retry_msgs = [
-                {"role": "system", "content": "Return a single patch now by calling functions.apply_patch({patch: ...}). If tools are unavailable, return ONE apply_patch.md block in the final channel only. No analysis patch text."},
+                {"role": "system", "content": "Return a single patch now by calling functions.apply_patch({patch: ...}). No analysis patch text."},
                 {"role": "user", "content": user}
             ]
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
             patch2 = extract_patch(text2)
             # Update stop reason from retry attempt as well
-            try:
-                stop2 = (resp2.response_metadata or {}).get("stop_reason", "")
-            except Exception:
-                stop2 = ""
+            stop2 = resp2.response_metadata.get("stop_reason", "")
             if stop2:
-                self.last_stop_reason = stop2
+                # Persist retry stop reason breadcrumb for cross-turn visibility
+                self.last_stop_reason = str(stop2)
                 self.remember("llm.stop_reason.retry", self.last_stop_reason)
             if patch2:
                 patch_text = patch2
 
-        # If still invalid, fail fast. If hit the token limit, report that
-        # explicitly so the orchestrator can avoid misclassifying it as a
-        # patching/apply failure.
+        # If still invalid, fail fast. If we twice hit max_tokens with no usable patch,
+        # make that explicit so the orchestrator can log/handle it distinctly.
         if (patch_text is None or not has_real_change(patch_text)):
-            if (self.last_stop_reason or "").lower() == "max_tokens":
+            if self.last_stop_reason == "max_tokens":
                 raise RuntimeError("LLM stopped due to max_tokens; output truncated; no patch produced")
             raise RuntimeError("LLM returned no actionable patch")
 
@@ -393,6 +387,7 @@ class _GenerateSampler:
                 REASONING_EFFORT.get(self.reasoning_effort, ReasoningEffort.LOW)
             ),
         )
+        # Attaches Developer/tool block only when developer instructions are provided
         dev = (
             DeveloperContent.new()
             .with_instructions(system_text)
@@ -424,8 +419,16 @@ class _GenerateSampler:
         # Stream and parse assistant actions. Using Harmony-provided stop tokens for
         # assistant actions ensures parser sees complete tool envelopes.
         parser = StreamableParser(self.encoding, role=Role.ASSISTANT)
-        for tok in self.generator.generate(input_tokens, self.encoding.stop_tokens_for_assistant_actions()):
+        token_count = 0
+        for tok in self.generator.generate(
+            input_tokens,
+            stop_tokens=self.encoding.stop_tokens_for_assistant_actions(),
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            return_logprobs=False,
+        ):
             parser.process(int(tok))
+            token_count += 1
             if on_thinking_chunk and parser.last_content_delta and parser.current_channel != "final":
                 on_thinking_chunk(parser.last_content_delta)
 
@@ -459,6 +462,9 @@ class _GenerateSampler:
                     patch_text = str(arg.get("patch", ""))
                 break  # first tool call wins
 
+        # Classify stop reason: assistant_action if tool found; else max_tokens if we hit cap.
+        hit_limit = bool(self.max_tokens) and (token_count >= int(self.max_tokens)) and not bool(patch_text)
+
         # Return only the patch payload; empty string signals orchestrator to reprompt.
         return SamplerResponse(
             response_text=(patch_text or ""),   # empty -> orchestrator will reprompt
@@ -466,6 +472,6 @@ class _GenerateSampler:
             response_metadata={
                 # Expose minimal breadcrumbs for logging/metrics; no free-form thinking here.
                 "tool": ("functions.apply_patch" if patch_text else ""),
-                "stop_reason": ("assistant_action" if patch_text else "completed"),
+                "stop_reason": ("assistant_action" if patch_text else ("max_tokens" if hit_limit else "completed")),
             },
         )
