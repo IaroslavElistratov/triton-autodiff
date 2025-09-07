@@ -1,6 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import os
+# Parse Harmony function-call arguments from the tool channel.
+# Rationale: tool-only extraction gives a deterministic boundary and
+# avoids brittle substring scraping of "*** Begin/End Patch" in text
+import json
 from typing import Any, Callable
 import collections
 
@@ -13,6 +17,13 @@ from openai_harmony import (
     ReasoningEffort,
     Role,
     SystemContent,
+    # StreamableParser yields channelized messages and assistant actions
+    # (function/tool calls) using Harmony control tokens, so do not rely
+    # on decoded text markers to find start/stop boundaries
+    StreamableParser,
+    # ToolDescription advertises a single function tool to the model so it can
+    # deliver the patch payload structurally instead of free-form text
+    ToolDescription,
     load_harmony_encoding,
 )
 
@@ -78,10 +89,12 @@ def _env_truthy(name: str, default: str = "0") -> bool:
     return str(val).lower() not in ("0", "", "false", "no", "off")
 
 
-# Canonical apply_patch.md contract presented to the model;
-# the patcher is the source of truth for validation and application.
+# Canonical, tool-only contract shown to the model.
+# Why: enforcing a single functions.apply_patch({patch: ...}) call gives
+# protocol-level boundaries (no "*** End Patch" loops; no early <|end|> cuts),
+# and lets the host take control immediately after the tool payload arrives.
 _APPLY_PATCH_SPEC = """
-Return ONE apply_patch.md block. No prose.
+Contract: Call the function tool functions.apply_patch once with arguments {"patch": "<one apply_patch.md block>"}. No prose. No patch text in analysis or final.
 
 Use this exact envelope (do NOT include file headers; the system will add them):
 *** Begin Patch
@@ -91,6 +104,8 @@ Use this exact envelope (do NOT include file headers; the system will add them):
 *** End Patch
 
 Rules:
+- Emit exactly one tool call: functions.apply_patch({"patch": "..."}).
+- Do not place any patch text in analysis or final channels.
 - Do not include any of: "*** Update File:", "*** Add File:", "*** Delete File:", or "*** Move to:".
 - At least one '-' line per hunk to anchor to real lines (no pure insert-only hunks).
 - Hunk lines must be prefixed with one of:
@@ -180,10 +195,12 @@ class MinimalLLMPatchProvider:
                     #   bench_summary: str, profile_hint: str) -> str:
 
         # system prompt
+        # Explicitly instruct tool-first delivery of the patch to avoid parsing free text
         system = (
             "You are a CUDA/Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step. "
             "Do not propose large overly-eager kernel rewrites. You will be called multiple times to refine your kernel, so don't try to output final solution in one shot."
-            "Output ONLY an apply_patch.md patch. No prose. If you wrote any analysis above, end with exactly one apply_patch.md block. "
+            "Emit your patch via the function tool apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}.  No prose. Do not include any patch text in the analysis channel (analysis must contain no patch content). "
+            # If tools are unavailable, return exactly one apply_patch.md block in the final channel only.
             "Backward file contains a Python function `backward(*inputs, *grads)` which computes per-input gradients. "
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance. "
             # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference."
@@ -200,7 +217,7 @@ class MinimalLLMPatchProvider:
             # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
-            "Emit ONE apply_patch.md patch only. Do not echo patch instruction rules instead you should produce a real diff. "
+            "Prefer a single tool call apply_patch({patch: ...}). If tools are unavailable, emit ONE apply_patch.md patch only, in the final channel. Do not include any patch text in the analysis channel. Do not echo patch instruction rules; produce a real diff. "
             "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
             "Do not print the envelope/rules; output only the patch block. "
             "Inside triton kernel you must use e.g. tl.cdiv not triton.cdiv. "
@@ -236,6 +253,8 @@ class MinimalLLMPatchProvider:
 
         # Temperature is controlled by the orchestrator
 
+        # First attempt: sampler is tool-only, so response_text is the tool
+        # payload (or empty). Keep this single-turn, single-action
         resp = self._sampler(msgs, on_thinking_chunk=thinking_sink)
         text = (getattr(resp, "response_text", "") or "").strip()
 
@@ -254,22 +273,20 @@ class MinimalLLMPatchProvider:
             # breadcrumb for visibility in next prompt and logs
             self.remember("llm.stop_reason", self.last_stop_reason)
 
-        # Prefer patch from final text only; if absent, retry once below
-        # Do not try to extract from thinking channel
+        # The sampler returns the tool payload; extract_patch double-checks
+        # that a single apply_patch.md window exists and is non-empty
         patch_text = extract_patch(text)
 
         # One strict retry if the model ignored the format or produced an empty/no-op patch.
         # If the first attempt hit the token limit, explicitly instruct the model to
         # emit ONLY the patch block on retry.
         if (patch_text is None or not has_real_change(patch_text)):
-            reached_limit = (self.last_stop_reason or "").lower() == "max_tokens"
-            if reached_limit:
-                retry_system = "Previous output truncated (max_tokens). Return ONE complete apply_patch.md block only. No prose."
-                retry_user = user + "\nIMPORTANT: Your previous response truncated at the token limit. Emit exactly one apply_patch.md patch now. Do not include any analysis text."
-            else:
-                retry_system = "Return ONE non-empty apply_patch.md block. No prose."
-                retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block."
-            retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
+            # Minimal second attempt: demand the tool call and forbid analysis patch text.
+            # This is intentionally terse to reduce drift and token bloat.
+            retry_msgs = [
+                {"role": "system", "content": "Return a single patch now by calling functions.apply_patch({patch: ...}). If tools are unavailable, return ONE apply_patch.md block in the final channel only. No analysis patch text."},
+                {"role": "user", "content": user}
+            ]
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
             patch2 = extract_patch(text2)
@@ -350,167 +367,105 @@ class _GenerateSampler:
                 raise ValueError(f"Invalid backend: {self.backend}")
 
 
-    # todo-low: simplfiy
-    def __call__(self, message_list: list[dict[str, str]], on_thinking_chunk: Callable[[str], None] | None = None) -> SamplerResponse:
-        """ uses Harmony encoding for single-response generation """
+    # Tool-only Harmony streaming and parse.
+    #
+    # Why tool-only:
+    # - Deterministic boundary: assistant actions mark tool start/stop; no text scraping.
+    # - Avoids two failure classes seen in logs: (1) endless "*** End Patch" in analysis,
+    #   (2) breaking on the first <|end|> that only closes analysis, not final.
+    # - Clean handoff: host applies the patch and controls the loop.
+    def __call__(self, message_list: list[dict[str, str]],
+                 on_thinking_chunk: Callable[[str], None] | None = None) -> SamplerResponse:
+        """
+        Single-turn generation.
+        Contract: model MUST call functions.apply_patch once with {"patch": "<apply_patch.md>"}.
+        Stream with Harmony, stop after generation, and return the first tool payload.
+        Do not apply the patch here, yeild to the orchestrator.
+        """
 
-        # Extract the simple system and user contents
         system_text = next((m.get("content", "") for m in message_list if m.get("role") == "system"), "")
-        user_text = next((m.get("content", "") for m in message_list if m.get("role") == "user"), "")
+        user_text   = next((m.get("content", "") for m in message_list if m.get("role") == "user"), "")
 
-        # Build Harmony messages: structured system controls + developer instructions + user text
-        system_message = Message.from_role_and_content(
+        # System + Developer (advertise the tool) + User
+        sys_msg = Message.from_role_and_content(
             Role.SYSTEM,
             SystemContent.new().with_reasoning_effort(
                 REASONING_EFFORT.get(self.reasoning_effort, ReasoningEffort.LOW)
             ),
         )
-        messages = [system_message]
+        dev = (
+            DeveloperContent.new()
+            .with_instructions(system_text)
+            .with_function_tools([
+                ToolDescription.new(
+                    "apply_patch",
+                    "Apply a single apply_patch.md diff",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "patch": {
+                                "type": "string",
+                                "description": "*** Begin Patch ... *** End Patch"
+                            }
+                        },
+                        "required": ["patch"],
+                    },
+                )
+            ])
+        ) if system_text else DeveloperContent.new()
+        msgs = [sys_msg]
         if system_text:
-            dev = DeveloperContent.new().with_instructions(system_text)
-            messages.append(Message.from_role_and_content(Role.DEVELOPER, dev))
-        messages.append(Message.from_role_and_content(Role.USER, user_text))
+            msgs.append(Message.from_role_and_content(Role.DEVELOPER, dev))
+        msgs.append(Message.from_role_and_content(Role.USER, user_text))
 
-        conversation = Conversation.from_messages(messages)
-        input_tokens = self.encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
-        # Streaming + Harmony protocol notes:
-        # - Don't stop on textual sentinels like "*** End Patch"; those may appear in analysis.
-        # - Keep stop_tokens empty. Allow Harmony END (<|end|>) to flow through so we can
-        #   observe it and only stop AFTER the final channel has begun (see seen_final below).
-        # - Earlier bug: stopping on the first END often closed the analysis channel, so no patch arrived.
-        # - Before parsing, we trim to the last START (<|start|>) and append END if missing so the
-        #   Harmony parser sees a complete <|start|> … <|end|> envelope.
-        # - On parse failure, we raw-decode and slice to the apply_patch block via extract_patch.
-        stop_tokens = []  # do NOT include Harmony END here; we must see it in the stream
+        convo = Conversation.from_messages(msgs)
+        input_tokens = self.encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
 
-        generated: list[int] = []
-        # streaming controls (single toggle)
-        parse_every = 8
-        emitted_chars = 0
-        stopped_on_end_patch = False
-        # Harmony control tokens and final-channel detection
-        # - END closes the current channel (analysis OR final). Only stop after final channel starts.
-        # - START marks segment boundaries. We trim to the last START before parsing to drop earlier segments.
-        END = int(self.encoding.encode("<|end|>", allowed_special="all")[0])
-        START = int(self.encoding.encode("<|start|>", allowed_special="all")[0])
-        # Detect start of the final channel by exact control-token sequence
-        FINAL_SEQ = tuple(int(t) for t in self.encoding.encode("<|channel|>final<|message|>", allowed_special="all"))
-        final_probe = collections.deque(maxlen=len(FINAL_SEQ))
-        seen_start = False
-        seen_final = False
-        saw_begin = False  # textual apply_patch window detection: begin seen
+        # Stream and parse assistant actions. Using Harmony-provided stop tokens for
+        # assistant actions ensures parser sees complete tool envelopes.
+        parser = StreamableParser(self.encoding, role=Role.ASSISTANT)
+        for tok in self.generator.generate(input_tokens, self.encoding.stop_tokens_for_assistant_actions()):
+            parser.process(int(tok))
+            if on_thinking_chunk and parser.last_content_delta and parser.current_channel != "final":
+                on_thinking_chunk(parser.last_content_delta)
 
-        for idx, out in enumerate(self.generator.generate(
-            input_tokens,
-            stop_tokens=stop_tokens,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            return_logprobs=False,
-        )):
-            token = int(out[0]) if isinstance(out, tuple) else int(out)
-            generated.append(token)
+        # Prefer the first functions.apply_patch action; ignore analysis/final text completely.
+        # Rationale: tool channel gives us a structured JSON/string payload and clear
+        # boundaries. This eliminates sentinel scraping and channel mis-detections.
+        patch_text = ""
+        for m in parser.messages:
+            d = m.to_dict()
+            if d.get("recipient") == "functions.apply_patch":
+                arg: str | dict | None = None
+                for c in d.get("content") or []:
+                    if isinstance(c, dict):
+                        if "arguments" in c and c["arguments"]:
+                            arg = c["arguments"]  # JSON string
+                        elif "text" in c and c["text"]:
+                            arg = c["text"]       # raw string
+                # Accept {"patch": "..."} or any JSON with a single string field; else raw string.
+                # This mirrors gpt-oss behavior and tolerates minor schema drift while keeping
+                # the contract simple for the model.
+                if isinstance(arg, str):
+                    if arg.lstrip().startswith("{"):
+                        try:
+                            obj = json.loads(arg)
+                            patch_text = obj.get("patch") or next((v for v in obj.values() if isinstance(v, str)), "")
+                        except Exception:
+                            patch_text = arg
+                    else:
+                        patch_text = arg
+                elif isinstance(arg, dict):
+                    patch_text = str(arg.get("patch", ""))
+                break  # first tool call wins
 
-            # Stream decoded deltas (best-effort) and emit
-            # Intentionally avoid breaking on "*** End Patch" text. Only Harmony END matters here.
-            # textual markers may appear in analysis; Harmony END is the only reliable boundary.
-            if (idx + 1) % parse_every == 0:
-                try:
-                    decoded = self.encoding.decode(generated)
-                    # Minimal, robust textual guard: stop on first End after Begin
-                    if (not saw_begin) and ("*** Begin Patch" in decoded):
-                        saw_begin = True
-                    if saw_begin and ("*** End Patch" in decoded):
-                        stopped_on_end_patch = True
-                        break
-                    if on_thinking_chunk and len(decoded) > emitted_chars:
-                        on_thinking_chunk(decoded[emitted_chars:])
-                        emitted_chars = len(decoded)
-                except Exception:
-                    # streaming should never be fatal
-                    pass
-
-            # Track protocol markers directly from token stream
-            if token == START:
-                seen_start = True
-            final_probe.append(token)
-            if (not seen_final) and (len(final_probe) == len(FINAL_SEQ)) and (tuple(final_probe) == FINAL_SEQ):
-                seen_final = True
-
-            # Break only when the final channel has started and Harmony closes it
-            # Prior bug: stopping on the first END often closed the analysis channel, yielding no patch.
-            if token == END and seen_final:
-                stopped_on_end_patch = True
-                break
-
-        # After loop, flush any remaining streamed delta once (best-effort; streaming shouldn't be fatal)
-        if on_thinking_chunk:
-            try:
-                decoded = self.encoding.decode(generated)
-                if len(decoded) > emitted_chars:
-                    on_thinking_chunk(decoded[emitted_chars:])
-            except Exception:
-                pass
-
-        # Detect if we likely hit the token limit without finishing the patch
-        # Compute token-limit before appending END (avoid off-by-one classification)
-        hit_token_limit = (
-            (self.max_tokens is not None)
-            and (not stopped_on_end_patch)
-            and (len(generated) >= int(self.max_tokens))
-        )
-
-        # Sanitize prefix/suffix for Harmony parsing
-        try:
-            if START in generated:
-                s_idx = len(generated) - 1 - list(reversed(generated)).index(START)
-                if s_idx > 0:
-                    generated = generated[s_idx:]
-        except Exception:
-            pass
-        try:
-            # Append END only if a START was seen and we aren't already closed
-            if seen_start and (not generated or generated[-1] != END):
-                generated.append(END)
-            while len(generated) >= 2 and generated[-1] == END and generated[-2] == END:
-                generated.pop()
-        except Exception:
-            pass
-
-        # Parse completed assistant message; Harmony expects a <|start|> ... <|end|> envelope.
-        # On any exception (e.g., leaked/misordered control tokens), fall back to raw decode and slice the patch.
-        try:
-            entries = self.encoding.parse_messages_from_completion_tokens(generated, Role.ASSISTANT)
-            final_text_parts: list[str] = []
-            thinking_parts: list[str] = []
-            for entry in entries:
-                entry_dict = entry.to_dict()
-                channel = entry_dict.get("channel")
-                parts = [c.get("text", "") for c in entry_dict.get("content", []) if isinstance(c, dict) and c.get("text")]
-                if channel == "final":
-                    final_text_parts.extend(parts)
-                elif channel and channel != "tool":
-                    thinking_parts.extend(parts)
-            text = "".join(final_text_parts) if final_text_parts else self.encoding.decode(generated)
-            all_thinking = "".join(thinking_parts)
-        except Exception:
-            # Last-resort fallback: raw decode then slice to patch window
-            raw = self.encoding.decode(generated)
-            text = extract_patch(raw) or raw
-            all_thinking = ""
-        # Cap thinking for metadata only (do not re-stream to avoid duplicates).
-        max_thinking_chars = int(os.environ.get("KERNEL_AGENT_THINKING_MAX_CHARS", "0") or "0")
-        if max_thinking_chars > 0 and len(all_thinking) > max_thinking_chars:
-            all_thinking = all_thinking[-max_thinking_chars:]
-        # In stub mode, if nothing meaningful generated, return empty no-op patch
-        if not text.strip():
-            text = "*** Begin Patch\n*** End Patch"
-        capture_thinking = _env_truthy("KERNEL_AGENT_CAPTURE_THINKING", "1")
+        # Return only the patch payload; empty string signals orchestrator to reprompt.
         return SamplerResponse(
-            response_text=text,
+            response_text=(patch_text or ""),   # empty -> orchestrator will reprompt
             actual_queried_message_list=message_list,
             response_metadata={
-                "thinking": (all_thinking if capture_thinking else ""),
-                "stop_reason": ("max_tokens" if hit_token_limit else ("end_patch" if stopped_on_end_patch else "eos")),
+                # Expose minimal breadcrumbs for logging/metrics; no free-form thinking here.
+                "tool": ("functions.apply_patch" if patch_text else ""),
+                "stop_reason": ("assistant_action" if patch_text else "completed"),
             },
         )
-

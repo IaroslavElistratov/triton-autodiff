@@ -14,7 +14,13 @@ class Phase:
 # Shared guardrails injected every turn (regular and phased).
 GLOBAL_GUARDRAILS = (
     "Guardrails:\n"
-    "- Exactly one apply_patch.md block.\n"
+    # Tool-first instruction removes ambiguity about where patches belong. The
+    # sampler only extracts tool payloads, this aligns model guidance with
+    # the runtime contract to avoid wasted turns and analysis-only patches.
+    "- Exactly one patch: prefer functions.apply_patch({patch: ...}) tool call; otherwise one final-channel apply_patch.md block.\n"
+    # No patch text in analysis ensures we never scrape from free-form text; it
+    # also prevents the model from echoing diffs in the wrong channel.
+    "- No patch text in analysis; tool call or final channel only.\n"
     "- No rule echoing; diff only.\n"
     "- ≤120 changed lines per patch.\n"
     "- Include at least one '-' anchor line per hunk.\n"

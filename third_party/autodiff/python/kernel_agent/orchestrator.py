@@ -5,6 +5,7 @@ import os, re, json, sys
 import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
+from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
 from .tools.gradcheck.core import check_op_backward_parity
 from .tools.benchmark import bench_op, reduce_bench
@@ -100,45 +101,72 @@ class KernelOptimizer:
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
 
-        # 2) Apply with one repair attempt on failure.
-        #    rely on the patcher to surface validation errors at apply time; no preflight checks
-        before = _read_bytes(bwd_fp)
-
-        # todo: use gpt_oss.tools.apply_patch
-        def _apply(p: str) -> None:
-            if hasattr(self.patcher, "apply"):
-                self.patcher.apply(p)
-            else:
-                _apply_patch_raw(p)
-
-        try:
-            _apply(patch)
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            self.patcher.remember(f"apply.{stage}.error", err)
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] apply error: {err}")
-            # One repair attempt: ask again with same header/context; still keep errors out of prompt and in the breadcrumb
+        # 2) Apply once using the OSS patcher. No preflight; strict boundary.
+        # Why once: generation already did a strict one-shot retry; duplicating retries here
+        # increases drift and token bloat. Keep responsibilities cleanly separated.
+        ptxt = (patch or "").strip()
+        if not ptxt:
+            # Strict one-shot reprompt that DEMANDS the tool call.
+            # This addresses pure compliance failures (no tool action), not content errors.
+            strict_header = header + (
+                "\nRETRY: Previous reply had no usable patch. "
+                "Call functions.apply_patch now with exactly one apply_patch.md block. "
+                "Do not print the patch in text."
+            )
             patch = self.patcher.propose_patch(
-                phase=header,
+                phase=strict_header,
                 bwd_file=bwd_fp,
                 fwd_kernel_snippet=fwd_snip,
                 bwd_kernel_snippet=bwd_snip,
                 state_facts=state_facts or {},
             )
-            try:
-                _apply(patch)
-            except Exception as e2:
-                # Surface patcher error to model and let it repair the patch once
-                self.patcher.remember(f"apply.{stage}.error.retry", f"{type(e2).__name__}: {e2}")
+            ptxt = (patch or "").strip()
+            if not ptxt:
                 if VERBOSE:
-                    print(f"[kernel-agent][it={it}] apply error (retry): {type(e2).__name__}: {e2}")
+                    print(f"[kernel-agent][it={it}] empty tool payload after retry")
                 return False
 
-        # 3) Record + report change. Detect change on raw bytes for simplicity
+        # Normalize the file header so the model doesn't spend tokens on it and
+        # we avoid target-path drift in apply.
+        ptxt = _ensure_update_file_target(ptxt, bwd_fp)
+
+        # Detect change on raw bytes
+        before = _read_bytes(bwd_fp)
+
+        try:
+            _apply_patch_raw(ptxt)
+        except Exception as e:
+            # Surface exact patcher error and reprompt once with the error attached.
+            # rely on the patcher to surface validation errors at apply time; no preflight checks; the patcher remains the source of truth
+            err_msg = f"{type(e).__name__}: {e}"
+            self.patcher.remember("apply.error", err_msg)
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] apply error: {err_msg}")
+            fix_header = header + (
+                "\nRETRY: Your previous patch failed to apply.\n"
+                f"apply_patch error:\n{err_msg}\n"
+                "Produce a corrected patch and call functions.apply_patch again. No prose."
+            )
+            patch = self.patcher.propose_patch(
+                phase=fix_header,
+                bwd_file=bwd_fp,
+                fwd_kernel_snippet=fwd_snip,
+                bwd_kernel_snippet=bwd_snip,
+                state_facts=state_facts or {},
+            )
+            ptxt2 = (patch or "").strip()
+            if not ptxt2:
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] still empty after apply error reprompt")
+                return False
+            # Re-normalize header on retry and apply again.
+            _apply_patch_raw(_ensure_update_file_target(ptxt2, bwd_fp))
+
+        # 3) Record + report change. Detect change on raw bytes for simplicity.
         after = _read_bytes(bwd_fp)
         changed = (after != before)
-        self.patcher.remember(f"llm.patch.{stage}", str(patch)[:1200])
+        # Keep a compact preview for breadcrumbs while avoiding token bloat.
+        self.patcher.remember(f"llm.patch.{stage}", str(ptxt)[:1200])
         self.patcher.remember(f"apply.{stage}", ("ok" if changed else "no-change"))
         if VERBOSE:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
