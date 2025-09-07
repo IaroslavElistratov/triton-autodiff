@@ -309,9 +309,15 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
             try:
+                # Restrict benchmark shapes during Phase 1 only
+                sidecar = ns
+                if self.strategy.i == 0:
+                    sweep = ns["SWEEP"]
+                    sidecar = dict(ns)
+                    sidecar["SWEEP"] = sweep[:1]
                 bench_records = bench_op(
                     op,              # autograd-backed op from create_op(...)
-                    ns,              # sidecar providing SWEEP and make_args
+                    sidecar,         # sidecar providing SWEEP and make_args
                     mode="bwd",
                 )
             except Exception as e:

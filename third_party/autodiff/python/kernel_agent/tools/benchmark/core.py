@@ -73,6 +73,7 @@ def bench_op(
         return x
 
     for dims in sweep:
+        print(f"[benchmark] running with {dims}")
         args, kwargs = make_args_fn(dims, device=device, dtype=dtype)
         # Ensure autograd is enabled on inputs so outputs require grad
         try:
