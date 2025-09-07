@@ -15,7 +15,7 @@ from .orchestrator import KernelOptimizer, Config
 def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
     ap.add_argument("--max-iters", type=int, default=6)
-    ap.add_argument("--patience", type=int, default=2)
+    ap.add_argument("--patience", type=int, default=4)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
     ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
 
