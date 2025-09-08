@@ -93,13 +93,28 @@ class KernelOptimizer:
         #
         # Provider already did a strict retry and raised/returned accordingly.
         # Avoid duplicate generation retries here.
-        patch = self.patcher.propose_patch(
-            phase=header,
-            bwd_file=bwd_fp,
-            fwd_kernel_snippet=fwd_snip,
-            bwd_kernel_snippet=bwd_snip,
-            state_facts=state_facts or {},
-        )
+
+        # todo: [cleanup] llm.py should be responsible for everyhting related to patch proposal and its
+        # errors, do not spread that logic across both llm.py and this file. Remove these try/except around
+        # self.patcher.propose_patch and make it the responsibility of llm.py
+        #
+        # llm.py detects and classifies max-tokens, then raises; this try/catch in the orchestrator
+        # just catches that exception so the loop doesn’t crash
+        try:
+            patch = self.patcher.propose_patch(
+                phase=header,
+                bwd_file=bwd_fp,
+                fwd_kernel_snippet=fwd_snip,
+                bwd_kernel_snippet=bwd_snip,
+                state_facts=state_facts or {},
+            )
+        except Exception as e:
+            msg = str(e)
+            # Treat generation limits (max_tokens) and generic proposal errors as non-fatal
+            self.patcher.remember("llm.propose.error", msg)
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] propose error: {msg}")
+            return False
 
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
@@ -125,19 +140,27 @@ class KernelOptimizer:
                 f"apply_patch error:\n{err_msg}\n"
                 "Produce a corrected patch and call functions.apply_patch again. No prose."
             )
-            patch = self.patcher.propose_patch(
-                phase=fix_header,
-                bwd_file=bwd_fp,
-                fwd_kernel_snippet=fwd_snip,
-                bwd_kernel_snippet=bwd_snip,
-                state_facts=state_facts or {},
-            )
+            try:
+                patch = self.patcher.propose_patch(
+                    phase=fix_header,
+                    bwd_file=bwd_fp,
+                    fwd_kernel_snippet=fwd_snip,
+                    bwd_kernel_snippet=bwd_snip,
+                    state_facts=state_facts or {},
+                )
+            except Exception as e_propose_retry:
+                err_retry = f"{type(e_propose_retry).__name__}: {e_propose_retry}"
+                self.patcher.remember("llm.propose.error.retry", err_retry)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] propose retry error: {err_retry}")
+                return False
             patch2 = (patch or "").strip()
             if not patch2:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] still empty after apply error reprompt")
                 return False
 
+            # todo-high: debatable to cath this, as you can just advance a bunch of iterations with failed patches
             # retry once on apply error; if the second attempt still fails, do not crash the process—treat as failed iteration;
             # keep this under its own try/except because the application of the 2nd patch
             # can independantly fail and it did happen in the past

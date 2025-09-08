@@ -284,6 +284,16 @@ class MinimalLLMPatchProvider:
                 {"role": "system", "content": "Return a single patch now by calling functions.apply_patch({patch: ...}). No analysis patch text."},
                 {"role": "user", "content": user}
             ]
+
+            # reached_limit = (self.last_stop_reason or "").lower() == "max_tokens"
+            # if reached_limit:
+            #     retry_system = "Previous output truncated (max_tokens). Return ONE complete apply_patch.md block only. No prose."
+            #     retry_user = user + "\nIMPORTANT: Your previous response truncated at the token limit. Emit exactly one apply_patch.md patch now. Do not include any analysis text."
+            # else:
+            #     retry_system = "Return ONE non-empty apply_patch.md block. No prose."
+            #     retry_user = user + "\nIMPORTANT: Your previous output had no usable patch. Emit exactly one patch block."
+            # retry_msgs = [{"role": "system", "content": retry_system}, {"role": "user", "content": retry_user}]
+
             resp2 = self._sampler(retry_msgs, on_thinking_chunk=thinking_sink)
             text2 = (getattr(resp2, "response_text", "") or "").strip()
             patch2 = extract_patch(text2)
