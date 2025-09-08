@@ -670,38 +670,38 @@ class Raiser:
         # Why: Broadcasting a pointer strips pointer-ness; use tl.broadcast_to for values.
         def emit_broadcast(op):
             x = self._get(op.get_operand(0))
-            if "ptr<" in str(op.get_operand(0).get_type()):  # keep pointer scalar
+            # Keep pointers scalar; for values, rely on Triton's implicit broadcasting
+            if "ptr<" in str(op.get_operand(0).get_type()):
                 return x
-            shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
-            return f"tl.broadcast_to({x}, {_fmt_shape(shp)})" if shp else x
+            return x
         R["tt.broadcast"] = emit_broadcast
 
 
-        # --- tt.addptr: keep base scalar; broadcast int64 offsets to the result shape
-        # tt.addptr: keep base pointer scalar; broadcast int64 offsets to result shape
-        # Why: Widen pointers via offsets; matches Triton pointer arithmetic expectations.
+        # --- tt.addptr: keep base scalar; rely on implicit broadcasting of offsets (cast to int64)
+        # Why: Widen pointers via offsets; Triton will broadcast values implicitly as needed.
         def emit_addptr(op):
             base = self._get(op.get_operand(0))  # scalar ptr
-            shp  = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
-            shp_txt = _fmt_shape(shp) if shp else None
             offs = []
             for i in range(1, op.get_num_operands()):
                 o = f"tl.cast({self._get(op.get_operand(i))}, tl.int64)"
-                if shp_txt: o = f"tl.broadcast_to({o}, {shp_txt})"
                 offs.append(o)
             return base if not offs else f"{base} + {' + '.join(offs)}"
         R["tt.addptr"] = emit_addptr
 
 
-        # tt.splat: scalar -> block tensor
-        # Why: For pointers, make a grid of pointers using base + zeros(int64) offsets.
+        # tt.splat: values return as-is (implicit broadcast). For pointers, keep pointer grid via zeros.
         def emit_splat(op):
             x = self._get(op.get_operand(0))
             shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type())) or []
-            if not shp: return x
+            if not shp:
+                return x
             if _is_ptr_type(op.get_operand(0).get_type()) or _is_ptr_type(op.get_result(0).get_type()):
                 return f"{x} + tl.zeros({_fmt_shape(shp)}, dtype=tl.int64)"
-            return f"tl.broadcast_to({x}, {_fmt_shape(shp)})"
+            # Value splat: avoid explicit broadcast; rely on Triton's implicit broadcasting.
+            # Rationale: explicit tl.broadcast_to(...) is redundant noise for values.
+            # Safety: stores still reshape/broadcast the VALUE (never the pointer) to pointer shape,
+            # so removing value-side materialization does not change semantics.
+            return x
         R["tt.splat"] = emit_splat
 
         # --- make_range: prefer explicit start/end
