@@ -817,6 +817,13 @@ class Raiser:
         rhs = emit(op)
         if rhs is None:
             return
+        # Elide alias-only assignments produced by value broadcast/splat removal
+        # Example: "v2 = v1" where v2 came from tt.broadcast/tt.splat after elision
+        if op.get_num_results() == 1 and name in ("tt.broadcast", "tt.splat"):
+            rvid2 = int(op.get_result(0).id())
+            if re.fullmatch(r"[A-Za-z_]\w*", rhs or ""):
+                self.env[rvid2] = rhs
+                return
         if res_vars:
             lhs = ", ".join(res_vars) if len(res_vars) > 1 else res_vars[0]
             self.lines.append(f"    {lhs} = {rhs}")
