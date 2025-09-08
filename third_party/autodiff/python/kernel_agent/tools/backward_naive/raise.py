@@ -231,6 +231,9 @@ class Raiser:
         # when we elide the alias so later we can resolve labels (and optionally
         # normalize bwd_* names) to the surviving producer (e.g., fwd_qk).
         self._alias_of: Dict[str, str] = {}
+        # Def map for robust chain inspection (e.g., nested casts) without regex over text
+        # Key: SSA id (int), Value: defining MLIR operation
+        self._def: Dict[int, mlir.operation] = {}
         # Track current gradient group label to reduce noisy headers
         self._last_grad_of: Optional[str] = None
         # Track finer-grained per-handler label to show local groups
@@ -262,7 +265,7 @@ class Raiser:
         if name is None:
             name = self._hints.get(vid, self._fresh("v"))
         # Normalize names that reference elided forward aliases:
-        # If a bwd name mirrors a fwd alias we removed (e.g., bwd_acc_2 and we elided fwd_acc_2 → fwd_acc),
+        # If a bwd name mirrors a fwd alias we removed (e.g., bwd_acc_2 and we elided fwd_acc_2 -> fwd_acc),
         # adopt the surviving base (bwd_acc) when it doesn't collide.
         name = self._canonicalize_name(name)
         self.env[vid] = name
@@ -299,6 +302,42 @@ class Raiser:
     def _cast(self, x: str, dst_ty: mlir.type) -> str:
         dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
         return f"tl.cast({x}, {dty})"
+
+    def _emit_cast_op(self, op: mlir.operation) -> Optional[str]:
+        """Emit a value cast with elision/chain collapse.
+        Rules:
+        - Identity casts are dropped (bind as alias of source).
+        - Nested casts within same family (float->float, int->int) collapse to one.
+        - Otherwise keep a single tl.cast.
+        Pointer/IO casts elsewhere (addptr/atomics) remain intact.
+        """
+        dst = op.get_result(0).get_type()
+        src_v = op.get_operand(0)
+        src = self._get(src_v)
+        dst_ty = _dtype_expr_from_type_string(str(dst)) or "None"
+        src_ty = _dtype_expr_from_type_string(str(src_v.get_type())) or "None"
+
+        # Identity: drop
+        if src_ty == dst_ty:
+            return src
+
+        # Collapse nested cast via def-use instead of regex
+        is_float = lambda t: t.startswith("tl.float") or t == "tl.bfloat16"
+        is_int = lambda t: t.startswith("tl.int") or t == "tl.int1"
+        # Inspect producer op directly; if producer is unknown (e.g., block arg),
+        # fall back to emitting a single cast.
+        prod = self._def.get(int(src_v.id()))
+        if prod is not None:
+            pm = prod.mnemonic
+            if pm in ("arith.extf","arith.truncf","arith.fptosi","arith.fptoui","arith.sitofp","arith.uitofp","arith.extsi","arith.extui","arith.trunci"):
+                inner_v = prod.get_operand(0)
+                inner = self._get(inner_v)
+                inner_ty = _dtype_expr_from_type_string(str(inner_v.get_type())) or "None"
+                # Only collapse float-family chains; integer zero/sign extend chains can differ.
+                if (is_float(inner_ty) and is_float(dst_ty)):
+                    return f"tl.cast({inner}, {dst_ty})"
+
+        return f"tl.cast({src}, {dst_ty})"
 
     def _bitcast(self, x: str, dst_ty: mlir.type) -> str:
         dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
@@ -477,17 +516,17 @@ class Raiser:
         R["arith.remsi"] = lambda op: f"{self._get(op.get_operand(0))} % {self._get(op.get_operand(1))}  # assumes non-negative"
         R["arith.remui"] = R["arith.remsi"]
 
-        # --- casts
-        R["arith.extf"]    = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.truncf"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.fptosi"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.fptoui"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.sitofp"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
-        R["arith.uitofp"]  = lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type())
+        # --- casts (value-side elision/chain collapse)
+        R["arith.extf"]    = self._emit_cast_op
+        R["arith.truncf"]  = self._emit_cast_op
+        R["arith.fptosi"]  = self._emit_cast_op
+        R["arith.fptoui"]  = self._emit_cast_op
+        R["arith.sitofp"]  = self._emit_cast_op
+        R["arith.uitofp"]  = self._emit_cast_op
         R["arith.bitcast"] = lambda op: self._bitcast(self._get(op.get_operand(0)), op.get_result(0).get_type())
         # integer width casts
         for _k in ("arith.extsi", "arith.extui", "arith.trunci"):
-            R[_k] = (lambda op: self._cast(self._get(op.get_operand(0)), op.get_result(0).get_type()))
+            R[_k] = self._emit_cast_op
 
         # --- select (ternary)
         R["arith.select"] = lambda op: f"tl.where({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))}, {self._get(op.get_operand(2))})"
@@ -720,7 +759,12 @@ class Raiser:
             base = self._get(op.get_operand(0))  # scalar ptr
             offs = []
             for i in range(1, op.get_num_operands()):
-                o = f"tl.cast({self._get(op.get_operand(i))}, tl.int64)"
+                oi = op.get_operand(i)
+                s = self._get(oi)
+                # Cast offset to int64 only if not already i64
+                if "i64" not in str(oi.get_type()):
+                    s = f"tl.cast({s}, tl.int64)"
+                o = s
                 offs.append(o)
             return base if not offs else f"{base} + {' + '.join(offs)}"
         R["tt.addptr"] = emit_addptr
@@ -841,6 +885,9 @@ class Raiser:
 
         # Pre-bind results with friendly names (or minted as fallback)
         res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
+        # Track defining op for robust post-inspection (cast chain, etc.)
+        for i in range(op.get_num_results()):
+            self._def[int(op.get_result(i).id())] = op
         emit = self.registry.get(name)
         if emit is None:
             # Include attribute names to ease future handler additions
@@ -862,7 +909,7 @@ class Raiser:
                 # Alias-elision: This op is a value-only alias (broadcast/splat) we decided
                 # not to materialize. Bind its SSA result directly to the surviving rhs name,
                 # and record alias->survivor for later label/name normalization.
-                # Example: fwd_qk_3 (alias) → fwd_qk (survivor). We'll later print
+                # Example: fwd_qk_3 (alias) -> fwd_qk (survivor). We'll later print
                 #   "# local grads for fwd_qk" instead of a dangling fwd_qk_3.
                 existing = self.env.get(rvid2)
                 if isinstance(existing, str) and existing != rhs:
