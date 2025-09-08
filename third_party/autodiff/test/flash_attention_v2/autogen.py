@@ -117,8 +117,8 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_acc = 1.0
 
     # local grads for fwd_acc_6
-    bwd_acc_2 = bwd_acc / fwd_acc_4
-    bwd_acc_3 = bwd_acc_2 * bwd_element_ty
+    bwd_acc_1 = bwd_acc / fwd_acc_4
+    bwd_acc_3 = bwd_acc_1 * bwd_element_ty
 
     # local grads for fwd_acc_3
     bwd_acc_4 = tl.cast(bwd_acc_3, tl.float16)
@@ -140,11 +140,9 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
 
-    # local grads for fwd_acc_2
+    # local grads for fwd_acc_1
     bwd_acc_14 = tl.sum(bwd_acc_3, axis=1)
     bwd_acc_15 = tl.expand_dims(bwd_acc_14, axis=1)
-
-    # local grads for fwd_acc_1
     bwd_acc_16 = fwd_acc * bwd_acc_15
     bwd_acc_17 = fwd_unnamed_5 * bwd_acc_15
 
@@ -158,11 +156,9 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_acc_23 = bwd_acc_21 * bwd_acc_20
     bwd_acc_24 = bwd_acc_23 * bwd_element_ty
 
-    # local grads for fwd_acc_5
+    # local grads for fwd_acc_4
     bwd_acc_26 = tl.sum(bwd_acc_24, axis=1)
     bwd_acc_27 = tl.expand_dims(bwd_acc_26, axis=1)
-
-    # local grads for fwd_acc_4
     bwd_acc_28 = tl.reshape(bwd_acc_27, (16,))
     bwd_acc_29 = bwd_acc_28 + bwd_m_i_7
     bwd_acc_30 = bwd_acc_29 + bwd_acc_18
@@ -188,11 +184,9 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     # local grads for fwd_qk_4
     bwd_qk_2 = bwd_p_5 * bwd_qk
 
-    # local grads for fwd_qk_3
+    # local grads for fwd_qk_2
     bwd_qk_4 = tl.sum(bwd_qk_2, axis=1)
     bwd_qk_5 = tl.expand_dims(bwd_qk_4, axis=1)
-
-    # local grads for fwd_qk_2
     bwd_qk_6 = tl.reshape(bwd_qk_5, (16,))
     bwd_m_i_9 = bwd_m_i_8 + bwd_qk_6
 
@@ -246,7 +240,7 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     fwd_q_16 = fwd_q_15 + tl.cast(fwd_q_12, tl.int64)
 
     # local grads for fwd_q_14
-    bwd_q = tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16), mask=None, sem='acq_rel', scope='gpu')
+    bwd_Q_block_ptr_1 = tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16), mask=None, sem='acq_rel', scope='gpu')
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
     fwd_K_block_ptr_3 = grad_K + tl.cast(fwd_qvk_offset_6, tl.int64)

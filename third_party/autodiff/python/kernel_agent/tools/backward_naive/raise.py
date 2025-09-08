@@ -224,6 +224,13 @@ class Raiser:
         self._hints: Dict[int, str] = build_value_name_hints(self.m)
         self.env: Dict[int, str] = {}
         self.registry = self._build_registry()
+        # Alias map for elided value-only ops: alias name -> surviving name
+        # Why: After we drop explicit value broadcasts/splats, some forward temps
+        # (e.g., fwd_qk_3) become pure aliases and are not emitted at all. Downstream
+        # code and headers could still refer to these names. We record the mapping
+        # when we elide the alias so later we can resolve labels (and optionally
+        # normalize bwd_* names) to the surviving producer (e.g., fwd_qk).
+        self._alias_of: Dict[str, str] = {}
         # Track current gradient group label to reduce noisy headers
         self._last_grad_of: Optional[str] = None
         # Track finer-grained per-handler label to show local groups
@@ -254,7 +261,29 @@ class Raiser:
             return self.env[vid]
         if name is None:
             name = self._hints.get(vid, self._fresh("v"))
+        # Normalize names that reference elided forward aliases:
+        # If a bwd name mirrors a fwd alias we removed (e.g., bwd_acc_2 and we elided fwd_acc_2 → fwd_acc),
+        # adopt the surviving base (bwd_acc) when it doesn't collide.
+        name = self._canonicalize_name(name)
         self.env[vid] = name
+        return name
+
+    def _canonicalize_name(self, name: str) -> str:
+        # Name canonicalization for bwd_*:
+        # If a backward temp mirrors a forward alias we've removed (e.g., bwd_acc_2
+        # while fwd_acc_2 was elided to fwd_acc), adopt the surviving base (bwd_acc)
+        # when it doesn't collide. This keeps bwd_* names aligned with visible fwd_*.
+        if name.startswith("bwd_"):
+            tail = name[4:]
+            key = f"fwd_{tail}"
+            mapped = self._alias_of.get(key)
+            if isinstance(mapped, str):
+                # mapped may be either fwd_* or a bare base; derive bwd_* accordingly
+                base = mapped[4:] if mapped.startswith("fwd_") else mapped
+                candidate = f"bwd_{base}"
+                # Avoid collisions: only adopt if not already used
+                if candidate not in self.env.values():
+                    return candidate
         return name
 
     def _get(self, v: mlir.value, hint: str = "v") -> str:
@@ -385,7 +414,15 @@ class Raiser:
         tag = self._int_attr(op, "raise.gradOfTag")
         if tag is None:
             return fallback
-        return self._fwd_tag_to_py.get(int(tag), fallback)
+        name = self._fwd_tag_to_py.get(int(tag), fallback)
+        if not isinstance(name, str):
+            return fallback
+        # Follow alias chain to a surviving identifier if this tag pointed to an elided alias
+        seen = set()
+        while name in self._alias_of and name not in seen:
+            seen.add(name)
+            name = self._alias_of[name]
+        return name
 
     # ---- registry
     def _build_registry(self) -> Dict[str, Callable[[mlir.operation], Optional[str]]]:
@@ -822,6 +859,14 @@ class Raiser:
         if op.get_num_results() == 1 and name in ("tt.broadcast", "tt.splat"):
             rvid2 = int(op.get_result(0).id())
             if re.fullmatch(r"[A-Za-z_]\w*", rhs or ""):
+                # Alias-elision: This op is a value-only alias (broadcast/splat) we decided
+                # not to materialize. Bind its SSA result directly to the surviving rhs name,
+                # and record alias->survivor for later label/name normalization.
+                # Example: fwd_qk_3 (alias) → fwd_qk (survivor). We'll later print
+                #   "# local grads for fwd_qk" instead of a dangling fwd_qk_3.
+                existing = self.env.get(rvid2)
+                if isinstance(existing, str) and existing != rhs:
+                    self._alias_of[existing] = rhs
                 self.env[rvid2] = rhs
                 return
         if res_vars:
