@@ -815,8 +815,8 @@ class Raiser:
         def emit_atomic_rmw(op: mlir.operation) -> str:
             # op/sem/scope decoding
             opc = _enum_from_attrs(op, ["op", "operation", "atomic_op"], None)
-            sem = _enum_from_attrs(op, ["sem", "semantics", "memory_semantics", "ordering"], "relaxed")
-            scope = _enum_from_attrs(op, ["scope", "mem_scope", "memory_scope"], "gpu")
+            sem = _enum_from_attrs(op, ["sem", "semantics", "memory_semantics", "ordering"], None)
+            scope = _enum_from_attrs(op, ["scope", "mem_scope", "memory_scope"], None)
             if opc is None:
                 txt = op.str_nodebug()
                 m = re.search(r"atomic_rmw\s+([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)", txt)
@@ -842,11 +842,24 @@ class Raiser:
             except Exception:
                 pass
 
-            mask_kw = "None"
+            mask_arg = None
             if op.get_num_operands() >= 3:
-                mask_kw = self._get(op.get_operand(2))
+                mask_val = self._get(op.get_operand(2))
+                # Only include mask kwarg if it's not the Python default (None)
+                if mask_val != "None":
+                    mask_arg = f"mask={mask_val}"
 
-            return f"tl.{fn}({ptr}, {val}, mask={mask_kw}, sem='{sem}', scope='{scope}')"
+            # Only include sem/scope when explicitly present and not defaults
+            extra = []
+            if mask_arg:
+                extra.append(mask_arg)
+            if sem and sem != "acq_rel":
+                extra.append(f"sem='{sem}'")
+            if scope and scope != "gpu":
+                extra.append(f"scope='{scope}'")
+
+            tail = (", " + ", ".join(extra)) if extra else ""
+            return f"tl.{fn}({ptr}, {val}{tail})"
         R["tt.atomic_rmw"] = emit_atomic_rmw
 
         # --- simple shape ops
