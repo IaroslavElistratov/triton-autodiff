@@ -56,6 +56,7 @@ class GradLocalInliner:
         emit_rhs_cb: Callable[[mlir.operation, Callable[[mlir.value], str]], Optional[str]],
         op_name_fn: Callable[[mlir.operation], str],
         read_tag_fn: Callable[[mlir.operation], Optional[int]],
+        group_label_fn: Callable[[mlir.operation], Optional[str]],
         is_ptr_fn: Callable[[mlir.type], bool],
         dont_inline: set,
         max_len: int,
@@ -66,6 +67,7 @@ class GradLocalInliner:
         self.emit_rhs_cb = emit_rhs_cb
         self.op_name_fn = op_name_fn
         self.read_tag_fn = read_tag_fn
+        self.group_label_fn = group_label_fn
         self.is_ptr_fn = is_ptr_fn
         self.dont_inline = dont_inline
         self.max_len = max_len
@@ -77,6 +79,7 @@ class GradLocalInliner:
         self._cache: Dict[int, str] = {}
         self._skip_vids: set = set()
         self._current_tag: Optional[int] = None
+        self._current_group: Optional[str] = None
 
     def prepare(self, owner: Dict[int, mlir.operation], uses: Dict[int, int]) -> None:
         self._owner = owner
@@ -84,9 +87,14 @@ class GradLocalInliner:
         self._cache.clear()
         self._skip_vids.clear()
         self._current_tag = None
+        self._current_group = None
 
     def begin_consumer(self, cons_op: mlir.operation) -> None:
         self._current_tag = self.read_tag_fn(cons_op)
+        try:
+            self._current_group = self.group_label_fn(cons_op)
+        except Exception:
+            self._current_group = None
 
     def should_skip(self, op: mlir.operation) -> bool:
         return op.get_num_results() == 1 and int(op.get_result(0).id()) in self._skip_vids
@@ -108,7 +116,17 @@ class GradLocalInliner:
         except Exception:
             pass
         ptag = self.read_tag_fn(prod)
-        return (ptag is not None) and (ptag == self._current_tag)
+        if (ptag is not None) and (ptag == self._current_tag):
+            return True
+        # Fallback: same coarse grad group if available
+        try:
+            pgrp = self.group_label_fn(prod)
+        except Exception:
+            pgrp = None
+        if (pgrp is not None) and (self._current_group is not None) and (pgrp == self._current_group):
+            return True
+        # Last resort: allow single-use constants for readability
+        return self.op_name_fn(prod) == "arith.constant"
 
     def get(self, v: mlir.value, fallback_get: Callable[[mlir.value], str]) -> str:
         vid = int(v.id())
@@ -937,7 +955,21 @@ class Raiser:
             a = self._get(op.get_operand(0))
             b = self._get(op.get_operand(1))
             if op.get_num_operands() >= 3:
-                c = self._get(op.get_operand(2))
+                acc_v = op.get_operand(2)
+                acc_def = self._def.get(int(acc_v.id()))
+                is_zero = False
+                if acc_def is not None and (hasattr(acc_def, 'mnemonic') and acc_def.mnemonic == 'arith.constant'):
+                    try:
+                        val = acc_def.get_splat_value('value')
+                        if isinstance(val, (int, float)):
+                            is_zero = (val == 0 or val == 0.0)
+                        elif isinstance(val, bool):
+                            is_zero = (val is False)
+                    except Exception:
+                        is_zero = False
+                c = self._get(acc_v)
+                if is_zero or c in ("0", "0.0", "False"):
+                    return f"tl.dot({a}, {b})"
                 return f"tl.dot({a}, {b}) + {c}"
             return f"tl.dot({a}, {b})"
         R["tt.dot"] = emit_dot
@@ -1113,6 +1145,7 @@ class Raiser:
                 emit_rhs_cb=lambda o, get_fn: self._emit_rhs_with_get(o, get_fn),
                 op_name_fn=lambda o: (o.mnemonic if hasattr(o, "mnemonic") else o.get_name()),
                 read_tag_fn=lambda o: self._int_attr(o, "raise.gradOfTag"),
+                group_label_fn=lambda o: self._group_label(o),
                 is_ptr_fn=_is_ptr_type,
                 dont_inline={"tt.load","tt.store","tt.dot","tt.atomic_rmw","tt.addptr","tt.expand_dims"},
                 max_len=self.opts.max_line,
@@ -1239,4 +1272,5 @@ if __name__ == "__main__":
         raise SystemExit(1)
     ttir_path = sys.argv[1]
     print(raise_from_file(ttir_path, options=RaiserOptions(infix_arith=True)))
+
 
