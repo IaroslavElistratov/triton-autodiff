@@ -314,50 +314,6 @@ class Attr:
         if "zero" in s: return "zero"
         return ""
 
-    # @staticmethod
-    # def reduce_kinds(op, module):
-    #     # Prefer the direct helper.
-    #     try:
-    #         comb = op.get_reduce_combiner()
-    #     except Exception:
-    #         comb = None
-    #     if comb:
-    #         return [str(comb)] * max(1, op.get_num_results())
-
-    #     # Fallback: walk the reduce region to infer the combiner.
-    #     reg = op.get_region(0); target_rid = reg.id()
-    #     val_owner = {}
-    #     reduce_ret = None
-
-    #     def visit(inner):
-    #         b = inner.get_block(); r = b.get_parent() if b is not None else None
-    #         if b is None:
-    #             return
-    #         while r:
-    #             if r.id() == target_rid:
-    #                 for i in range(inner.get_num_results()):
-    #                     v = inner.get_result(i)
-    #                     val_owner[int(v.id())] = inner.get_name()
-    #                 if inner.get_name().endswith("reduce.return"):
-    #                     nonlocal reduce_ret; reduce_ret = inner
-    #                 break
-    #             r = r.get_parent_region()
-    #     module.walk(visit)
-
-    #     kinds = []
-    #     if reduce_ret:
-    #         MAP = {
-    #             "arith.addi":"sum","arith.addf":"sum",
-    #             "arith.maxsi":"max","arith.maxui":"max","arith.maximumf":"max","arith.maxnumf":"max",
-    #             "arith.minsi":"min","arith.minui":"min","arith.minimumf":"min","arith.minnumf":"min",
-    #             "arith.andi":"and","arith.ori":"or","arith.xori":"xor",
-    #         }
-    #         for i in range(reduce_ret.get_num_operands()):
-    #             vid = int(reduce_ret.get_operand(i).id())
-    #             kinds.append(MAP.get(val_owner.get(vid, ""), "custom"))
-    #     return kinds
-
-
 # ----------------------------- Raiser ----------------------------------------
 
 class Raiser:
@@ -494,18 +450,6 @@ class Raiser:
         s = op.get_str_attr(name)
         if s is not None:
             return str(s)
-
-        # # Fallback: textual attr representation
-        # try:
-        #     v = op.get_attr_text(name)
-        #     if v is None:
-        #         return None
-        #     s = str(v).strip()
-        #     if len(s) >= 2 and s[0] == s[-1] and s[0] in ('\"', "'"):
-        #         s = s[1:-1]
-        #     return s or None
-        # except Exception:
-        #     return None
 
     def _int_attr(self, op, name: str) -> Optional[int]:
         # Prefer typed integer attribute
@@ -1274,27 +1218,6 @@ class Raiser:
 
 
 
-
-# # in _build_registry()
-# # Add a tiny helper `self._emit_region(...)` that walks the region’s ops and, when it sees `scf.yield`, assigns `iter_out[i] = <yield_i>`.
-
-# def emit_scf_for(op):
-#     lb  = self._get(op.get_operand(0)); ub = self._get(op.get_operand(1)); st = self._get(op.get_operand(2))
-#     # Bind iter_args -> Python vars
-#     iter_in  = [self._get(op.get_operand(i)) for i in range(3, op.get_num_operands())]
-#     iter_out = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
-#     # Hoist initial values
-#     for dst, src in zip(iter_out, iter_in): self.lines.append(f"    {dst} = {src}")
-#     self.lines.append(f"    for {self._fresh('k')} in range({lb}, {ub}, {st}):")
-#     # Emit region body; capture last scf.yield operands into iter_out
-#     reg = op.get_region(0)
-#     self._emit_region(reg, indent=8, yield_targets=iter_out)
-#     return None
-# R["scf.for"] = emit_scf_for
-
-
-
-
 # ----------------------------- Convenience API -------------------------------
 
 def raise_from_module(module: mlir.module, func_name: Optional[str] = None, *, options: Optional[RaiserOptions] = None) -> str:
@@ -1313,16 +1236,6 @@ def raise_from_file(ttir_path: str, *, func_name: Optional[str] = None, options:
 # ----------------------------- Demo / CLI ------------------------------------
 
 if __name__ == "__main__":
-
-    # print(raise_from_file(
-    #     "/root/triton-autodiff/generated/1b763f2bf2/out.ttir",
-    #     # "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/N_CTX/minimal.ttir",
-    #     # "/root/triton-autodiff/third_party/autodiff/python/kernel_agent/tools/backward_naive/test/pointerness/minimal.ttir",
-    #     # "/root/triton-autodiff/generated/repro/out.ttir",
-    #     # "/root/triton-autodiff/third_party/autodiff/test/add-mul-div/generated/f7fc96a11c/out.ttir",
-    #     options=RaiserOptions(infix_arith=True)
-    # ))
-
     if len(sys.argv) != 2:
         print("Usage: python raise.py <path/to/file.ttir>")
         raise SystemExit(1)
