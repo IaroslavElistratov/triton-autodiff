@@ -27,7 +27,131 @@ class RaiserOptions:
     infix_arith: bool = True
     # Emit headers grouping gradients by their source forward op
     emit_grad_groups: bool = True
+    # Inline single-use pure values within the same fine-grained grad tag
+    collapse_single_use: bool = True
+    # Maximum line length budget for inlined RHS strings
+    max_line: int = 110
 
+
+# ----------------------------- Local inliner ----------------------------------
+
+class GradLocalInliner:
+    """Tag-local single-use value inliner.
+
+    Responsibility: inline only pure, single-use producers whose fine-grained
+    provenance tag (raise.gradOfTag) matches the current consumer's tag.
+    Never inline loads/stores/dots/atomics/addptr/expand_dims or pointer
+    results. Optionally wrap inlined RHS with parentheses to preserve
+    precedence; avoid redundant parens for simple call/name/literal forms.
+
+    The inliner is decoupled from the Raiser; it receives small callbacks for
+    emission and env/lines access needed for removing already-emitted producer
+    assignments when they later get inlined.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: Dict[str, Callable[[mlir.operation], Optional[str]]],
+        emit_rhs_cb: Callable[[mlir.operation, Callable[[mlir.value], str]], Optional[str]],
+        op_name_fn: Callable[[mlir.operation], str],
+        read_tag_fn: Callable[[mlir.operation], Optional[int]],
+        is_ptr_fn: Callable[[mlir.type], bool],
+        dont_inline: set,
+        max_len: int,
+        get_var_name_cb: Callable[[int], Optional[str]],
+        lines_ref: List[str],
+    ):
+        self.registry = registry
+        self.emit_rhs_cb = emit_rhs_cb
+        self.op_name_fn = op_name_fn
+        self.read_tag_fn = read_tag_fn
+        self.is_ptr_fn = is_ptr_fn
+        self.dont_inline = dont_inline
+        self.max_len = max_len
+        self.get_var_name_cb = get_var_name_cb
+        self.lines = lines_ref
+
+        self._owner: Dict[int, mlir.operation] = {}
+        self._uses: Dict[int, int] = {}
+        self._cache: Dict[int, str] = {}
+        self._skip_vids: set = set()
+        self._current_tag: Optional[int] = None
+
+    def prepare(self, owner: Dict[int, mlir.operation], uses: Dict[int, int]) -> None:
+        self._owner = owner
+        self._uses = uses
+        self._cache.clear()
+        self._skip_vids.clear()
+        self._current_tag = None
+
+    def begin_consumer(self, cons_op: mlir.operation) -> None:
+        self._current_tag = self.read_tag_fn(cons_op)
+
+    def should_skip(self, op: mlir.operation) -> bool:
+        return op.get_num_results() == 1 and int(op.get_result(0).id()) in self._skip_vids
+
+    def _can_inline(self, v: mlir.value) -> bool:
+        if self._current_tag is None:
+            return False
+        vid = int(v.id())
+        prod = self._owner.get(vid)
+        if prod is None or prod.get_num_results() != 1:
+            return False
+        if self._uses.get(vid, 0) != 1:
+            return False
+        if self.op_name_fn(prod) in self.dont_inline:
+            return False
+        try:
+            if self.is_ptr_fn(prod.get_result(0).get_type()):
+                return False
+        except Exception:
+            pass
+        ptag = self.read_tag_fn(prod)
+        return (ptag is not None) and (ptag == self._current_tag)
+
+    def get(self, v: mlir.value, fallback_get: Callable[[mlir.value], str]) -> str:
+        vid = int(v.id())
+        if not self._can_inline(v):
+            return fallback_get(v)
+        if vid in self._cache:
+            return self._cache[vid]
+
+        prod = self._owner[vid]
+        # Nested getter stays within the same tag scope
+        def nested_get(u: mlir.value) -> str:
+            return self.get(u, fallback_get)
+
+        rhs = self.emit_rhs_cb(prod, nested_get)
+        if rhs is None:
+            return fallback_get(v)
+
+        s = rhs.strip()
+        # Wrap only if not already parenthesized/call/name/literal
+        is_parenthesized = s.startswith("(") and s.endswith(")")
+        is_call_like = bool(re.match(r'^[A-Za-z_][A-Za-z0-9_\.]*\(.*\)$', s))
+        is_simple_name = bool(re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', s))
+        is_simple_literal = bool(re.match(r'^(-?\d+(?:\.\d+)?)$', s))
+        need_wrap = not (is_parenthesized or is_call_like or is_simple_name or is_simple_literal)
+        rhs_final = f"({rhs})" if need_wrap else rhs
+        if len(rhs_final) > self.max_len:
+            return fallback_get(v)
+
+        self._cache[vid] = rhs_final
+        self._skip_vids.add(vid)
+        self._remove_emitted_assignment_for_vid(vid)
+        return rhs_final
+
+    def _remove_emitted_assignment_for_vid(self, vid: int) -> None:
+        var = self.get_var_name_cb(vid)
+        if not isinstance(var, str) or not var:
+            return
+        needle = f"{var} ="
+        for i in range(len(self.lines) - 1, -1, -1):
+            s = self.lines[i].strip()
+            if s.startswith(needle):
+                del self.lines[i]
+                break
 
 # ----------------------------- Type helpers ----------------------------------
 
@@ -898,7 +1022,22 @@ class Raiser:
                 self.lines.append(f"    # TODO: raise {name}")
             return
 
-        rhs = emit(op)
+        # Optional tag-local inlining: if enabled, set up consumer context and inline eligible operands
+        if getattr(self, "_inliner", None) is not None:
+            # Skip this op entirely if its single result was fully inlined elsewhere
+            if self._inliner.should_skip(op):
+                return
+            self._inliner.begin_consumer(op)
+            saved_get = self._get
+            try:
+                def _inline_get(v):
+                    return self._inliner.get(v, saved_get)
+                self._get = _inline_get
+                rhs = emit(op)
+            finally:
+                self._get = saved_get
+        else:
+            rhs = emit(op)
         if rhs is None:
             return
         # Elide alias-only assignments produced by value broadcast/splat removal
@@ -953,6 +1092,24 @@ class Raiser:
                 target_region_id = func.get_region(0).id()
             except Exception:
                 target_region_id = None
+        # Prepare defs/uses for optional inlining
+        if self.opts.collapse_single_use:
+            owner, uses = self._compute_owner_and_uses(ops, target_region_id)
+            self._inliner = GradLocalInliner(
+                registry=self.registry,
+                emit_rhs_cb=lambda o, get_fn: self._emit_rhs_with_get(o, get_fn),
+                op_name_fn=lambda o: (o.mnemonic if hasattr(o, "mnemonic") else o.get_name()),
+                read_tag_fn=lambda o: self._int_attr(o, "raise.gradOfTag"),
+                is_ptr_fn=_is_ptr_type,
+                dont_inline={"tt.load","tt.store","tt.dot","tt.atomic_rmw","tt.addptr","tt.expand_dims"},
+                max_len=self.opts.max_line,
+                get_var_name_cb=lambda vid: self.env.get(vid),
+                lines_ref=self.lines,
+            )
+            self._inliner.prepare(owner, uses)
+        else:
+            self._inliner = None
+
         body_started = False
         for op in ops:
             if target_region_id is not None:
@@ -971,6 +1128,47 @@ class Raiser:
         if not body_started:
             self.lines.append("    pass")
         return "\n".join(self.lines)
+
+    # small helpers for inliner integration
+    def _emit_rhs_with_get(self, op: mlir.operation, get_fn: Callable[[mlir.value], str]) -> Optional[str]:
+        name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
+        handler = self.registry.get(name)
+        if handler is None:
+            return None
+        saved = self._get
+        try:
+            self._get = get_fn
+            return handler(op)
+        finally:
+            self._get = saved
+
+    def _compute_owner_and_uses(self, ops: List[mlir.operation], target_region_id) -> (Dict[int, mlir.operation], Dict[int, int]):
+        owner: Dict[int, mlir.operation] = {}
+        uses: Dict[int, int] = {}
+        # Keep _def available for cast-chain inspection and other helpers
+        self._def.clear()
+        for op in ops:
+            if target_region_id is not None:
+                try:
+                    blk = op.get_block(); parent_region = blk.get_parent()
+                    if parent_region.id() != target_region_id:
+                        continue
+                except Exception:
+                    continue
+            name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
+            if not name.startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
+                continue
+            for i in range(op.get_num_results()):
+                vid = int(op.get_result(i).id())
+                owner[vid] = op
+                self._def[vid] = op
+            for j in range(op.get_num_operands()):
+                try:
+                    vid = int(op.get_operand(j).id())
+                    uses[vid] = uses.get(vid, 0) + 1
+                except Exception:
+                    pass
+        return owner, uses
 
 
 
@@ -1028,3 +1226,4 @@ if __name__ == "__main__":
         raise SystemExit(1)
     ttir_path = sys.argv[1]
     print(raise_from_file(ttir_path, options=RaiserOptions(infix_arith=True)))
+

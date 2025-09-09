@@ -101,10 +101,8 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_m_i_1 = 0.6931470036506653
 
     # local grads for fwd_m_i
-    bwd_m_i_3 = fwd_l_i * bwd_m_i_1
     bwd_m_i_4 = 1.0
-    bwd_m_i_6 = bwd_m_i_4 / bwd_m_i_3
-    bwd_m_i_7 = bwd_m_i_6 * bwd_m_i
+    bwd_m_i_7 = (bwd_m_i_4 / (fwd_l_i * bwd_m_i_1)) * bwd_m_i
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K,grad_V} ~~~~~~~~~~
     fwd_O_block_ptr_12 = grad_Out + fwd_qvk_offset_6
@@ -117,16 +115,14 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_acc = 1.0
 
     # local grads for fwd_acc_6
-    bwd_acc_1 = bwd_acc / fwd_acc_4
-    bwd_acc_3 = bwd_acc_1 * bwd_element_ty
+    bwd_acc_3 = (bwd_acc / fwd_acc_4) * bwd_element_ty
 
     # local grads for fwd_acc_3
     bwd_acc_4 = tl.cast(bwd_acc_3, tl.float16)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
-    bwd_acc_5 = tl.trans(fwd_v_9)
     bwd_acc_6 = 0.0
-    bwd_acc_8 = tl.dot(bwd_acc_4, bwd_acc_5) + bwd_acc_6
+    bwd_acc_8 = tl.dot(bwd_acc_4, tl.trans(fwd_v_9)) + bwd_acc_6
 
     # local grads for fwd_p_1
     bwd_p = tl.cast(bwd_acc_8, tl.float32)
@@ -134,15 +130,13 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
 
     # local grads for fwd_acc_3
-    bwd_acc_9 = tl.trans(fwd_p_1)
     bwd_acc_10 = 0.0
-    bwd_acc_12 = tl.dot(bwd_acc_9, bwd_acc_4) + bwd_acc_10
+    bwd_acc_12 = tl.dot(tl.trans(fwd_p_1), bwd_acc_4) + bwd_acc_10
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
 
     # local grads for fwd_acc_1
-    bwd_acc_14 = tl.sum(bwd_acc_3, axis=1)
-    bwd_acc_15 = tl.expand_dims(bwd_acc_14, axis=1)
+    bwd_acc_15 = tl.expand_dims(tl.sum(bwd_acc_3, axis=1), axis=1)
     bwd_acc_16 = fwd_acc * bwd_acc_15
     bwd_acc_17 = fwd_unnamed_5 * bwd_acc_15
 
@@ -150,23 +144,18 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_acc_18 = tl.reshape(bwd_acc_17, (16,))
 
     # local grads for fwd_acc_6
-    bwd_acc_19 = fwd_acc_4 * fwd_acc_4
-    bwd_acc_20 = fwd_acc_3 / bwd_acc_19
     bwd_acc_21 = -1.0
-    bwd_acc_23 = bwd_acc_21 * bwd_acc_20
-    bwd_acc_24 = bwd_acc_23 * bwd_element_ty
+    bwd_acc_24 = (bwd_acc_21 * (fwd_acc_3 / (fwd_acc_4 * fwd_acc_4))) * bwd_element_ty
 
     # local grads for fwd_acc_4
-    bwd_acc_26 = tl.sum(bwd_acc_24, axis=1)
-    bwd_acc_27 = tl.expand_dims(bwd_acc_26, axis=1)
+    bwd_acc_27 = tl.expand_dims(tl.sum(bwd_acc_24, axis=1), axis=1)
     bwd_acc_28 = tl.reshape(bwd_acc_27, (16,))
     bwd_acc_29 = bwd_acc_28 + bwd_m_i_7
     bwd_acc_30 = bwd_acc_29 + bwd_acc_18
     bwd_alpha = 0.6931470036506653
 
     # local grads for fwd_alpha_1
-    bwd_alpha_2 = bwd_alpha * fwd_alpha_1
-    bwd_alpha_3 = bwd_alpha_2 * bwd_acc_30
+    bwd_alpha_3 = (bwd_alpha * fwd_alpha_1) * bwd_acc_30
     bwd_alpha_4 = -1.0
 
     # local grads for fwd_alpha
@@ -177,27 +166,21 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_p_2 = 0.6931470036506653
 
     # local grads for fwd_p
-    bwd_p_4 = bwd_p_2 * fwd_p
-    bwd_p_5 = bwd_p_4 * bwd_p_1
+    bwd_p_5 = (bwd_p_2 * fwd_p) * bwd_p_1
     bwd_qk = -1.0
 
     # local grads for fwd_qk_4
     bwd_qk_2 = bwd_p_5 * bwd_qk
 
     # local grads for fwd_qk_2
-    bwd_qk_4 = tl.sum(bwd_qk_2, axis=1)
-    bwd_qk_5 = tl.expand_dims(bwd_qk_4, axis=1)
+    bwd_qk_5 = tl.expand_dims(tl.sum(bwd_qk_2, axis=1), axis=1)
     bwd_qk_6 = tl.reshape(bwd_qk_5, (16,))
     bwd_m_i_9 = bwd_m_i_8 + bwd_qk_6
 
     # local grads for fwd_m_ij_1
-    bwd_m_ij = fwd_m_ij >= fwd_unnamed_4
-    bwd_m_ij_1 = fwd_unnamed_4 > fwd_m_ij
     bwd_m_ij_2 = 1.0
     bwd_m_ij_4 = 0.0
-    bwd_m_ij_6 = tl.where(bwd_m_ij, bwd_m_ij_2, bwd_m_ij_4)
-    bwd_m_ij_7 = tl.where(bwd_m_ij_1, bwd_m_ij_2, bwd_m_ij_4)
-    bwd_m_ij_9 = bwd_m_ij_6 * bwd_m_i_9
+    bwd_m_ij_9 = tl.where((fwd_m_ij >= fwd_unnamed_4), bwd_m_ij_2, bwd_m_ij_4) * bwd_m_i_9
 
     # local grads for fwd_m_ij
     bwd_m_ij_10 = fwd__elementwise_max * bwd_m_ij_9
@@ -205,15 +188,13 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd__elementwise_max = tl.expand_dims(fwd__elementwise_max, axis=1)
 
     # local grads for fwd__elementwise_max
-    bwd__elementwise_max_2 = fwd_qk == bwd__elementwise_max
     bwd__elementwise_max_3 = 1.0
     bwd__elementwise_max_5 = 0.0
-    bwd__elementwise_max_7 = tl.where(bwd__elementwise_max_2, bwd__elementwise_max_3, bwd__elementwise_max_5)
     bwd__elementwise_max_8 = tl.expand_dims(bwd_m_ij_11, axis=1)
-    bwd__elementwise_max_10 = bwd__elementwise_max_7 * bwd__elementwise_max_8
+    bwd__elementwise_max_10 = tl.where((fwd_qk == bwd__elementwise_max), bwd__elementwise_max_3, bwd__elementwise_max_5) * bwd__elementwise_max_8
 
     # local grads for fwd_m_ij_1
-    bwd_m_ij_12 = bwd_m_ij_7 * bwd_m_i_9
+    bwd_m_ij_12 = tl.where((fwd_unnamed_4 > fwd_m_ij), bwd_m_ij_2, bwd_m_ij_4) * bwd_m_i_9
     bwd_alpha_7 = bwd_alpha_3 + bwd_m_ij_12
 
     # local grads for fwd_qk_1
@@ -225,14 +206,12 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_qk_10 = tl.cast(bwd_qk_9, tl.float16)
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
-    bwd_qk_11 = tl.trans(fwd_k_10)
     bwd_qk_12 = 0.0
-    bwd_qk_14 = tl.dot(bwd_qk_10, bwd_qk_11) + bwd_qk_12
+    bwd_qk_14 = tl.dot(bwd_qk_10, tl.trans(fwd_k_10)) + bwd_qk_12
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
-    bwd_qk_15 = tl.trans(fwd_q_14)
     bwd_qk_16 = 0.0
-    bwd_qk_18 = tl.dot(bwd_qk_15, bwd_qk_10) + bwd_qk_16
+    bwd_qk_18 = tl.dot(tl.trans(fwd_q_14), bwd_qk_10) + bwd_qk_16
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
     fwd_Q_block_ptr_5 = grad_Q + fwd_qvk_offset_6
@@ -257,6 +236,7 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
 
     # local grads for fwd_v_9
     bwd_v = tl.atomic_add(fwd_v_11, tl.cast(bwd_acc_12, tl.float16), mask=None, sem='acq_rel', scope='gpu')
+
 
 # commenting manually
 # N_CTX = 128
