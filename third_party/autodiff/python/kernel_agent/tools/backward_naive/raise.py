@@ -6,22 +6,32 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 import re
-import struct
 import math
 import sys
-
-import triton
-import triton.language as tl
 from triton._C.libtriton import ir as mlir
 
 from utils import build_value_name_hints
 
+# Dialects we emit and common opcode sets
+DIALECTS = ("arith.", "math.", "tt.", "scf.", "cf.", "triton.")
+CAST_OPS = (
+    "arith.extf", "arith.truncf", "arith.fptosi", "arith.fptoui",
+    "arith.sitofp", "arith.uitofp", "arith.extsi", "arith.extui", "arith.trunci",
+)
+CMP_SYMS = {
+    "eq":"==","oeq":"==","ueq":"==",
+    "ne":"!=","one":"!=","une":"!=",
+    "slt":"<","ult":"<","olt":"<",
+    "sle":"<=","ule":"<=","ole":"<=",
+    "sgt":">","ugt":">","ogt":">",
+    "sge":">=","uge":">=","oge":">=",
+}
 
 # ----------------------------- Options ---------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class RaiserOptions:
     # If True, print arith with symbols (a+b) instead of tl.add(a,b)
     infix_arith: bool = True
@@ -213,13 +223,20 @@ def _typed_zero(dst_ty: mlir.type) -> str:
     shp = _shape_from_tensor_type_string(t)
     dty = _dtype_expr_from_type_string(t) or "None"
     if shp:
-        tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-        return f"tl.zeros({tup}, dtype={dty})"
+        return f"tl.zeros({_fmt_shape(shp)}, dtype={dty})"
     if dty.startswith("tl.float") or dty == "tl.bfloat16":
         return "0.0"
     if dty == "tl.int1":
         return "False"
     return "0"
+
+def _lit(x):
+    if isinstance(x, float):
+        if math.isnan(x):  return "float('nan')"
+        if math.isinf(x):  return "float('inf')" if x > 0 else "float('-inf')"
+        return repr(x)
+    if isinstance(x, bool): return "True" if x else "False"
+    return str(int(x))
 
 
 # --- small kwarg builder (avoids None/empty values) ---
@@ -282,12 +299,12 @@ class Attr:
     axis        = staticmethod(lambda op, default=0: Attr.int_attr(op, "axis", default))
     order       = staticmethod(lambda op: Attr.list_int_attr(op, "order"))
     boundary_ck = staticmethod(lambda op: Attr.list_int_attr(op, "boundary_check"))
-    start_end   = staticmethod(lambda op: (
-        (Attr.int_attr(op, "start"), Attr.int_attr(op, "end"))
-        if (Attr.int_attr(op, "start") is not None and Attr.int_attr(op, "end") is not None)
-        else (tuple(map(int, re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()).groups()))
-              if re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug()) else None)
-    ))
+    @staticmethod
+    def start_end(op):
+        a = Attr.int_attr(op, "start"); b = Attr.int_attr(op, "end")
+        if a is not None and b is not None: return (a, b)
+        m = re.search(r"\bstart\s*=\s*(-?\d+).*?end\s*=\s*(-?\d+)", op.str_nodebug())
+        return (int(m.group(1)), int(m.group(2))) if m else None
 
     @staticmethod
     def cache_modifier(op):
@@ -397,6 +414,29 @@ class Raiser:
             self._bind(v, self._hints.get(vid, self._fresh(hint)))
         return self.env[vid]
 
+    def _name(self, op: mlir.operation) -> str:
+        return op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
+
+    @staticmethod
+    def _in_region(op: mlir.operation, rid) -> bool:
+        if rid is None:
+            return True
+        try:
+            blk = op.get_block()
+            parent_region = blk.get_parent()
+            return parent_region.id() == rid
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_supported(name: str) -> bool:
+        return name.startswith(DIALECTS)
+
+    def _collect_ops(self) -> List[mlir.operation]:
+        ops: List[mlir.operation] = []
+        self.m.walk(lambda o: ops.append(o))
+        return ops
+
     # ---- emission helpers
     def _arith(self, a: str, b: str, sym: str, fn: str) -> str:
         return f"{a} {sym} {b}" if self.opts.infix_arith else f"tl.{fn}({a}, {b})"
@@ -425,13 +465,12 @@ class Raiser:
 
         # Collapse nested cast via def-use instead of regex
         is_float = lambda t: t.startswith("tl.float") or t == "tl.bfloat16"
-        is_int = lambda t: t.startswith("tl.int") or t == "tl.int1"
         # Inspect producer op directly; if producer is unknown (e.g., block arg),
         # fall back to emitting a single cast.
         prod = self._def.get(int(src_v.id()))
         if prod is not None:
-            pm = prod.mnemonic
-            if pm in ("arith.extf","arith.truncf","arith.fptosi","arith.fptoui","arith.sitofp","arith.uitofp","arith.extsi","arith.extui","arith.trunci"):
+            pm = self._name(prod)
+            if pm in CAST_OPS:
                 inner_v = prod.get_operand(0)
                 inner = self._get(inner_v)
                 inner_ty = _dtype_expr_from_type_string(str(inner_v.get_type())) or "None"
@@ -445,11 +484,6 @@ class Raiser:
         dty = _dtype_expr_from_type_string(str(dst_ty)) or "None"
         return f"tl.bitcast({x}, {dty})"
 
-    def _attr_text(self, op, name: str) -> Optional[str]:
-        # Prefer typed string attribute when available to avoid parsing quotes
-        s = op.get_str_attr(name)
-        if s is not None:
-            return str(s)
 
     def _int_attr(self, op, name: str) -> Optional[int]:
         # Prefer typed integer attribute
@@ -674,18 +708,10 @@ class Raiser:
             a = self._get(op.get_operand(0))
             b = self._get(op.get_operand(1))
             pred = _extract_cmp_pred(op)
-            table = {
-                "eq":"==","oeq":"==","ueq":"==",
-                "ne":"!=","one":"!=","une":"!=",
-                "slt":"<","ult":"<","olt":"<",
-                "sle":"<=","ule":"<=","ole":"<=",
-                "sgt":">","ugt":">","ogt":">",
-                "sge":">=","uge":">=","oge":">=",
-            }
             # Fail loudly on unknown preds to avoid silently emitting incorrect equality.
-            if pred not in table:
+            if pred not in CMP_SYMS:
                 raise RuntimeError(f"Unsupported/unknown cmp predicate: {pred} in {op.str_nodebug()}")
-            return f"{a} {table[pred]} {b}"
+            return f"{a} {CMP_SYMS[pred]} {b}"
 
         R["arith.cmpi"] = _emit_cmp_with_pred
         R["arith.cmpf"] = _emit_cmp_with_pred
@@ -833,27 +859,14 @@ class Raiser:
             x = self._get(op.get_operand(0))
             shp = _shape_from_tensor_type_string(str(op.get_result(0).get_type()))
             if shp:
-                tup = "(" + ", ".join(str(d) for d in shp) + ("," if len(shp) == 1 else "") + ")"
-                return f"tl.reshape({x}, {tup})"
+                return f"tl.reshape({x}, {_fmt_shape(shp)})"
             return f"tl.reshape({x}, None)  # TODO: dynamic shape"
         R["tt.reshape"] = emit_reshape
 
         R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
 
-        # Rationale: tl.broadcast returns a PAIR (lhs, rhs) and can accidentally feed a Python tuple
-        # into pointer math/memory ops, leading to tuple_type errors. tl.broadcast_to returns a single
-        # tensor of the target shape.
-        # Also: never broadcast pointers here, because broadcasting
-        # a pointer strips pointer-ness (becomes a block of values), which breaks tl.load/tl.store.
-        # Instead, widen pointers only via broadcasting OFFSETS inside tt.addptr.
-        # Why: Broadcasting a pointer strips pointer-ness; use tl.broadcast_to for values.
-        def emit_broadcast(op):
-            x = self._get(op.get_operand(0))
-            # Keep pointers scalar; for values, rely on Triton's implicit broadcasting
-            if "ptr<" in str(op.get_operand(0).get_type()):
-                return x
-            return x
-        R["tt.broadcast"] = emit_broadcast
+        # Value-only broadcast elides to the source. Pointers remain scalar.
+        R["tt.broadcast"] = lambda op: self._get(op.get_operand(0))
 
 
         # --- tt.addptr: keep base scalar; rely on implicit broadcasting of offsets (cast to int64)
@@ -974,7 +987,7 @@ class Raiser:
 
         # --- return
         def emit_return(op: mlir.operation) -> Optional[str]:
-            return
+            return None
             # if op.get_num_operands() == 0:
             #     return None
             # vals = ", ".join(self._get(op.get_operand(i)) for i in range(op.get_num_operands()))
@@ -985,7 +998,7 @@ class Raiser:
 
     # ---- emit a single op
     def _emit_op(self, op: mlir.operation):
-        name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
+        name = self._name(op)
         if name in ("module", "builtin.module", "tt.func", "func.func"):
             return
         if name.startswith(("scf.", "cf.")):
@@ -1083,8 +1096,7 @@ class Raiser:
         self.lines.append(f"def backward_{self.func_name}({', '.join(arg_names)}):")
 
         # Walk & emit only operations belonging to the kernel entry region
-        ops: List[mlir.operation] = []
-        self.m.walk(lambda o: ops.append(o))
+        ops = self._collect_ops()
         target_region_id = None
         if func:
             try:
@@ -1112,18 +1124,12 @@ class Raiser:
 
         body_started = False
         for op in ops:
-            if target_region_id is not None:
-                try:
-                    blk = op.get_block()
-                    parent_region = blk.get_parent()
-                    if parent_region.id() != target_region_id:
-                        continue
-                except Exception:
-                    pass
-            oname = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
-            if not body_started and any(oname.startswith(p) for p in ("arith.","math.","tt.","scf.","cf.","triton.")):
+            if not self._in_region(op, target_region_id):
+                continue
+            oname = self._name(op)
+            if not body_started and self._is_supported(oname):
                 body_started = True
-            if oname.startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
+            if self._is_supported(oname):
                 self._emit_op(op)
 
         # remove ad-hoc header cleanup and use the unified sweeper instead
@@ -1134,7 +1140,7 @@ class Raiser:
 
     # small helpers for inliner integration
     def _emit_rhs_with_get(self, op: mlir.operation, get_fn: Callable[[mlir.value], str]) -> Optional[str]:
-        name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
+        name = self._name(op)
         handler = self.registry.get(name)
         if handler is None:
             return None
@@ -1151,15 +1157,10 @@ class Raiser:
         # Keep _def available for cast-chain inspection and other helpers
         self._def.clear()
         for op in ops:
-            if target_region_id is not None:
-                try:
-                    blk = op.get_block(); parent_region = blk.get_parent()
-                    if parent_region.id() != target_region_id:
-                        continue
-                except Exception:
-                    continue
-            name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
-            if not name.startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
+            if not self._in_region(op, target_region_id):
+                continue
+            name = self._name(op)
+            if not self._is_supported(name):
                 continue
             for i in range(op.get_num_results()):
                 vid = int(op.get_result(i).id())
