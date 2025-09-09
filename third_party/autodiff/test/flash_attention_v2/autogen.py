@@ -99,9 +99,6 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     fwd_m_ptrs_6 = fwd_m_ptrs_5 + tl.cast(fwd_offs_m_2, tl.int64)
     bwd_m_i = tl.load(fwd_m_ptrs_6)
 
-    # local grads for fwd_m_i
-    bwd_m_i_7 = (1.0 / (fwd_l_i * 0.6931470036506653)) * bwd_m_i
-
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K,grad_V} ~~~~~~~~~~
     fwd_O_block_ptr_12 = grad_Out + fwd_qvk_offset_6
     fwd_O_block_ptr_13 = fwd_O_block_ptr_12 + tl.zeros((16, 16), dtype=tl.int64)
@@ -135,28 +132,27 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd_acc_16 = fwd_acc * bwd_acc_15
     bwd_acc_17 = fwd_unnamed_5 * bwd_acc_15
 
-    # local grads for fwd_acc
-    bwd_acc_18 = tl.reshape(bwd_acc_17, (16,))
-
     # local grads for fwd_acc_6
     bwd_acc_24 = (-1.0 * (fwd_acc_3 / (fwd_acc_4 * fwd_acc_4))) * bwd_element_ty
 
     # local grads for fwd_acc_4
     bwd_acc_27 = tl.expand_dims(tl.sum(bwd_acc_24, axis=1), axis=1)
     bwd_acc_28 = tl.reshape(bwd_acc_27, (16,))
-    bwd_acc_29 = bwd_acc_28 + bwd_m_i_7
-    bwd_acc_30 = bwd_acc_29 + bwd_acc_18
+
+    # local grads for fwd_m_i
+    bwd_acc_29 = bwd_acc_28 + ((1.0 / (fwd_l_i * 0.6931470036506653)) * bwd_m_i)
+
+    # local grads for fwd_acc
+    bwd_acc_30 = bwd_acc_29 + tl.reshape(bwd_acc_17, (16,))
 
     # local grads for fwd_alpha_1
     bwd_alpha_3 = (0.6931470036506653 * fwd_alpha_1) * bwd_acc_30
 
     # local grads for fwd_alpha
-    bwd_alpha_6 = bwd_alpha_3 * -1.0
-    bwd_m_i_8 = bwd_m_i + bwd_alpha_6
+    bwd_m_i_8 = bwd_m_i + (bwd_alpha_3 * -1.0)
 
     # local grads for fwd__sum_combine
-    bwd__sum_combine_1 = tl.expand_dims(bwd_acc_29, axis=1)
-    bwd_p_1 = bwd_p + bwd__sum_combine_1
+    bwd_p_1 = bwd_p + tl.expand_dims(bwd_acc_29, axis=1)
 
     # local grads for fwd_p
     bwd_p_5 = (0.6931470036506653 * fwd_p) * bwd_p_1
@@ -166,8 +162,7 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
 
     # local grads for fwd_qk_2
     bwd_qk_5 = tl.expand_dims(tl.sum(bwd_qk_2, axis=1), axis=1)
-    bwd_qk_6 = tl.reshape(bwd_qk_5, (16,))
-    bwd_m_i_9 = bwd_m_i_8 + bwd_qk_6
+    bwd_m_i_9 = bwd_m_i_8 + tl.reshape(bwd_qk_5, (16,))
 
     # local grads for fwd_m_ij_1
     bwd_m_ij_3 = 1.0
@@ -182,12 +177,13 @@ def _attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_qk, strid
     bwd__elementwise_max_10 = tl.where((fwd_qk == tl.expand_dims(fwd__elementwise_max, axis=1)), 1.0, 0.0) * tl.expand_dims(bwd_m_ij_11, axis=1)
 
     # local grads for fwd_m_ij_1
-    bwd_m_ij_12 = tl.where((fwd_unnamed_4 > fwd_m_ij), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
-    bwd_alpha_7 = bwd_alpha_3 + bwd_m_ij_12
+    bwd_alpha_7 = bwd_alpha_3 + (tl.where((fwd_unnamed_4 > fwd_m_ij), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9)
 
     # local grads for fwd_qk_1
     bwd_qk_7 = fwd_qk * bwd_p_5
     bwd_qk_8 = fwd_unnamed_2 * bwd_p_5
+
+    # local grads for fwd__elementwise_max
     bwd_qk_9 = bwd_qk_8 + bwd__elementwise_max_10
 
     # local grads for fwd_qk

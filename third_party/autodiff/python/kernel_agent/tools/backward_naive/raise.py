@@ -1048,13 +1048,8 @@ class Raiser:
             self.lines.append(f"    # TODO: raise structured control-flow: {name}")
             return
 
-        # Emit gradient grouping header if available (debounced on change)
-        self._maybe_emit_grad_header(op)
-        # Emit local per-handler header for non-cloned ops carrying a gradOfTag
-        has_tag = (self._int_attr(op, "raise.gradOfTag") is not None)
-        is_cloned = Attr.bool_attr(op, "isCloned", False)
-        if has_tag and not is_cloned:
-            self._maybe_emit_local_gradof(op)
+        # Note: headers are emitted only when we actually print a line for this op
+        # (see below), to avoid dangling comments when the op gets fully inlined.
 
         # Pre-bind results with friendly names (or minted as fallback)
         res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
@@ -1104,6 +1099,17 @@ class Raiser:
                     self._alias_of[existing] = rhs
                 self.env[rvid2] = rhs
                 return
+        # Emit headers right before we actually print a statement for this op
+        # (after inlining/alias-elision decisions), so they never dangle.
+        # The problem was basically because previously we were alwaus emmiting
+        # the fine gradiend comment even if we gonna inline / fold an op later
+        # (for which this comment was emmited)
+        self._maybe_emit_grad_header(op)
+        has_tag = (self._int_attr(op, "raise.gradOfTag") is not None)
+        is_cloned = Attr.bool_attr(op, "isCloned", False)
+        if has_tag and not is_cloned:
+            self._maybe_emit_local_gradof(op)
+
         if res_vars:
             lhs = ", ".join(res_vars) if len(res_vars) > 1 else res_vars[0]
             self.lines.append(f"    {lhs} = {rhs}")
@@ -1175,6 +1181,9 @@ class Raiser:
                 body_started = True
             if oname.startswith(("arith.","math.","tt.","scf.","cf.","triton.")):
                 self._emit_op(op)
+
+        # remove ad-hoc header cleanup and use the unified sweeper instead
+        self._sweep_orphan_headers()
         if not body_started:
             self.lines.append("    pass")
         return "\n".join(self.lines)
@@ -1219,6 +1228,49 @@ class Raiser:
                 except Exception:
                     pass
         return owner, uses
+
+    # the local header is decided before we actually append the statement, but there’s a corner
+    # case where the next printed thing is a different header (e.g., a coarse branch header) and
+    # no statement for that fine tag ever gets appended at that spot. That leaves a header line by itself
+    def _sweep_orphan_headers(self) -> None:
+        def is_coarse(s: str) -> bool:
+            return s.lstrip().startswith("# ~~~~~~~~~~ grad branch")
+        def is_local(s: str) -> bool:
+            return s.lstrip().startswith("# local grads for ")
+        n = len(self.lines)
+        out: List[str] = []
+        i = 0
+        while i < n:
+            s = self.lines[i]
+            if is_coarse(s):
+                j = i + 1
+                # allow local headers under a coarse header
+                while j < n and (self.lines[j].strip() == "" or is_local(self.lines[j])):
+                    j += 1
+                # drop only if no code before next coarse header/EOF
+                if j >= n or is_coarse(self.lines[j]):
+                    i += 1
+                    continue
+            elif is_local(s):
+                j = i + 1
+                while j < n and self.lines[j].strip() == "":
+                    j += 1
+                # drop truly orphan local header
+                if j >= n or is_coarse(self.lines[j]) or is_local(self.lines[j]):
+                    i += 1
+                    continue
+            out.append(s)
+            i += 1
+        # collapse blank runs
+        cleaned: List[str] = []
+        prev_blank = False
+        for s in out:
+            b = (s.strip() == "")
+            if b and prev_blank:
+                continue
+            cleaned.append(s)
+            prev_blank = b
+        self.lines = cleaned
 
 
 

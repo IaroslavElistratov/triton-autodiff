@@ -202,7 +202,7 @@ namespace triton {
       // keys in my grad map already belong to the re-written part of
       // the bwd graph so don't need map them though origToCloned
       auto accumulatedGrad = builder.create<arith::AddFOp>(existingGrad.getLoc(), existingGrad, grad);
-      // applyProvenance(accumulatedGrad);
+      applyProvenance(accumulatedGrad);
       markVisited(builder, visitedType::Inserted, accumulatedGrad);
 
       // don't need to pop the old value first -- the assignment automatically replaces the existing value
