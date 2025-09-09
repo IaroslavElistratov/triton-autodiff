@@ -143,6 +143,8 @@ namespace triton {
     // IOW: pointer‑only base‑ptr walk, seeding at sinks
     auto pair = labelFromPtr(builder, clonedPtrRebased);
     pass.currentGradArgIdx = pair.second;
+    // Keep Utils provenance in sync for constants created after this point
+    setCurrentGradProvenance(pass.currentGradOfTag, pass.currentGradArgIdx, /*gradIdxs=*/nullptr);
 
     auto atomicOp = pass.createGradOp<triton::AtomicRMWOp>(
         builder,

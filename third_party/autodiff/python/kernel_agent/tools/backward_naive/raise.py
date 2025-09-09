@@ -115,18 +115,22 @@ class GradLocalInliner:
                 return False
         except Exception:
             pass
+        # Fine‑grained provenance only:
+        # Intentionally restrict inlining to producers whose raise.gradOfTag
+        # (fine tag) matches the consumer’s tag. Earlier allowed a coarse
+        # fallback (same gradIdx/gradIdxs bucket) and special‑cased constants,
+        # which broadened the scope and sometimes folded across human‑meaningful
+        # grad branches. Now that the C++ pass tags helper ops (constants/splats)
+        # with raise.gradOfTag, we can and should rely solely on the fine tag:
+        #   - preserves clear "local grads for ..." grouping and stable headers;
+        #   - prevents accidental cross‑branch folding when multiple inputs share
+        #     a coarse bucket;
+        #   - keeps inlining deterministic and predictable (single‑use, pure,
+        #     non‑pointer, same region, same fine tag).
+        # If an op lacks a fine tag, we do not inline it here; the pass should
+        # stamp tags on such helpers where appropriate.
         ptag = self.read_tag_fn(prod)
-        if (ptag is not None) and (ptag == self._current_tag):
-            return True
-        # Fallback: same coarse grad group if available
-        try:
-            pgrp = self.group_label_fn(prod)
-        except Exception:
-            pgrp = None
-        if (pgrp is not None) and (self._current_group is not None) and (pgrp == self._current_group):
-            return True
-        # Last resort: allow single-use constants for readability
-        return self.op_name_fn(prod) == "arith.constant"
+        return (ptag is not None) and (ptag == self._current_tag)
 
     def get(self, v: mlir.value, fallback_get: Callable[[mlir.value], str]) -> str:
         vid = int(v.id())
@@ -1147,7 +1151,7 @@ class Raiser:
                 read_tag_fn=lambda o: self._int_attr(o, "raise.gradOfTag"),
                 group_label_fn=lambda o: self._group_label(o),
                 is_ptr_fn=_is_ptr_type,
-                dont_inline={"tt.load","tt.store","tt.dot","tt.atomic_rmw","tt.addptr","tt.expand_dims"},
+                dont_inline={"tt.load","tt.store","tt.dot","tt.atomic_rmw","tt.addptr"},
                 max_len=self.opts.max_line,
                 get_var_name_cb=lambda vid: self.env.get(vid),
                 lines_ref=self.lines,

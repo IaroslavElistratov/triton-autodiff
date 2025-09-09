@@ -93,6 +93,13 @@ namespace triton {
                                int64_t &nextId,
                                Operation *clonedFwd);
 
+  // Provenance tagging control (thread-local)
+  // Set the current provenance used by Utils helpers (e.g., createConstantTensor)
+  // to stamp raise.gradOfTag / raise.gradIdx / raise.gradIdxs on newly created ops.
+  void setCurrentGradProvenance(IntegerAttr gradOfTag,
+                                IntegerAttr gradIdx = nullptr,
+                                ArrayAttr   gradIdxs = nullptr);
+
 } // namespace triton
 } // namespace mlir
 

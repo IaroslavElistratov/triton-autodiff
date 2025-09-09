@@ -28,6 +28,26 @@
 namespace mlir {
 namespace triton {
 
+  // ---- Thread-local provenance for Utils helpers ----------------------------
+  static thread_local IntegerAttr gGradOfTag;
+  static thread_local IntegerAttr gGradIdx;
+  static thread_local ArrayAttr   gGradIdxs;
+
+  void setCurrentGradProvenance(IntegerAttr gradOfTag,
+                                IntegerAttr gradIdx,
+                                ArrayAttr   gradIdxs) {
+    gGradOfTag = gradOfTag;
+    gGradIdx   = gradIdx;
+    gGradIdxs  = gradIdxs;
+  }
+
+  static inline void applyProvenance(Operation *op) {
+    if (!op) return;
+    if (gGradOfTag) op->setAttr("raise.gradOfTag", gGradOfTag);
+    if (gGradIdx)   op->setAttr("raise.gradIdx",   gGradIdx);
+    if (gGradIdxs)  op->setAttr("raise.gradIdxs",  gGradIdxs);
+  }
+
   // Extract first NameLoc string from a Location, searching through CallSiteLoc/FusedLoc if needed.
   static std::optional<StringRef> firstNameInLoc(Location loc) {
     if (auto nl = dyn_cast<NameLoc>(loc))
@@ -182,6 +202,7 @@ namespace triton {
       // keys in my grad map already belong to the re-written part of
       // the bwd graph so don't need map them though origToCloned
       auto accumulatedGrad = builder.create<arith::AddFOp>(existingGrad.getLoc(), existingGrad, grad);
+      // applyProvenance(accumulatedGrad);
       markVisited(builder, visitedType::Inserted, accumulatedGrad);
 
       // don't need to pop the old value first -- the assignment automatically replaces the existing value
@@ -227,9 +248,11 @@ namespace triton {
         assert((scalarType.isF16() || scalarType.isF32()) && "Tensor element type must be float16 or float32");
 
         auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(scalarType, value));
+        applyProvenance(scalarValue);
 
         // Splat the scalar value into a tensor of the desired type
         auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+        applyProvenance(tensorValue);
 
         markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
         return tensorValue;
@@ -239,6 +262,7 @@ namespace triton {
         assert((scalarType.isF16() || scalarType.isF32()) && "Tensor element type must be float16 or float32");
 
         auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getFloatAttr(scalarType, value));
+        applyProvenance(scalarValue);
         markVisited(builder, visitedType::Inserted, scalarValue);
         return scalarValue;
 
@@ -259,8 +283,10 @@ namespace triton {
         Type elemType = tensorType.getElementType();
         assert(elemType.isInteger(1) && "Tensor element type must be an int with exactly 1 bit");
         auto scalarValue = builder.create<arith::ConstantOp>(loc, builder.getBoolAttr(value));
+        applyProvenance(scalarValue);
         // auto scalarValue = builder.create<arith::ConstantOp>(loc, getAttr(elemType, value ? 1 : 0));
         auto tensorValue = builder.create<triton::SplatOp>(loc, tensorType, scalarValue);
+        applyProvenance(tensorValue);
         markAllVisited(builder, visitedType::Inserted, scalarValue, tensorValue);
         return tensorValue;
       } else {
@@ -684,6 +710,7 @@ namespace triton {
               loc,
               currentResult,
               i); // Add dimension at position i
+          applyProvenance(expandOp);
           currentResult = expandOp->getResult(0);
           markVisited(builder, visitedType::Inserted, expandOp);
         }
@@ -693,7 +720,7 @@ namespace triton {
             loc,
             targetType,
             currentResult);
-
+        applyProvenance(broadcastOp);
         markVisited(builder, visitedType::Inserted, broadcastOp);
         return broadcastOp->getResult(0);
       }

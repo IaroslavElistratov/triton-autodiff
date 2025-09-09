@@ -198,6 +198,8 @@ namespace triton {
         clonedFwd->setAttr("raise.gradOfTag", builder->getI64IntegerAttr(tagId));
       currentGradOfTag = builder->getI64IntegerAttr(tagId);
       currentGradArgIdx = IntegerAttr();
+      // Sync utils' provenance for constants/splats created in handlers
+      setCurrentGradProvenance(currentGradOfTag, currentGradArgIdx, /*gradIdxs=*/nullptr);
 
       // print only if changed
       std::string initialIR;
@@ -264,6 +266,7 @@ namespace triton {
         currentGradOfTag = builder->getI64IntegerAttr(tagId);
       }
       currentGradArgIdx = IntegerAttr();
+      setCurrentGradProvenance(currentGradOfTag, currentGradArgIdx, /*gradIdxs=*/nullptr);
 
       // print only if changed
       std::string initialIR;
@@ -362,6 +365,7 @@ namespace triton {
         currentGradOfTag = builder->getI64IntegerAttr(tagId);
       }
       currentGradArgIdx = IntegerAttr();
+      setCurrentGradProvenance(currentGradOfTag, currentGradArgIdx, /*gradIdxs=*/nullptr);
 
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)){
         handleLoadBackward(loadOp, func, *this);
