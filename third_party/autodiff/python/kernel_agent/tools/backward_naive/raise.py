@@ -248,15 +248,15 @@ def _kw_items(*pairs):
 # ----------------------------- Attr helpers ----------------------------------
 
 def _text_attr(op, name: str) -> Optional[str]:
-    """Return textual attr value with quotes stripped, or None."""
+    """Return textual MLIR attr token or None (quotes stripped)."""
     try:
-        txt = op.get_attr_text(name)
-        if txt is None:
+        a = op.get_attr_text(name)
+        if a is None:
             return None
-        s = str(txt)
+        s = str(a).strip()
         if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-            return s[1:-1]
-        return s
+            s = s[1:-1]
+        return s or None
     except Exception:
         return None
 
@@ -264,36 +264,21 @@ def _text_attr(op, name: str) -> Optional[str]:
 class Attr:
     @staticmethod
     def int_attr(op, name, default=None):
-        try:
-            v = op.get_int_attr(name)
-            if v is not None:
-                return int(v)
-        except Exception:
-            pass
-        m = re.search(rf"\b{name}\s*=\s*(-?\d+)\b", op.str_nodebug())
-        return int(m.group(1)) if m else default
+        v = op.get_int_attr(name)
+        return int(v) if v is not None else default
 
     @staticmethod
     def bool_attr(op, name, default=False):
-        # Prefer textual attr; falls back to generic print
+        v = op.get_bool_attr(name)
+        if v is not None:
+            return bool(v)
         s = _text_attr(op, name)
-        if s is not None:
-            s = s.strip().lower()
-            if s in ("true", "false"):
-                return s == "true"
-        m = re.search(rf"\b{name}\s*=\s*(true|false)\b", op.str_nodebug())
-        return {"true": True, "false": False}.get(m.group(1), default) if m else default
+        return s.strip().lower() == "true" if isinstance(s, str) else default
 
     @staticmethod
     def list_int_attr(op, name):
-        try:
-            arr = op.get_i64_array_attr(name)
-            if arr is not None:
-                return [int(x) for x in arr]
-        except Exception:
-            pass
-        m = re.search(rf"\b{name}\s*=\s*\[([0-9,\s-]+)\]", op.str_nodebug())
-        return [int(x) for x in m.group(1).replace(" ", "").split(",")] if m else None
+        arr = op.get_i64_array_attr(name)
+        return [int(x) for x in arr] if arr is not None else None
 
     # Common shorthands
     axis        = staticmethod(lambda op, default=0: Attr.int_attr(op, "axis", default))
@@ -308,28 +293,18 @@ class Attr:
 
     @staticmethod
     def cache_modifier(op):
-        s = (_text_attr(op, "cache_modifier") or op.str_nodebug()).lower()
-        if ".ca" in s or " cache_modifier = ca" in s or "cache_modifier=ca" in s: return ".ca"
-        if ".cg" in s or " cache_modifier = cg" in s or "cache_modifier=cg" in s: return ".cg"
-        if ".cs" in s or " cache_modifier = cs" in s or "cache_modifier=cs" in s: return ".cs"
-        if ".wb" in s or " cache_modifier = wb" in s or "cache_modifier=wb" in s: return ".wb"
-        if ".wt" in s or " cache_modifier = wt" in s or "cache_modifier=wt" in s: return ".wt"
-        if ".cv" in s or " cache_modifier = cv" in s or "cache_modifier=cv" in s: return ".cv"
-        return ""
+        t = (_text_attr(op, "cache_modifier") or "").lower()
+        return {"ca":".ca","cg":".cg","cs":".cs","wb":".wb","wt":".wt","cv":".cv"}.get(t, "")
 
     @staticmethod
     def eviction_policy(op):
-        s = (_text_attr(op, "eviction_policy") or op.str_nodebug()).lower()
-        for k in ("evict_last", "evict_first"):
-            if k in s: return k
-        return ""
+        t = (_text_attr(op, "eviction_policy") or "").lower()
+        return t if t in {"evict_last","evict_first"} else ""
 
     @staticmethod
     def padding_option(op):
-        s = (_text_attr(op, "padding_option") or op.str_nodebug()).lower()
-        if "nan" in s:  return "nan"
-        if "zero" in s: return "zero"
-        return ""
+        t = (_text_attr(op, "padding_option") or "").lower()
+        return "nan" if t == "nan" else ("zero" if t == "zero" else "")
 
 # ----------------------------- Raiser ----------------------------------------
 
@@ -998,7 +973,7 @@ class Raiser:
 
     # ---- emit a single op
     def _emit_op(self, op: mlir.operation):
-        name = self._name(op)
+        name = op.mnemonic
         if name in ("module", "builtin.module", "tt.func", "func.func"):
             return
         if name.startswith(("scf.", "cf.")):
@@ -1140,7 +1115,7 @@ class Raiser:
 
     # small helpers for inliner integration
     def _emit_rhs_with_get(self, op: mlir.operation, get_fn: Callable[[mlir.value], str]) -> Optional[str]:
-        name = self._name(op)
+        name = op.mnemonic
         handler = self.registry.get(name)
         if handler is None:
             return None
@@ -1159,7 +1134,7 @@ class Raiser:
         for op in ops:
             if not self._in_region(op, target_region_id):
                 continue
-            name = self._name(op)
+            name = op.mnemonic
             if not self._is_supported(name):
                 continue
             for i in range(op.get_num_results()):
