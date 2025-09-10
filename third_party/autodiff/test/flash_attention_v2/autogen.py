@@ -42,7 +42,6 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_K_block_ptr = K + fwd_qvk_offset_6
     fwd_k_9 = _mk_block_ptr(fwd_K_block_ptr, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
     fwd_k_10 = tl.load(fwd_k_9)
-    fwd_unnamed_1 = tl.full((16, 16), 0.0, dtype=tl.float32)
     fwd_qk = tl.dot(fwd_q_14, fwd_k_10)
     fwd_unnamed_2 = tl.full((16, 16), 0.7213475108146667, dtype=tl.float32)
     fwd_qk_1 = fwd_qk * fwd_unnamed_2
@@ -160,7 +159,6 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     bwd__elementwise_max_10 = tl.where((fwd_qk == tl.expand_dims(fwd__elementwise_max, axis=1)), 1.0, 0.0) * tl.expand_dims(bwd_m_ij_11, axis=1)
 
     # local grads for fwd_m_ij_1
-    bwd_m_ij_12 = tl.where((fwd_unnamed_4 > fwd_m_ij), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
 
     # local grads for fwd_qk_1
     bwd_qk_8 = fwd_unnamed_2 * bwd_p_5

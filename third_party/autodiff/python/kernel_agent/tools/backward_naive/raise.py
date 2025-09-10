@@ -722,97 +722,6 @@ class Raiser:
     def _is_supported(name: str) -> bool:
         return name.startswith(DIALECTS)
 
-    def _has_side_effects(self, name: str) -> bool:
-        # Extend as needed if more ops have essential side effects
-        return name in {"tt.store", "tt.atomic_rmw"}
-
-    def _plan_dead_offset_dce(self, ops: List[mlir.operation], target_region_id) -> None:
-        """Plan DCE for offset trees of addptrs that will be rewritten.
-
-        Mark the entire offsets subtree (limited to ALLOWED helper ops) as dead when
-        a given tt.addptr will be lowered to tl.make_block_ptr/_mk_block_ptr or tl.advance.
-        We intentionally ignore original use counts because multiple addptrs often shared
-        the same helper temps; after rewrite these become unused. We also stop traversal
-        at tt.expand_dims sources to avoid killing live induction values.
-
-        - Problem it solves: after we rewrite `tt.addptr` into a compact block pointer (`tl.make_block_ptr`,
-          `_mk_block_ptr`, or `tl.advance`), the old offset-tree helpers (casts/expand_dims/splats/adds/muls)
-          become useless but were still getting printed.
-
-        - Core idea:
-            - Before emitting, we run a small planner (`_plan_dead_offset_dce`) that:
-                - Scans each `tt.addptr`.
-                - Asks the block‑ptr emitter if this `addptr` will be rewritten (pure check via `try_emit_make_block_ptr`/`try_emit_advance`).
-                - If yes, it marks the entire offsets subtree feeding that `addptr` as “dead” by collecting only trivial helper ops: `arith.addi/muli/ext{si,ui}/trunci`, `tt.broadcast/expand_dims/make_range/splat`.
-                - It stops at `tt.expand_dims` sources, so the live induction variables (like `off_m`, `off_n`) remain.
-                - It also marks the pointer‑grid `tt.splat(base)` as dead.
-            - During emission (`_emit_op`), we:
-                - Skip any single‑result op whose result id is in `_dead_vids`.
-                - Skip any pure op whose results are unused.
-                - If an atomic’s result is unused, we still emit the call but without an LHS.
-
-        - Why it works:
-            - We only kill helpers when we know the `addptr` will be replaced by a single compact expression that subsumes their work.
-            - We don’t rely on old use counts (shared helpers across multiple `addptr`s are fine).
-            - We don’t touch side‑effect ops and we don’t delete induction sources.
-
-        - Result:
-            - The generated code shows only the compact `_mk_block_ptr`/`tl.make_block_ptr`/`tl.advance` and no longer prints the dead expand_dims/cast/splat/add/mul temps that used to feed `tt.addptr`.
-        """
-        self._dead_vids = set()
-        ALLOWED = {
-            "arith.addi", "arith.muli", "arith.extsi", "arith.extui", "arith.trunci",
-            "tt.broadcast", "tt.expand_dims", "tt.make_range", "tt.splat",
-        }
-
-        def _collect_offsets_tree(root_v: mlir.value) -> None:
-            stack: List[mlir.value] = [root_v]
-            seen: set[int] = set()
-            while stack:
-                v = stack.pop()
-                vid = int(v.id())
-                if vid in seen:
-                    continue
-                seen.add(vid)
-                op = self._def.get(vid)
-                if op is None:
-                    continue
-                name = op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
-                if name not in ALLOWED:
-                    continue
-                self._dead_vids.add(vid)
-                # Stop before induction sources to keep them alive
-                if name == "tt.expand_dims":
-                    continue
-                for i in range(op.get_num_operands()):
-                    stack.append(op.get_operand(i))
-
-        for o in ops:
-            if not self._in_region(o, target_region_id):
-                continue
-            if o.mnemonic != "tt.addptr" or o.get_num_operands() != 2:
-                continue
-            # Only prune when this addptr will be rewritten to a compact block-ptr/advance
-            will_rewrite = False
-            try:
-                if getattr(self, "_bp", None) is not None:
-                    if self._bp.try_emit_make_block_ptr(o) is not None:
-                        will_rewrite = True
-                    elif self._bp.try_emit_advance(o) is not None:
-                        will_rewrite = True
-            except Exception:
-                will_rewrite = False
-            if not will_rewrite:
-                continue
-
-            # Kill the offsets tree feeding this addptr
-            _collect_offsets_tree(o.get_operand(1))
-            # Also drop the pointer-grid splat if present
-            pg = o.get_operand(0)
-            pgd = self._def.get(int(pg.id()))
-            if pgd is not None and getattr(pgd, "mnemonic", "") == "tt.splat":
-                self._dead_vids.add(int(pg.id()))
-
     def _collect_ops(self) -> List[mlir.operation]:
         ops: List[mlir.operation] = []
         self.m.walk(lambda o: ops.append(o))
@@ -1392,21 +1301,6 @@ class Raiser:
     # ---- emit a single op
     def _emit_op(self, op: mlir.operation):
         name = op.mnemonic
-        # prune ops we planned to kill (single-result only)
-        try:
-            if op.get_num_results() == 1 and int(op.get_result(0).id()) in getattr(self, "_dead_vids", set()):
-                return
-        except Exception:
-            pass
-
-        # drop pure ops whose results are never used
-        if op.get_num_results() > 0:
-            try:
-                all_unused = all(self._uses.get(int(op.get_result(i).id()), 0) == 0 for i in range(op.get_num_results()))
-            except Exception:
-                all_unused = False
-            if all_unused and not self._has_side_effects(name):
-                return
         if name in ("module", "builtin.module", "tt.func", "func.func"):
             return
         if name.startswith(("scf.", "cf.")):
@@ -1475,12 +1369,6 @@ class Raiser:
         if has_tag and not is_cloned:
             self._maybe_emit_local_gradof(op)
 
-        # If atomic's return value is unused, emit it as a statement (no LHS)
-        if name == "tt.atomic_rmw" and op.get_num_results() == 1:
-            if self._uses.get(int(op.get_result(0).id()), 0) == 0:
-                self.lines.append(f"    {rhs}")
-                return
-
         if res_vars:
             lhs = ", ".join(res_vars) if len(res_vars) > 1 else res_vars[0]
             self.lines.append(f"    {lhs} = {rhs}")
@@ -1546,11 +1434,6 @@ class Raiser:
                 lines_ref=self.lines,
             )
             self._inliner.prepare(owner, uses)
-            # Expose owner/uses for MLIR-based dead-temp pruning and emission decisions
-            self._owner = owner
-            self._uses = uses
-            # Plan and mark single-use offset trees and pointer-grid splats as dead
-            self._plan_dead_offset_dce(ops, target_region_id)
         else:
             self._inliner = None
 
@@ -1568,6 +1451,10 @@ class Raiser:
         self._sweep_orphan_headers()
         if not body_started:
             self.lines.append("    pass")
+        # Final pass: drop assigned-but-never-used temporaries and preserve atomics
+        # as side-effecting calls (by removing only the LHS). This keeps output concise
+        # without changing semantics.
+        self._strip_dead_temporaries()
         return "\n".join(self.lines)
 
     # small helpers for inliner integration
@@ -1652,6 +1539,48 @@ class Raiser:
 
 
 # ----------------------------- Convenience API -------------------------------
+
+    def _strip_dead_temporaries(self) -> None:
+        """Drop 'x = <expr>' when x is never used later; keep atomics as calls.
+        Operates purely on the emitted text to sweep trivial dead assigns at the end.
+        Only considers kernel-body lines (4-space indent). Comments/headers are kept verbatim.
+        """
+        assign_re = re.compile(r"^\s{4}([A-Za-z_]\w*)\s*=\s*(.+)$")
+        ident_re  = re.compile(r"\b[A-Za-z_]\w*\b")
+
+        used: set[str] = set()
+        out: list[str] = []
+
+        for line in reversed(self.lines):
+            # Only touch kernel body lines (4-space indent); keep others unchanged
+            if not line.startswith("    "):
+                out.append(line)
+                continue
+
+            m = assign_re.match(line)
+            if not m:
+                # propagate uses from non-assignment lines
+                used.update(ident_re.findall(line))
+                out.append(line)
+                continue
+
+            lhs, rhs = m.group(1), m.group(2).strip()
+
+            if lhs not in used:
+                # side-effecting atomics: keep the call, drop the assignment
+                if re.search(r"\btl\.atomic_[a-z]+", rhs):
+                    out.append("    " + rhs)
+                    used.update(ident_re.findall(rhs))
+                # pure dead temp: drop whole line
+                else:
+                    continue
+            else:
+                # keep assignment and propagate tokens
+                used.update(ident_re.findall(rhs))
+                used.add(lhs)
+                out.append(line)
+
+        self.lines = list(reversed(out))
 
 def raise_from_module(module: mlir.module, func_name: Optional[str] = None, *, options: Optional[RaiserOptions] = None) -> str:
     return Raiser(module, func_name, opts=options).raise_kernel()
