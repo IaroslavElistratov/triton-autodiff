@@ -492,15 +492,16 @@ class BlockPtrEmitter:
             )
             kind = "make"
         else:
-            # Fallback: compact explicit construction using per-element idx terms
-            m_idx_txt = self._raw_name(m_term["idx"])
+            # Fallback: inline pointer-grid construction (no helper call).
+            # Reason: Triton @jit forbids calling non-constexpr Python globals from kernels.
+            # Inlining avoids the NameError while keeping pointer scalar; we only broadcast offsets.
+            # Keep pointer scalar; materialize grid with zeros, then add broadcasted offsets.
+            m_idx_txt = self._raw_name(m_term["idx"]) 
             n_idx_txt = self._raw_name(n_term["idx"]) 
-            s = (
-                f"_mk_block_ptr({base_txt}, "
-                f"m_idx={m_idx_txt}, n_idx={n_idx_txt}, "
-                f"stride_m={stride_m_txt}, stride_n={stride_n_txt}, "
-                f"block_shape={_fmt_shape(block_shape)})"
-            )
+            grid = f"{base_txt} + tl.zeros({_fmt_shape(block_shape)}, dtype=tl.int64)"
+            offs_m = f"tl.expand_dims({m_idx_txt}, 1) * {stride_m_txt}"
+            offs_n = f"tl.expand_dims({n_idx_txt}, 0) * {stride_n_txt}"
+            s = f"{grid} + {offs_m} + {offs_n}"
 
         # Cache components for potential tl.advance or compact rebuild
         try:
@@ -548,15 +549,19 @@ class BlockPtrEmitter:
         # Prefer tl.advance when base is a simple identifier
         if info.get("kind") == "make" and re.fullmatch(r"[A-Za-z_]\w*", bp_name or ""):
             return f"tl.advance({bp_name}, ({dm}, {dn}))"
-        # Otherwise, rebuild compact pointer with updated indices
+        # Otherwise, rebuild compact pointer with updated indices (inline expression).
+        # Reason: same Triton restriction as above — avoid helper calls inside kernels;
+        # rebuild the grid inline to keep code valid and the pointer scalar.
         m_idx = f"({rg(info['m_idx'])} + {dm})"
         n_idx = f"({rg(info['n_idx'])} + {dn})"
-        return (
-            f"_mk_block_ptr({rg(info['base'])}, "
-            f"m_idx={m_idx}, n_idx={n_idx}, "
-            f"stride_m={rg(info['stride_m'])}, stride_n={rg(info['stride_n'])}, "
-            f"block_shape={_fmt_shape(info['block_shape'])})"
-        )
+        base_txt = rg(info['base'])
+        stride_m_txt = rg(info['stride_m'])
+        stride_n_txt = rg(info['stride_n'])
+        block_shape = _fmt_shape(info['block_shape'])
+        grid = f"{base_txt} + tl.zeros({block_shape}, dtype=tl.int64)"
+        offs_m = f"tl.expand_dims({m_idx}, 1) * {stride_m_txt}"
+        offs_n = f"tl.expand_dims({n_idx}, 0) * {stride_n_txt}"
+        return f"{grid} + {offs_m} + {offs_n}"
 
     def cleanup_offset_tree(self, ptr_grid_v, offs_v):
         """Best-effort DCE of single-use broadcast/mul/add feeding addptr.
@@ -575,6 +580,13 @@ class BlockPtrEmitter:
             add = self.r._def.get(int(offs_v.id()))
             if add is None or getattr(add, "mnemonic", "") != "arith.addi":
                 return
+            # Always remove the head add node: after peephole it's redundant.
+            # Reason: we fully replace the offsets tree with an inline grid expression;
+            # keeping this add would reference temps we intentionally pruned.
+            try:
+                remover(int(offs_v.id()))
+            except Exception:
+                pass
             vids = []
             for t in (add.get_operand(0), add.get_operand(1)):
                 top = self.r._def.get(int(t.id()))
@@ -1366,13 +1378,7 @@ class Raiser:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
         self.lines.append("")
-        # Helper to reconstruct block pointer grids in a compact, readable form.
-        # This keeps pointer values scalar while materializing the grid via
-        # zeros + expand_dims math so we never broadcast the pointer itself.
-        self.lines.append("def _mk_block_ptr(base, *, m_idx, n_idx, stride_m, stride_n, block_shape):")
-        self.lines.append("    grid = base + tl.zeros(block_shape, dtype=tl.int64)")
-        self.lines.append("    return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n")
-        self.lines.append("")
+        # Note: we inline pointer-grid construction at call sites, so no helper is needed.
         self.lines.append("# Legend:")
         self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
         self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: ops contributing to grad of kernel input X)") # groups of fine-grained nodes computing
