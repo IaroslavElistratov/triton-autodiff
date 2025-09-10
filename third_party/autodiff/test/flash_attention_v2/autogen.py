@@ -35,23 +35,13 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_offs_m = tl.arange(0, 16)
     fwd_q_1 = tl.cast(fwd_offs_m, tl.int64)
     fwd_q_2 = fwd_Q_block_ptr_1 + fwd_q_1
-    fwd_q_3 = tl.expand_dims(fwd_q_2, axis=1)
-    fwd_O_block_ptr_2 = tl.cast(stride_om, tl.int64)
-    fwd_q_4 = tl.expand_dims(fwd_q_1, axis=0)
-    fwd_O_block_ptr_6 = tl.cast(stride_on, tl.int64)
     fwd_O_block_ptr_11 = _mk_block_ptr(fwd_O_block_ptr, fwd_q_2, fwd_q_1, stride_om, stride_on, 16, 16)
     fwd_Q_block_ptr_2 = Q + fwd_qvk_offset_6
-    fwd_Q_block_ptr_3 = tl.cast(stride_qm, tl.int64)
-    fwd_Q_block_ptr_4 = tl.cast(stride_qk, tl.int64)
     fwd_q_13 = _mk_block_ptr(fwd_Q_block_ptr_2, fwd_q_2, fwd_q_1, stride_qm, stride_qk, 16, 16)
     fwd_q_14 = tl.load(fwd_q_13)
     fwd_K_block_ptr = K + fwd_qvk_offset_6
-    fwd_k_1 = tl.expand_dims(fwd_q_1, axis=1)
-    fwd_K_block_ptr_1 = tl.cast(stride_kk, tl.int64)
-    fwd_K_block_ptr_2 = tl.cast(stride_kn, tl.int64)
     fwd_k_9 = _mk_block_ptr(fwd_K_block_ptr, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
     fwd_k_10 = tl.load(fwd_k_9)
-    fwd_unnamed_1 = tl.full((16, 16), 0.0, dtype=tl.float32)
     fwd_qk = tl.dot(fwd_q_14, fwd_k_10)
     fwd_unnamed_2 = tl.full((16, 16), 0.7213475108146667, dtype=tl.float32)
     fwd_qk_1 = fwd_qk * fwd_unnamed_2
@@ -65,8 +55,6 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_p = tl.exp2(fwd_qk_4)
     fwd_p_1 = tl.cast(fwd_p, tl.float16)
     fwd_V_block_ptr = V + fwd_qvk_offset_6
-    fwd_V_block_ptr_1 = tl.cast(stride_vk, tl.int64)
-    fwd_V_block_ptr_2 = tl.cast(stride_vn, tl.int64)
     fwd_v_8 = _mk_block_ptr(fwd_V_block_ptr, fwd_q_1, fwd_q_1, stride_vk, stride_vn, 16, 16)
     fwd_v_9 = tl.load(fwd_v_8)
     fwd_alpha = fwd_unnamed_4 - fwd_m_ij_1
@@ -125,7 +113,6 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
 
     # local grads for fwd_acc_1
     bwd_acc_15 = tl.expand_dims(tl.sum(bwd_acc_3, axis=1), axis=1)
-    bwd_acc_16 = fwd_acc * bwd_acc_15
     bwd_acc_17 = fwd_unnamed_5 * bwd_acc_15
 
     # local grads for fwd_acc_6
@@ -166,17 +153,14 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     bwd_m_ij_9 = tl.where((fwd_m_ij >= fwd_unnamed_4), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
 
     # local grads for fwd_m_ij
-    bwd_m_ij_10 = fwd__elementwise_max * bwd_m_ij_9
     bwd_m_ij_11 = fwd_unnamed_3 * bwd_m_ij_9
 
     # local grads for fwd__elementwise_max
     bwd__elementwise_max_10 = tl.where((fwd_qk == tl.expand_dims(fwd__elementwise_max, axis=1)), 1.0, 0.0) * tl.expand_dims(bwd_m_ij_11, axis=1)
 
     # local grads for fwd_m_ij_1
-    bwd_alpha_7 = bwd_alpha_3 + (tl.where((fwd_unnamed_4 > fwd_m_ij), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9)
 
     # local grads for fwd_qk_1
-    bwd_qk_7 = fwd_qk * bwd_p_5
     bwd_qk_8 = fwd_unnamed_2 * bwd_p_5
 
     # local grads for fwd__elementwise_max
@@ -196,21 +180,21 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_q_16 = _mk_block_ptr(fwd_Q_block_ptr_5, fwd_q_2, fwd_q_1, stride_qm, stride_qk, 16, 16)
 
     # local grads for fwd_q_14
-    bwd_Q_block_ptr_1 = tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16))
+    tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
     fwd_K_block_ptr_3 = grad_K + fwd_qvk_offset_6
     fwd_k_12 = _mk_block_ptr(fwd_K_block_ptr_3, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
 
     # local grads for fwd_k_10
-    bwd_k = tl.atomic_add(fwd_k_12, tl.cast(bwd_qk_18, tl.float16))
+    tl.atomic_add(fwd_k_12, tl.cast(bwd_qk_18, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
     fwd_V_block_ptr_3 = grad_V + fwd_qvk_offset_6
     fwd_v_11 = _mk_block_ptr(fwd_V_block_ptr_3, fwd_q_1, fwd_q_1, stride_vk, stride_vn, 16, 16)
 
     # local grads for fwd_v_9
-    bwd_v = tl.atomic_add(fwd_v_11, tl.cast(bwd_acc_12, tl.float16))
+    tl.atomic_add(fwd_v_11, tl.cast(bwd_acc_12, tl.float16))
 
 
 # commenting manually

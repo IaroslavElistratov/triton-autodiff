@@ -1451,6 +1451,10 @@ class Raiser:
         self._sweep_orphan_headers()
         if not body_started:
             self.lines.append("    pass")
+        # Final pass: drop assigned-but-never-used temporaries and preserve atomics
+        # as side-effecting calls (by removing only the LHS). This keeps output concise
+        # without changing semantics.
+        self._strip_dead_temporaries()
         return "\n".join(self.lines)
 
     # small helpers for inliner integration
@@ -1535,6 +1539,48 @@ class Raiser:
 
 
 # ----------------------------- Convenience API -------------------------------
+
+    def _strip_dead_temporaries(self) -> None:
+        """Drop 'x = <expr>' when x is never used later; keep atomics as calls.
+        Operates purely on the emitted text to sweep trivial dead assigns at the end.
+        Only considers kernel-body lines (4-space indent). Comments/headers are kept verbatim.
+        """
+        assign_re = re.compile(r"^\s{4}([A-Za-z_]\w*)\s*=\s*(.+)$")
+        ident_re  = re.compile(r"\b[A-Za-z_]\w*\b")
+
+        used: set[str] = set()
+        out: list[str] = []
+
+        for line in reversed(self.lines):
+            # Only touch kernel body lines (4-space indent); keep others unchanged
+            if not line.startswith("    "):
+                out.append(line)
+                continue
+
+            m = assign_re.match(line)
+            if not m:
+                # propagate uses from non-assignment lines
+                used.update(ident_re.findall(line))
+                out.append(line)
+                continue
+
+            lhs, rhs = m.group(1), m.group(2).strip()
+
+            if lhs not in used:
+                # side-effecting atomics: keep the call, drop the assignment
+                if re.search(r"\btl\.atomic_[a-z]+", rhs):
+                    out.append("    " + rhs)
+                    used.update(ident_re.findall(rhs))
+                # pure dead temp: drop whole line
+                else:
+                    continue
+            else:
+                # keep assignment and propagate tokens
+                used.update(ident_re.findall(rhs))
+                used.add(lhs)
+                out.append(line)
+
+        self.lines = list(reversed(out))
 
 def raise_from_module(module: mlir.module, func_name: Optional[str] = None, *, options: Optional[RaiserOptions] = None) -> str:
     return Raiser(module, func_name, opts=options).raise_kernel()
