@@ -342,6 +342,11 @@ class Raiser:
         # actual minted Python names for those forward values so local headers can
         # show readable identifiers without re-deriving names here.
         self._fwd_tag_to_py: Dict[int, str] = self._build_tag_to_py_map()
+        # Cache of recognized block-pointers to enable tl.advance or rebuilds
+        # Key: SSA id (int) of the resulting pointer grid; Value: components dict
+        #   {kind: "make"|"mk", order: (m_axis,n_axis), block_shape: (M,N),
+        #    base, m_idx, n_idx, stride_m, stride_n}
+        self._bp: Dict[int, Dict[str, object]] = {}
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -844,9 +849,151 @@ class Raiser:
         R["tt.broadcast"] = lambda op: self._get(op.get_operand(0))
 
 
-        # --- tt.addptr: keep base scalar; rely on implicit broadcasting of offsets (cast to int64)
-        # Why: Widen pointers via offsets; Triton will broadcast values implicitly as needed.
+        # --- tt.addptr: prefer block-ptr reconstruction and tl.advance; fallback to base+offsets
+        def _is_ptr_grid_type(ty: mlir.type) -> bool:
+            s = str(ty)
+            return s.startswith("tensor<") and "!tt.ptr<" in s
+
+        def _ptr_grid_block_shape(ty: mlir.type):
+            return _shape_from_tensor_type_string(str(ty)) or []
+
+        def _parse_broadcast_term(v):
+            op0 = self._def.get(int(v.id()))
+            if op0 is None or op0.mnemonic != "tt.broadcast":
+                return None
+            mul = self._def.get(int(op0.get_operand(0).id()))
+            if mul is None or mul.mnemonic != "arith.muli":
+                return None
+            a0_v = mul.get_operand(0); a1_v = mul.get_operand(1)
+            a0 = self._def.get(int(a0_v.id())) if a0_v is not None else None
+            a1 = self._def.get(int(a1_v.id())) if a1_v is not None else None
+            # accept either operand order
+            if a0 is not None and a0.mnemonic == "tt.expand_dims" and a1 is not None and a1.mnemonic == "tt.splat":
+                ed = a0; spl = a1
+            elif a1 is not None and a1.mnemonic == "tt.expand_dims" and a0 is not None and a0.mnemonic == "tt.splat":
+                ed = a1; spl = a0
+            else:
+                return None
+            axis = Attr.axis(ed, 0)
+            idx = ed.get_operand(0)
+            stride = spl.get_operand(0)
+            return axis, idx, stride
+
+        def _try_emit_block_ptr(op):
+            if op.get_num_operands() != 2:
+                return None
+            ptr_grid_v = op.get_operand(0)
+            offs_v = op.get_operand(1)
+            if not _is_ptr_grid_type(ptr_grid_v.get_type()):
+                return None
+            spl = self._def.get(int(ptr_grid_v.id()))
+            if spl is None or spl.mnemonic != "tt.splat":
+                return None
+            base_ptr_v = spl.get_operand(0)
+            block_shape = _ptr_grid_block_shape(spl.get_result(0).get_type())
+            if len(block_shape) != 2:
+                return None
+            add = self._def.get(int(offs_v.id()))
+            if add is None or add.mnemonic != "arith.addi":
+                return None
+            A = _parse_broadcast_term(add.get_operand(0))
+            B = _parse_broadcast_term(add.get_operand(1))
+            if not A or not B or {A[0], B[0]} != {0, 1}:
+                return None
+            if A[0] == 1:
+                m_idx_v, stride_m_v = A[1], A[2]
+                n_idx_v, stride_n_v = B[1], B[2]
+                order = (1, 0)
+            else:
+                m_idx_v, stride_m_v = B[1], B[2]
+                n_idx_v, stride_n_v = A[1], A[2]
+                order = (0, 1)
+
+            # Optional hints for full matrix shape (from TTIR attrs if present)
+            shp_syms = _text_attr(op, "raise.shape_syms")
+            shp_ints = Attr.list_int_attr(op, "raise.shape")
+            shp_txt = None
+            if isinstance(shp_syms, str):
+                syms = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", shp_syms)
+                if len(syms) == 2:
+                    shp_txt = f"({syms[0]}, {syms[1]})"
+            if shp_txt is None and isinstance(shp_ints, list) and len(shp_ints) == 2:
+                shp_txt = f"({shp_ints[0]}, {shp_ints[1]})"
+
+            if shp_txt is not None:
+                s = (
+                    "tl.make_block_ptr("
+                    f"base={self._get(base_ptr_v)}, "
+                    f"shape={shp_txt}, "
+                    f"strides=({self._get(stride_m_v)}, {self._get(stride_n_v)}), "
+                    f"offsets=({self._get(m_idx_v)}, {self._get(n_idx_v)}), "
+                    f"block_shape={_fmt_shape(block_shape)}, order={order})"
+                )
+                kind = "make"
+            else:
+                s = (
+                    f"_mk_block_ptr({self._get(base_ptr_v)}, "
+                    f"m_idx={self._get(m_idx_v)}, n_idx={self._get(n_idx_v)}, "
+                    f"stride_m={self._get(stride_m_v)}, stride_n={self._get(stride_n_v)}, "
+                    f"block_shape={_fmt_shape(block_shape)})"
+                )
+                kind = "mk"
+
+            # Cache components for possible later tl.advance / rebuild
+            try:
+                out_vid = int(op.get_result(0).id())
+                self._bp[out_vid] = {
+                    "kind": kind, "order": order, "block_shape": tuple(block_shape),
+                    "base": base_ptr_v, "m_idx": m_idx_v, "n_idx": n_idx_v,
+                    "stride_m": stride_m_v, "stride_n": stride_n_v,
+                }
+            except Exception:
+                pass
+            return s
+
+        def _try_emit_advance(op):
+            if op.get_num_operands() != 2:
+                return None
+            base_v = op.get_operand(0)
+            try:
+                info = self._bp.get(int(base_v.id()))
+            except Exception:
+                info = None
+            if not info:
+                return None
+            add = self._def.get(int(op.get_operand(1).id()))
+            if add is None or add.mnemonic != "arith.addi":
+                return None
+            A = _parse_broadcast_term(add.get_operand(0))
+            B = _parse_broadcast_term(add.get_operand(1))
+            if not A or not B or {A[0], B[0]} != {0, 1}:
+                return None
+            if A[0] == 1:
+                dm_v, dn_v = A[1], B[1]
+            else:
+                dm_v, dn_v = B[1], A[1]
+            dm = self._get(dm_v); dn = self._get(dn_v)
+
+            bp_name = self._get(base_v)
+            if info.get("kind") == "make" and re.fullmatch(r"[A-Za-z_]\w*", bp_name or ""):
+                return f"tl.advance({bp_name}, ({dm}, {dn}))"
+
+            m_idx = f"({self._get(info['m_idx'])} + {dm})"
+            n_idx = f"({self._get(info['n_idx'])} + {dn})"
+            return (
+                f"_mk_block_ptr({self._get(info['base'])}, "
+                f"m_idx={m_idx}, n_idx={n_idx}, "
+                f"stride_m={self._get(info['stride_m'])}, stride_n={self._get(info['stride_n'])}, "
+                f"block_shape={_fmt_shape(info['block_shape'])})"
+            )
+
         def emit_addptr(op):
+            s = _try_emit_block_ptr(op)
+            if s is not None:
+                return s
+            s2 = _try_emit_advance(op)
+            if s2 is not None:
+                return s2
             base = self._get(op.get_operand(0))  # scalar ptr
             offs = []
             for i in range(1, op.get_num_operands()):
@@ -855,8 +1002,7 @@ class Raiser:
                 # Cast offset to int64 only if not already i64
                 if "i64" not in str(oi.get_type()):
                     s = f"tl.cast({s}, tl.int64)"
-                o = s
-                offs.append(o)
+                offs.append(s)
             return base if not offs else f"{base} + {' + '.join(offs)}"
         R["tt.addptr"] = emit_addptr
 
@@ -1052,6 +1198,11 @@ class Raiser:
     def raise_kernel(self) -> str:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
+        self.lines.append("")
+        # Helper to reconstruct block pointer grids in a compact, readable form
+        self.lines.append("def _mk_block_ptr(base, *, m_idx, n_idx, stride_m, stride_n, block_shape):")
+        self.lines.append("    grid = base + tl.zeros(block_shape, dtype=tl.int64)")
+        self.lines.append("    return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n")
         self.lines.append("")
         self.lines.append("# Legend:")
         self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
