@@ -216,7 +216,6 @@ def _fmt_shape(shp): return "(" + ", ".join(str(d) for d in shp) + ("," if len(s
 # We must not broadcast pointers (doing so loses pointer-ness and breaks tl.load/tl.store)
 def _is_ptr_type(ty) -> bool: return "ptr<" in str(ty)
 
-
 def _typed_zero(dst_ty: mlir.type) -> str:
     """Emit a neutral literal or zeros tensor matching the type."""
     t = str(dst_ty)
@@ -309,29 +308,35 @@ class Attr:
 
 # ---------------- BlockPtrEmitter: isolated tl.make_block_ptr recovery --------
 class BlockPtrEmitter:
-    """
-    Pure pattern-matcher for the canonical TTIR pointer-grid pattern:
+    """Pointer-grid recognizer and printer (isolated from the inliner).
 
-        addptr( splat(base_ptr),  broadcast( expand_dims(m_idx, axis=1) * splat(stride_m) )
-                                + broadcast( expand_dims(n_idx, axis=0) * splat(stride_n) ) )
+    Goals:
+    - Reconstruct a compact pointer grid from the canonical broadcast/mul/add tree.
+      Canonical TTIR shape we match (2-D tile):
+        addptr( splat(base_ptr),
+                broadcast( expand_dims(m_idx, axis=1) * splat(stride_m) )
+              + broadcast( expand_dims(n_idx, axis=0) * splat(stride_n) ) )
+      When possible, we also factor m_idx as (splat(start_m) + ext(make_range)) and
+      recognize n_idx as ext(make_range) to recover scalar start offsets.
+    - Prefer tl.make_block_ptr when we have explicit shape and scalar starts (shortest
+      code; enables tl.advance for subsequent steps).
+    - Fall back to a robust _mk_block_ptr when metadata is missing (keeps pointer
+      scalar and uses zeros+expand_dims math for the grid).
+    - Provide try_emit_advance for later steps and cleanup_offset_tree for pruning
+      redundant, single-use intermediates after successful emission.
 
-    When it can *also* factor `m_idx` as (splat(start_m) + ext(make_range))
-    and recognize `n_idx` as pure ext(make_range), it reconstructs a compact:
-
-        tl.make_block_ptr(base=..., shape=..., strides=(..., ...),
-                          offsets=(start_m, 0), block_shape=(BM, BN), order=(1,0))
-
-    If required hints for `shape` or scalar offsets are missing, it returns None
-    and the caller should fall back to the generic pointer + offsets printer.
-
-    Design constraints:
-      - No mutation of inliner state. Never calls Raiser._get while matching.
-      - Only consumes already-minted names from env or stable hints.
-      - No dead-code cleanup or use-count surgery. Emits one RHS string or None.
+    Design:
+    - Never call Raiser._get during reconstruction; only use bound env/hints via
+      _raw_name to avoid inliner effects.
+    - Keep a tiny cache keyed by SSA id to support tl.advance or a minimal rebuild.
     """
 
     def __init__(self, raiser: "Raiser"):
         self.r = raiser
+        # Cache recognized block-ptr components by SSA id of the produced pointer grid.
+        # Purpose: enable compact follow-up steps via tl.advance or a minimal rebuild
+        # without re-walking the whole offset tree, and without touching the inliner.
+        self._cache: Dict[int, Dict[str, object]] = {}
 
     # ---- local helpers (no inliner interaction) ----
     def _raw_name(self, v: mlir.value) -> str:
@@ -408,7 +413,7 @@ class BlockPtrEmitter:
 
         return {"axis": axis, "idx": idx_v, "stride": stride_v, "start": start_v, "range_like": range_like}
 
-    def _shape_hint_text(self, op: mlir.operation, fallback_block_shape: Tuple[int, int]) -> str:
+    def _shape_hint_text(self, op: mlir.operation) -> Optional[str]:
         # Prefer raiser-provided metadata if present (opt-in during lowering)
         shp_syms = _text_attr(op, "raise.shape_syms")
         if isinstance(shp_syms, str):
@@ -418,11 +423,19 @@ class BlockPtrEmitter:
         shp_ints = Attr.list_int_attr(op, "raise.shape")
         if isinstance(shp_ints, list) and len(shp_ints) == 2:
             return f"({shp_ints[0]}, {shp_ints[1]})"
-        # Conservative fallback: use the tile’s block shape. Keeps code valid and readable.
-        return _fmt_shape(list(fallback_block_shape))
+        # No shape metadata -> return None to allow fallback to _mk_block_ptr path.
+        return None
 
     # ---- main entry ----
     def try_emit_make_block_ptr(self, op: mlir.operation) -> Optional[str]:
+        """Attempt to emit a canonical block pointer construction.
+
+        - Emits tl.make_block_ptr when shape/starts are available (enables
+          later tl.advance; shortest code).
+        - Otherwise emits a compact _mk_block_ptr(...), robust to missing
+          metadata.
+        - Never calls Raiser._get, keeping inliner state stable.
+        """
         # Expect exactly two operands: pointer grid and offsets tensor
         if op.get_num_operands() != 2:
             return None
@@ -455,28 +468,141 @@ class BlockPtrEmitter:
         else:
             m_term, n_term = B, A
 
-        # Need a scalar start for m. For n, a missing start implies 0.
-        if m_term.get("start") is None:
-            return None
-        m_start_txt = self._raw_name(m_term["start"])
-        n_start_txt = self._raw_name(n_term["start"]) if n_term.get("start") is not None else "0"
-
         # Prefer uncluttered stride symbols: strip arith.extsi(i32->i64) if present.
         stride_m_txt = self._raw_name(self._strip_extsi(m_term["stride"]))
         stride_n_txt = self._raw_name(self._strip_extsi(n_term["stride"]))
 
         base_txt = self._raw_name(base_ptr_v)
-        shape_txt = self._shape_hint_text(op, tuple(block_shape))
+        shape_txt = self._shape_hint_text(op)
         order = (1, 0) if m_term["axis"] == 1 else (0, 1)
 
+        s = None
+        kind = "mk"
+        # Only emit tl.make_block_ptr when we have scalar starts and explicit shape
+        if (m_term.get("start") is not None) and (shape_txt is not None):
+            m_start_txt = self._raw_name(m_term["start"])
+            n_start_txt = self._raw_name(n_term["start"]) if n_term.get("start") is not None else "0"
+            s = (
+                "tl.make_block_ptr("
+                f"base={base_txt}, "
+                f"shape={shape_txt}, "
+                f"strides=({stride_m_txt}, {stride_n_txt}), "
+                f"offsets=({m_start_txt}, {n_start_txt}), "
+                f"block_shape={_fmt_shape(block_shape)}, order={order})"
+            )
+            kind = "make"
+        else:
+            # Fallback: compact explicit construction using per-element idx terms
+            m_idx_txt = self._raw_name(m_term["idx"])
+            n_idx_txt = self._raw_name(n_term["idx"]) 
+            s = (
+                f"_mk_block_ptr({base_txt}, "
+                f"m_idx={m_idx_txt}, n_idx={n_idx_txt}, "
+                f"stride_m={stride_m_txt}, stride_n={stride_n_txt}, "
+                f"block_shape={_fmt_shape(block_shape)})"
+            )
+
+        # Cache components for potential tl.advance or compact rebuild
+        try:
+            out_vid = int(op.get_result(0).id())
+            self._cache[out_vid] = {
+                "kind": kind, "order": order, "block_shape": tuple(block_shape),
+                "base": base_ptr_v, "m_idx": m_term["idx"], "n_idx": n_term["idx"],
+                "stride_m": m_term["stride"], "stride_n": n_term["stride"],
+            }
+        except Exception:
+            pass
+        return s
+
+    def try_emit_advance(self, op: mlir.operation) -> Optional[str]:
+        """Emit a compact pointer step when based on a prior block-ptr.
+
+        Prefers tl.advance(base, (dm, dn)) if base was built with tl.make_block_ptr
+        and has a simple name; otherwise rebuilds with _mk_block_ptr and updated
+        indices. Returns None when the pattern doesn't match a 2D grid step.
+        """
+        # Expect two operands: base block-ptr and offsets
+        if op.get_num_operands() != 2:
+            return None
+        base_v = op.get_operand(0)
+        try:
+            info = self._cache.get(int(base_v.id()))
+        except Exception:
+            info = None
+        if not info:
+            return None
+        add = self.r._def.get(int(op.get_operand(1).id()))
+        if add is None or add.mnemonic != "arith.addi":
+            return None
+        A = self._parse_broadcast_term(add.get_operand(0))
+        B = self._parse_broadcast_term(add.get_operand(1))
+        if not A or not B or {A["axis"], B["axis"]} != {0, 1}:
+            return None
+        if A["axis"] == 1:
+            dm_v, dn_v = A["idx"], B["idx"]
+        else:
+            dm_v, dn_v = B["idx"], A["idx"]
+        rg = self._raw_name
+        bp_name = rg(base_v)
+        dm = rg(dm_v); dn = rg(dn_v)
+        # Prefer tl.advance when base is a simple identifier
+        if info.get("kind") == "make" and re.fullmatch(r"[A-Za-z_]\w*", bp_name or ""):
+            return f"tl.advance({bp_name}, ({dm}, {dn}))"
+        # Otherwise, rebuild compact pointer with updated indices
+        m_idx = f"({rg(info['m_idx'])} + {dm})"
+        n_idx = f"({rg(info['n_idx'])} + {dn})"
         return (
-            "tl.make_block_ptr("
-            f"base={base_txt}, "
-            f"shape={shape_txt}, "
-            f"strides=({stride_m_txt}, {stride_n_txt}), "
-            f"offsets=({m_start_txt}, {n_start_txt}), "
-            f"block_shape={_fmt_shape(block_shape)}, order={order})"
+            f"_mk_block_ptr({rg(info['base'])}, "
+            f"m_idx={m_idx}, n_idx={n_idx}, "
+            f"stride_m={rg(info['stride_m'])}, stride_n={rg(info['stride_n'])}, "
+            f"block_shape={_fmt_shape(info['block_shape'])})"
         )
+
+    def cleanup_offset_tree(self, ptr_grid_v, offs_v):
+        """Best-effort DCE of single-use broadcast/mul/add feeding addptr.
+
+        Uses the inliner's recorded use counts to safely remove only temps that
+        are proven single-use. Never calls Raiser._get or mutates emitter state.
+        """
+        try:
+            inl = getattr(self.r, "_inliner", None)
+            if inl is None:
+                return
+            uses = getattr(inl, "_uses", {}) or {}
+            remover = getattr(inl, "_remove_emitted_assignment_for_vid", None)
+            if remover is None:
+                return
+            add = self.r._def.get(int(offs_v.id()))
+            if add is None or getattr(add, "mnemonic", "") != "arith.addi":
+                return
+            vids = []
+            for t in (add.get_operand(0), add.get_operand(1)):
+                top = self.r._def.get(int(t.id()))
+                if top is None:
+                    continue
+                if top.mnemonic == "tt.broadcast":
+                    if uses.get(int(t.id()), 0) <= 1:
+                        vids.append(int(t.id()))
+                    mul = self.r._def.get(int(top.get_operand(0).id()))
+                    if mul is not None and mul.mnemonic == "arith.muli" and uses.get(int(mul.get_result(0).id()), 0) <= 1:
+                        vids.append(int(mul.get_result(0).id()))
+                elif top.mnemonic == "arith.muli":
+                    if uses.get(int(t.id()), 0) <= 1:
+                        vids.append(int(t.id()))
+            spl = self.r._def.get(int(ptr_grid_v.id()))
+            if spl is not None and spl.mnemonic == "tt.splat" and uses.get(int(ptr_grid_v.id()), 0) <= 1:
+                vids.append(int(ptr_grid_v.id()))
+            for vid in vids:
+                remover(vid)
+        except Exception:
+            pass
+
+    def maybe_cleanup(self, op: mlir.operation) -> None:
+        """Wrapper to safely invoke cleanup after a successful emission."""
+        try:
+            self.cleanup_offset_tree(op.get_operand(0), op.get_operand(1))
+        except Exception:
+            pass
 
 
 # ----------------------------- Raiser ----------------------------------------
@@ -515,7 +641,7 @@ class Raiser:
         # actual minted Python names for those forward values so local headers can
         # show readable identifiers without re-deriving names here.
         self._fwd_tag_to_py: Dict[int, str] = self._build_tag_to_py_map()
-        # Isolated helper for tl.make_block_ptr recovery (does not touch inliner)
+        # Isolated helper for block‑ptr recovery/advance
         self._bp = BlockPtrEmitter(self)
 
     # ---- small utils
@@ -1022,9 +1148,19 @@ class Raiser:
         # Try to reconstruct tl.make_block_ptr for canonical pointer-grid patterns.
         # This logic is fully isolated inside BlockPtrEmitter and never touches inliner state.
         def emit_addptr(op):
+            # Delegate to the emitter. It decides between:
+            #  - tl.make_block_ptr(...): when explicit shape/starts exist
+            #  - _mk_block_ptr(...): robust fallback when metadata is missing
+            #  - tl.advance(...)/minimal rebuild for subsequent steps
             s = self._bp.try_emit_make_block_ptr(op)
             if s is not None:
+                self._bp.maybe_cleanup(op)
                 return s
+            s2 = self._bp.try_emit_advance(op)
+            if s2 is not None:
+                self._bp.maybe_cleanup(op)
+                return s2
+            # fallback: base + offsets
             base = self._get(op.get_operand(0))
             offs = []
             for i in range(1, op.get_num_operands()):
@@ -1229,6 +1365,13 @@ class Raiser:
     def raise_kernel(self) -> str:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
+        self.lines.append("")
+        # Helper to reconstruct block pointer grids in a compact, readable form.
+        # This keeps pointer values scalar while materializing the grid via
+        # zeros + expand_dims math so we never broadcast the pointer itself.
+        self.lines.append("def _mk_block_ptr(base, *, m_idx, n_idx, stride_m, stride_n, block_shape):")
+        self.lines.append("    grid = base + tl.zeros(block_shape, dtype=tl.int64)")
+        self.lines.append("    return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n")
         self.lines.append("")
         self.lines.append("# Legend:")
         self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
