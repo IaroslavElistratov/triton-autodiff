@@ -2,8 +2,13 @@ import torch
 import triton
 import triton.language as tl
 
-def _mk_block_ptr(base, *, m_idx, n_idx, stride_m, stride_n, block_shape):
-    grid = base + tl.zeros(block_shape, dtype=tl.int64)
+@triton.jit
+def _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, BM: tl.constexpr, BN: tl.constexpr):
+    # Device helper: rebuild a pointer grid without broadcasting the pointer itself.
+    # BM/BN are constexpr tile sizes. Casts strides to int64 to satisfy addptr rules.
+    stride_m = tl.cast(stride_m, tl.int64)
+    stride_n = tl.cast(stride_n, tl.int64)
+    grid = base + tl.zeros((BM, BN), dtype=tl.int64)
     return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n
 
 # Legend:
@@ -34,17 +39,17 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_O_block_ptr_2 = tl.cast(stride_om, tl.int64)
     fwd_q_4 = tl.expand_dims(fwd_q_1, axis=0)
     fwd_O_block_ptr_6 = tl.cast(stride_on, tl.int64)
-    fwd_O_block_ptr_11 = fwd_O_block_ptr + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_2, 1) * stride_om + tl.expand_dims(fwd_q_1, 0) * stride_on
+    fwd_O_block_ptr_11 = _mk_block_ptr(fwd_O_block_ptr, fwd_q_2, fwd_q_1, stride_om, stride_on, 16, 16)
     fwd_Q_block_ptr_2 = Q + fwd_qvk_offset_6
     fwd_Q_block_ptr_3 = tl.cast(stride_qm, tl.int64)
     fwd_Q_block_ptr_4 = tl.cast(stride_qk, tl.int64)
-    fwd_q_13 = fwd_Q_block_ptr_2 + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_2, 1) * stride_qm + tl.expand_dims(fwd_q_1, 0) * stride_qk
+    fwd_q_13 = _mk_block_ptr(fwd_Q_block_ptr_2, fwd_q_2, fwd_q_1, stride_qm, stride_qk, 16, 16)
     fwd_q_14 = tl.load(fwd_q_13)
     fwd_K_block_ptr = K + fwd_qvk_offset_6
     fwd_k_1 = tl.expand_dims(fwd_q_1, axis=1)
     fwd_K_block_ptr_1 = tl.cast(stride_kk, tl.int64)
     fwd_K_block_ptr_2 = tl.cast(stride_kn, tl.int64)
-    fwd_k_9 = fwd_K_block_ptr + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_1, 1) * stride_kk + tl.expand_dims(fwd_q_1, 0) * stride_kn
+    fwd_k_9 = _mk_block_ptr(fwd_K_block_ptr, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
     fwd_k_10 = tl.load(fwd_k_9)
     fwd_unnamed_1 = tl.full((16, 16), 0.0, dtype=tl.float32)
     fwd_qk = tl.dot(fwd_q_14, fwd_k_10)
@@ -62,7 +67,7 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_V_block_ptr = V + fwd_qvk_offset_6
     fwd_V_block_ptr_1 = tl.cast(stride_vk, tl.int64)
     fwd_V_block_ptr_2 = tl.cast(stride_vn, tl.int64)
-    fwd_v_8 = fwd_V_block_ptr + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_1, 1) * stride_vk + tl.expand_dims(fwd_q_1, 0) * stride_vn
+    fwd_v_8 = _mk_block_ptr(fwd_V_block_ptr, fwd_q_1, fwd_q_1, stride_vk, stride_vn, 16, 16)
     fwd_v_9 = tl.load(fwd_v_8)
     fwd_alpha = fwd_unnamed_4 - fwd_m_ij_1
     fwd_alpha_1 = tl.exp2(fwd_alpha)
@@ -93,7 +98,7 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K,grad_V} ~~~~~~~~~~
     fwd_O_block_ptr_12 = grad_Out + fwd_qvk_offset_6
-    fwd_O_block_ptr_14 = fwd_O_block_ptr_12 + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_2, 1) * stride_om + tl.expand_dims(fwd_q_1, 0) * stride_on
+    fwd_O_block_ptr_14 = _mk_block_ptr(fwd_O_block_ptr_12, fwd_q_2, fwd_q_1, stride_om, stride_on, 16, 16)
     bwd_O_block_ptr = tl.load(fwd_O_block_ptr_14)
 
     # local grads for fwd_element_ty
@@ -188,21 +193,21 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
     fwd_Q_block_ptr_5 = grad_Q + fwd_qvk_offset_6
-    fwd_q_16 = fwd_Q_block_ptr_5 + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_2, 1) * stride_qm + tl.expand_dims(fwd_q_1, 0) * stride_qk
+    fwd_q_16 = _mk_block_ptr(fwd_Q_block_ptr_5, fwd_q_2, fwd_q_1, stride_qm, stride_qk, 16, 16)
 
     # local grads for fwd_q_14
     bwd_Q_block_ptr_1 = tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
     fwd_K_block_ptr_3 = grad_K + fwd_qvk_offset_6
-    fwd_k_12 = fwd_K_block_ptr_3 + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_1, 1) * stride_kk + tl.expand_dims(fwd_q_1, 0) * stride_kn
+    fwd_k_12 = _mk_block_ptr(fwd_K_block_ptr_3, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
 
     # local grads for fwd_k_10
     bwd_k = tl.atomic_add(fwd_k_12, tl.cast(bwd_qk_18, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
     fwd_V_block_ptr_3 = grad_V + fwd_qvk_offset_6
-    fwd_v_11 = fwd_V_block_ptr_3 + tl.zeros((16, 16), dtype=tl.int64) + tl.expand_dims(fwd_q_1, 1) * stride_vk + tl.expand_dims(fwd_q_1, 0) * stride_vn
+    fwd_v_11 = _mk_block_ptr(fwd_V_block_ptr_3, fwd_q_1, fwd_q_1, stride_vk, stride_vn, 16, 16)
 
     # local grads for fwd_v_9
     bwd_v = tl.atomic_add(fwd_v_11, tl.cast(bwd_acc_12, tl.float16))
@@ -215,7 +220,6 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
 
 
 BLOCK_M = 16
-BLOCK_N = 16
 
 
 

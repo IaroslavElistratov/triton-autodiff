@@ -492,16 +492,17 @@ class BlockPtrEmitter:
             )
             kind = "make"
         else:
-            # Fallback: inline pointer-grid construction (no helper call).
-            # Reason: Triton @jit forbids calling non-constexpr Python globals from kernels.
-            # Inlining avoids the NameError while keeping pointer scalar; we only broadcast offsets.
-            # Keep pointer scalar; materialize grid with zeros, then add broadcasted offsets.
+            # Fallback: call a jitted helper with constexpr block dims.
+            # Reason: keeps code short, is legal device code, and centralizes the grid math.
+            # Context: we didn't have explicit shape/starts to call tl.make_block_ptr safely.
+            # The helper expects BM/BN as compile-time ints and internally casts strides to i64.
+            BM, BN = block_shape
             m_idx_txt = self._raw_name(m_term["idx"]) 
             n_idx_txt = self._raw_name(n_term["idx"]) 
-            grid = f"{base_txt} + tl.zeros({_fmt_shape(block_shape)}, dtype=tl.int64)"
-            offs_m = f"tl.expand_dims({m_idx_txt}, 1) * {stride_m_txt}"
-            offs_n = f"tl.expand_dims({n_idx_txt}, 0) * {stride_n_txt}"
-            s = f"{grid} + {offs_m} + {offs_n}"
+            s = (
+                f"_mk_block_ptr({base_txt}, {m_idx_txt}, {n_idx_txt}, "
+                f"{stride_m_txt}, {stride_n_txt}, {BM}, {BN})"
+            )
 
         # Cache components for potential tl.advance or compact rebuild
         try:
@@ -548,20 +549,21 @@ class BlockPtrEmitter:
         dm = rg(dm_v); dn = rg(dn_v)
         # Prefer tl.advance when base is a simple identifier
         if info.get("kind") == "make" and re.fullmatch(r"[A-Za-z_]\w*", bp_name or ""):
+            # Fast path: base was built via tl.make_block_ptr and has a simple name → tl.advance
+            # Safer and shorter than recomputing the grid; Triton will step the block pointer.
             return f"tl.advance({bp_name}, ({dm}, {dn}))"
-        # Otherwise, rebuild compact pointer with updated indices (inline expression).
-        # Reason: same Triton restriction as above — avoid helper calls inside kernels;
-        # rebuild the grid inline to keep code valid and the pointer scalar.
+        # Otherwise, rebuild via the jitted helper with updated indices.
+        # Reason: avoids inlining a large zeros+broadcast expression and stays legal device code.
         m_idx = f"({rg(info['m_idx'])} + {dm})"
         n_idx = f"({rg(info['n_idx'])} + {dn})"
         base_txt = rg(info['base'])
         stride_m_txt = rg(info['stride_m'])
         stride_n_txt = rg(info['stride_n'])
-        block_shape = _fmt_shape(info['block_shape'])
-        grid = f"{base_txt} + tl.zeros({block_shape}, dtype=tl.int64)"
-        offs_m = f"tl.expand_dims({m_idx}, 1) * {stride_m_txt}"
-        offs_n = f"tl.expand_dims({n_idx}, 0) * {stride_n_txt}"
-        return f"{grid} + {offs_m} + {offs_n}"
+        BM, BN = info["block_shape"]
+        return (
+            f"_mk_block_ptr({base_txt}, {m_idx}, {n_idx}, "
+            f"{stride_m_txt}, {stride_n_txt}, {BM}, {BN})"
+        )
 
     def cleanup_offset_tree(self, ptr_grid_v, offs_v):
         """Best-effort DCE of single-use broadcast/mul/add feeding addptr.
@@ -581,8 +583,8 @@ class BlockPtrEmitter:
             if add is None or getattr(add, "mnemonic", "") != "arith.addi":
                 return
             # Always remove the head add node: after peephole it's redundant.
-            # Reason: we fully replace the offsets tree with an inline grid expression;
-            # keeping this add would reference temps we intentionally pruned.
+            # Reason: we fully replace the offsets tree with a self-contained RHS (make/advance/helper);
+            # leaving this add would keep references to temps we intentionally pruned and cause NameError.
             try:
                 remover(int(offs_v.id()))
             except Exception:
@@ -1378,7 +1380,19 @@ class Raiser:
         self.lines.append("import triton")
         self.lines.append("import triton.language as tl")
         self.lines.append("")
-        # Note: we inline pointer-grid construction at call sites, so no helper is needed.
+        # Jitted helper for pointer-grid construction with constexpr tile sizes.
+        # Reason: allows short, readable calls from kernels without violating Triton's rule
+        # about non-constexpr globals. BM/BN are compile-time ints (tile shape), so calls
+        # like _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, 16, 16) are valid.
+        self.lines.append("@triton.jit")
+        self.lines.append("def _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, BM: tl.constexpr, BN: tl.constexpr):")
+        self.lines.append("    # Device helper: rebuild a pointer grid without broadcasting the pointer itself.")
+        self.lines.append("    # BM/BN are constexpr tile sizes. Casts strides to int64 to satisfy addptr rules.")
+        self.lines.append("    stride_m = tl.cast(stride_m, tl.int64)")
+        self.lines.append("    stride_n = tl.cast(stride_n, tl.int64)")
+        self.lines.append("    grid = base + tl.zeros((BM, BN), dtype=tl.int64)")
+        self.lines.append("    return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n")
+        self.lines.append("")
         self.lines.append("# Legend:")
         self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
         self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: ops contributing to grad of kernel input X)") # groups of fine-grained nodes computing
