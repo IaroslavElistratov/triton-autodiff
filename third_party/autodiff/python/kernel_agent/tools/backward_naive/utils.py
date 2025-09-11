@@ -1,5 +1,12 @@
 # utils.py
-# Naming helpers: use C++ binding ir.value_best_name(v) and ensure uniqueness.
+# Naming helpers for the raiser: derive clean stems from MLIR NameLocs.
+#
+# Design:
+# - Do NOT uniquify here. Codegen stamps meaningful NameLocs (assignment/op-centric
+#   stems). We sanitize into Python-safe identifiers, but final uniqueness/reuse
+#   is deferred to the raiser where liveness/context is available. This keeps a
+#   single authority for emitted Python identifiers and avoids unstable suffixes
+#   when TTIR transforms/cloning occur.
 
 from __future__ import annotations
 from typing import Dict, Optional, Set
@@ -29,33 +36,26 @@ def _sanitize_identifier(name: str) -> str:
     return name
 
 
-class _NamePool:
-    def __init__(self) -> None:
-        self.used: Set[str] = set()
+def _normalize_stem(name: Optional[str]) -> str:
+    """Pass-through stem normalization for NameLoc-derived names.
 
-    def claim(self, base: Optional[str]) -> str:
-        if not base:
-            base = "v"
-        base = _sanitize_identifier(base)
-        if base not in self.used:
-            self.used.add(base)
-            return base
-        i = 1
-        while True:
-            cand = f"{base}_{i}"
-            if cand not in self.used:
-                self.used.add(cand)
-                return cand
-            i += 1
+    Minimal by design: we do not strip counters or rewrite legacy patterns here.
+    The raiser has full liveness/context to decide uniqueness or reuse safely.
+    """
+    if not name:
+        return "v"
+    return str(name)
 
 
 def build_value_name_hints(module: mlir.module) -> Dict[int, str]:
     """
-    Walk the module and derive a stable, readable name for every Value
-    that has an associated (best) NameLoc, using ir.value_best_name(v).
-    Returns a mapping: value_id(int) -> unique variable name (str).
+    Walk the module and derive a stable, readable STEM for every Value that has
+    an associated (best) NameLoc, using ir.value_best_name(v).
+
+    Returns: Dict[value_id -> sanitized_stem]
+    - Not guaranteed unique. The raiser is the single authority for final
+      uniqueness/reuse (it has liveness and grouping info).
     """
-    pool = _NamePool()
     vid2name: Dict[int, str] = {}
 
     def on_op(op: mlir.operation):
@@ -63,7 +63,8 @@ def build_value_name_hints(module: mlir.module) -> Dict[int, str]:
         for i in range(op.get_num_results()):
             v = op.get_result(i)
             s = mlir.value_best_name(v)   # -> py.str or None (C++ binding)
-            nm = pool.claim(str(s) if s is not None else None)
+            stem = _normalize_stem(str(s) if s is not None else None)
+            nm = _sanitize_identifier(stem)
             vid2name[int(v.id())] = nm
 
     # Also name function arguments if present
@@ -71,7 +72,8 @@ def build_value_name_hints(module: mlir.module) -> Dict[int, str]:
         for i in range(func.get_num_args()):
             v = func.args(i)
             s = mlir.value_best_name(v)
-            nm = pool.claim(str(s) if s is not None else f"arg{i}")
+            stem = _normalize_stem(str(s) if s is not None else f"arg{i}")
+            nm = _sanitize_identifier(stem)
             vid2name[int(v.id())] = nm
 
     module.walk(on_op)

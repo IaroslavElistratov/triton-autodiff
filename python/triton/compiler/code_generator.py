@@ -298,8 +298,10 @@ class _AssignCtx:
         self.counter = -1
 
     def next(self) -> str:
+        # Stable stems for all RHS temporaries under a single assignment.
+        # Uniqueness (and optional reuse) will be handled later by the raiser.
         self.counter += 1
-        return self.base if self.counter == 0 else f"{self.base}_temp{self.counter}"
+        return self.base
 
 
 class CodeGenerator(ast.NodeVisitor):
@@ -318,8 +320,9 @@ class CodeGenerator(ast.NodeVisitor):
             self.builder = ir.builder(context)
             self.semantic = TritonSemantic(self.builder)
 
-        # Naming context for assignments. When present, we will assign
-        # deterministic stems to temporaries on the RHS, e.g., "x", "x_temp1", ...
+        # Naming context for assignments. When present, we assign stable stems
+        # to temporaries on the RHS (always the base, e.g., "x"). Final
+        # uniquing/reuse is deferred to the raiser.
         self._assign_ctx_stack = []
         self.name_loc_as_prefix = None
         self.file_name = file_name
@@ -457,8 +460,10 @@ class CodeGenerator(ast.NodeVisitor):
         elif _is_triton_value(val):
             handles = []
             val._flatten_ir(handles)
-            for handle in handles:
-                handle.set_loc(self.builder.create_name_loc(name, handle.get_loc()))
+            for idx, handle in enumerate(handles):
+                # Per-result disambiguation: append _r{idx} when a tuple flattens to multiple IR values
+                suffix = f"_r{idx}" if len(handles) > 1 else ""
+                handle.set_loc(self.builder.create_name_loc(name + suffix, handle.get_loc()))
 
     def set_value(self, name: str, value: Union[base_value, constexpr]) -> None:
         ''' This function:
@@ -1529,6 +1534,15 @@ class CodeGenerator(ast.NodeVisitor):
                 stem = node.attr                                # obj.attr
             elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
                 stem = node.targets[0].id                       # x = ...
+            # elif isinstance(node, ast.Call):
+            #     # Use callee short name for op-centric stems: tl.load -> load, tl.dot -> dot, etc.
+            #     try:
+            #         callee = ast.unparse(node.func)
+            #         callee = callee.split('.')[-1]
+            #         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", callee):
+            #             stem = callee
+            #     except Exception:
+            #         pass
 
         # 3) assignment context fallback
         if stem is None and self._assign_ctx_stack:
@@ -1552,17 +1566,6 @@ class CodeGenerator(ast.NodeVisitor):
         self.builder.set_loc(named_loc)
 
     def visit(self, node):
-
-        # Location.file and Location.name are the canonical factory helpers in the bindings. 
-        # The nested structure retains the file/line/col information, so IDE “jump-to-definition” and stack-trace printing still work. 
-
-        # todo: that import now requires mlir python package
-        # from mlir.ir import Location, StringAttr          # MLIR Python API
-        def _name_loc(ctx, var_name, file_name, line, col):
-            file_loc = Location.file(file_name, line, col, context=ctx)
-            return Location.name(StringAttr.get(var_name, context=ctx), file_loc)
-
-
         if node is None:
             return
         with warnings.catch_warnings():

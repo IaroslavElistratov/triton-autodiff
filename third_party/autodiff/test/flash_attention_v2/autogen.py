@@ -33,16 +33,16 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_Q_block_ptr = fwd_start_m * fwd_unnamed
     fwd_Q_block_ptr_1 = tl.cast(fwd_Q_block_ptr, tl.int64)
     fwd_offs_m = tl.arange(0, 16)
-    fwd_q_1 = tl.cast(fwd_offs_m, tl.int64)
-    fwd_q_2 = fwd_Q_block_ptr_1 + fwd_q_1
-    fwd_O_block_ptr_11 = _mk_block_ptr(fwd_O_block_ptr, fwd_q_2, fwd_q_1, stride_om, stride_on, 16, 16)
+    fwd_q = tl.cast(fwd_offs_m, tl.int64)
+    fwd_q_1 = fwd_Q_block_ptr_1 + fwd_q
+    fwd_to_4 = _mk_block_ptr(fwd_O_block_ptr, fwd_q_1, fwd_q, stride_om, stride_on, 16, 16)
     fwd_Q_block_ptr_2 = Q + fwd_qvk_offset_6
-    fwd_q_13 = _mk_block_ptr(fwd_Q_block_ptr_2, fwd_q_2, fwd_q_1, stride_qm, stride_qk, 16, 16)
-    fwd_q_14 = tl.load(fwd_q_13)
+    fwd_q_8 = _mk_block_ptr(fwd_Q_block_ptr_2, fwd_q_1, fwd_q, stride_qm, stride_qk, 16, 16)
+    fwd_q_9 = tl.load(fwd_q_8)
     fwd_K_block_ptr = K + fwd_qvk_offset_6
-    fwd_k_9 = _mk_block_ptr(fwd_K_block_ptr, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
-    fwd_k_10 = tl.load(fwd_k_9)
-    fwd_qk = tl.dot(fwd_q_14, fwd_k_10)
+    fwd_k_5 = _mk_block_ptr(fwd_K_block_ptr, fwd_q, fwd_q, stride_kk, stride_kn, 16, 16)
+    fwd_k_6 = tl.load(fwd_k_5)
+    fwd_qk = tl.dot(fwd_q_9, fwd_k_6)
     fwd_unnamed_2 = tl.full((16, 16), 0.7213475108146667, dtype=tl.float32)
     fwd_qk_1 = fwd_qk * fwd_unnamed_2
     fwd__elementwise_max = tl.max(fwd_qk, axis=1)
@@ -51,29 +51,29 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     fwd_unnamed_4 = tl.full((16,), float('-inf'), dtype=tl.float32)
     fwd_m_ij_1 = tl.maximum(fwd_m_ij, fwd_unnamed_4)
     fwd_qk_2 = tl.expand_dims(fwd_m_ij_1, axis=1)
-    fwd_qk_4 = fwd_qk_1 - fwd_qk_2
-    fwd_p = tl.exp2(fwd_qk_4)
+    fwd_qk_3 = fwd_qk_1 - fwd_qk_2
+    fwd_p = tl.exp2(fwd_qk_3)
     fwd_p_1 = tl.cast(fwd_p, tl.float16)
     fwd_V_block_ptr = V + fwd_qvk_offset_6
-    fwd_v_8 = _mk_block_ptr(fwd_V_block_ptr, fwd_q_1, fwd_q_1, stride_vk, stride_vn, 16, 16)
-    fwd_v_9 = tl.load(fwd_v_8)
+    fwd_v_4 = _mk_block_ptr(fwd_V_block_ptr, fwd_q, fwd_q, stride_vk, stride_vn, 16, 16)
+    fwd_v_5 = tl.load(fwd_v_4)
     fwd_alpha = fwd_unnamed_4 - fwd_m_ij_1
     fwd_alpha_1 = tl.exp2(fwd_alpha)
     fwd_acc = tl.expand_dims(fwd_alpha_1, axis=1)
     fwd_unnamed_5 = tl.full((16, 1), 0.0, dtype=tl.float32)
     fwd_acc_1 = fwd_acc * fwd_unnamed_5
-    fwd_acc_3 = tl.dot(fwd_p_1, fwd_v_9) + fwd_acc_1
+    fwd_acc_2 = tl.dot(fwd_p_1, fwd_v_5) + fwd_acc_1
     fwd__sum_combine = tl.sum(fwd_p, axis=1)
     fwd_l_i = fwd_alpha_1 + fwd__sum_combine
-    fwd_acc_4 = tl.expand_dims(fwd_l_i, axis=1)
-    fwd_acc_6 = fwd_acc_3 / fwd_acc_4
-    fwd_element_ty = tl.cast(fwd_acc_6, tl.float16)
-    tl.store(fwd_O_block_ptr_11, fwd_element_ty)
+    fwd_acc_3 = tl.expand_dims(fwd_l_i, axis=1)
+    fwd_acc_4 = fwd_acc_2 / fwd_acc_3
+    fwd_element_ty = tl.cast(fwd_acc_4, tl.float16)
+    tl.store(fwd_to_4, fwd_element_ty)
     fwd_m_ptrs = fwd_off_hz * fwd_unnamed
     fwd_m_ptrs_1 = M + tl.cast(fwd_m_ptrs, tl.int64)
     fwd_m_ptrs_2 = fwd_m_ptrs_1 + tl.zeros((16,), dtype=tl.int64)
-    fwd_offs_m_2 = fwd_Q_block_ptr + fwd_offs_m
-    fwd_m_ptrs_3 = fwd_m_ptrs_2 + tl.cast(fwd_offs_m_2, tl.int64)
+    fwd_offs_m_1 = fwd_Q_block_ptr + fwd_offs_m
+    fwd_m_ptrs_3 = fwd_m_ptrs_2 + tl.cast(fwd_offs_m_1, tl.int64)
     fwd_m_i = tl.log2(fwd_l_i)
     fwd_m_i_1 = fwd_m_ij_1 + fwd_m_i
     tl.store(fwd_m_ptrs_3, fwd_m_i_1)
@@ -81,121 +81,96 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
     fwd_m_ptrs_4 = grad_M + tl.cast(fwd_m_ptrs, tl.int64)
     fwd_m_ptrs_5 = fwd_m_ptrs_4 + tl.zeros((16,), dtype=tl.int64)
-    fwd_m_ptrs_6 = fwd_m_ptrs_5 + tl.cast(fwd_offs_m_2, tl.int64)
+    fwd_m_ptrs_6 = fwd_m_ptrs_5 + tl.cast(fwd_offs_m_1, tl.int64)
     bwd_m_i = tl.load(fwd_m_ptrs_6)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K,grad_V} ~~~~~~~~~~
-    fwd_O_block_ptr_12 = grad_Out + fwd_qvk_offset_6
-    fwd_O_block_ptr_14 = _mk_block_ptr(fwd_O_block_ptr_12, fwd_q_2, fwd_q_1, stride_om, stride_on, 16, 16)
-    bwd_O_block_ptr = tl.load(fwd_O_block_ptr_14)
+    fwd_O_block_ptr_3 = grad_Out + fwd_qvk_offset_6
+    fwd_to_6 = _mk_block_ptr(fwd_O_block_ptr_3, fwd_q_1, fwd_q, stride_om, stride_on, 16, 16)
+    bwd_to = tl.load(fwd_to_6)
 
     # local grads for fwd_element_ty
-    bwd_element_ty = tl.cast(bwd_O_block_ptr, tl.float32)
+    bwd_element_ty = tl.cast(bwd_to, tl.float32)
 
-    # local grads for fwd_acc_6
-    bwd_acc_3 = (1.0 / fwd_acc_4) * bwd_element_ty
-
-    # local grads for fwd_acc_3
+    # local grads for fwd_acc
+    bwd_acc_3 = (1.0 / fwd_acc_3) * bwd_element_ty
     bwd_acc_4 = tl.cast(bwd_acc_3, tl.float16)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
-    bwd_acc_8 = tl.dot(bwd_acc_4, tl.trans(fwd_v_9))
+    bwd_acc_8 = tl.dot(bwd_acc_4, tl.trans(fwd_v_5))
 
-    # local grads for fwd_p_1
+    # local grads for fwd_p
     bwd_p = tl.cast(bwd_acc_8, tl.float32)
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
-
-    # local grads for fwd_acc_3
     bwd_acc_12 = tl.dot(tl.trans(fwd_p_1), bwd_acc_4)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
 
-    # local grads for fwd_acc_1
-    bwd_acc_15 = tl.expand_dims(tl.sum(bwd_acc_3, axis=1), axis=1)
-    bwd_acc_17 = fwd_unnamed_5 * bwd_acc_15
-
-    # local grads for fwd_acc_6
-    bwd_acc_24 = (-1.0 * (fwd_acc_3 / (fwd_acc_4 * fwd_acc_4))) * bwd_element_ty
-
-    # local grads for fwd_acc_4
-    bwd_acc_27 = tl.expand_dims(tl.sum(bwd_acc_24, axis=1), axis=1)
-    bwd_acc_28 = tl.reshape(bwd_acc_27, (16,))
-
-    # local grads for fwd_m_i
-    bwd_acc_29 = bwd_acc_28 + ((1.0 / (fwd_l_i * 0.6931470036506653)) * bwd_m_i)
-
     # local grads for fwd_acc
-    bwd_acc_30 = bwd_acc_29 + tl.reshape(bwd_acc_17, (16,))
-
-    # local grads for fwd_alpha_1
-    bwd_alpha_3 = (0.6931470036506653 * fwd_alpha_1) * bwd_acc_30
+    bwd_acc_14 = tl.expand_dims(tl.sum(bwd_acc_3, axis=1), axis=1)
+    bwd_acc_16 = fwd_unnamed_5 * bwd_acc_14
+    bwd_acc_23 = (-1.0 * (fwd_acc_2 / (fwd_acc_3 * fwd_acc_3))) * bwd_element_ty
+    bwd_acc_25 = tl.expand_dims(tl.sum(bwd_acc_23, axis=1), axis=1)
+    bwd_acc_26 = tl.reshape(bwd_acc_25, (16,))
+    bwd_acc_27 = bwd_acc_26 + ((1.0 / (fwd_l_i * 0.6931470036506653)) * bwd_m_i)
+    bwd_acc_28 = bwd_acc_27 + tl.reshape(bwd_acc_16, (16,))
 
     # local grads for fwd_alpha
+    bwd_alpha_3 = (0.6931470036506653 * fwd_alpha_1) * bwd_acc_28
     bwd_m_i_8 = bwd_m_i + (bwd_alpha_3 * -1.0)
 
     # local grads for fwd__sum_combine
-    bwd_p_1 = bwd_p + tl.expand_dims(bwd_acc_29, axis=1)
+    bwd_p_1 = bwd_p + tl.expand_dims(bwd_acc_27, axis=1)
 
     # local grads for fwd_p
     bwd_p_5 = (0.6931470036506653 * fwd_p) * bwd_p_1
 
-    # local grads for fwd_qk_4
+    # local grads for fwd_qk
     bwd_qk_2 = bwd_p_5 * -1.0
-
-    # local grads for fwd_qk_2
-    bwd_qk_5 = tl.expand_dims(tl.sum(bwd_qk_2, axis=1), axis=1)
-    bwd_m_i_9 = bwd_m_i_8 + tl.reshape(bwd_qk_5, (16,))
-
-    # local grads for fwd_m_ij_1
-    bwd_m_ij_3 = 1.0
-    bwd_m_ij_5 = 0.0
-    bwd_m_ij_9 = tl.where((fwd_m_ij >= fwd_unnamed_4), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
+    bwd_qk_4 = tl.expand_dims(tl.sum(bwd_qk_2, axis=1), axis=1)
+    bwd_m_i_9 = bwd_m_i_8 + tl.reshape(bwd_qk_4, (16,))
 
     # local grads for fwd_m_ij
-    bwd_m_ij_11 = fwd_unnamed_3 * bwd_m_ij_9
+    bwd_m_ij_3 = 1.0
+    bwd_m_ij_5 = 0.0
+    bwd_m_ij_8 = tl.where((fwd_m_ij >= fwd_unnamed_4), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
+    bwd_m_ij_10 = fwd_unnamed_3 * bwd_m_ij_8
 
     # local grads for fwd__elementwise_max
-    bwd__elementwise_max_10 = tl.where((fwd_qk == tl.expand_dims(fwd__elementwise_max, axis=1)), 1.0, 0.0) * tl.expand_dims(bwd_m_ij_11, axis=1)
-
-    # local grads for fwd_m_ij_1
-
-    # local grads for fwd_qk_1
-    bwd_qk_8 = fwd_unnamed_2 * bwd_p_5
-
-    # local grads for fwd__elementwise_max
-    bwd_qk_9 = bwd_qk_8 + bwd__elementwise_max_10
+    bwd__elementwise_max_10 = tl.where((fwd_qk == tl.expand_dims(fwd__elementwise_max, axis=1)), 1.0, 0.0) * tl.expand_dims(bwd_m_ij_10, axis=1)
 
     # local grads for fwd_qk
-    bwd_qk_10 = tl.cast(bwd_qk_9, tl.float16)
+    bwd_qk_7 = fwd_unnamed_2 * bwd_p_5
+    bwd_qk_8 = bwd_qk_7 + bwd__elementwise_max_10
+    bwd_qk_9 = tl.cast(bwd_qk_8, tl.float16)
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
-    bwd_qk_14 = tl.dot(bwd_qk_10, tl.trans(fwd_k_10))
+    bwd_qk_13 = tl.dot(bwd_qk_9, tl.trans(fwd_k_6))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
-    bwd_qk_18 = tl.dot(tl.trans(fwd_q_14), bwd_qk_10)
+    bwd_qk_17 = tl.dot(tl.trans(fwd_q_9), bwd_qk_9)
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
     fwd_Q_block_ptr_5 = grad_Q + fwd_qvk_offset_6
-    fwd_q_16 = _mk_block_ptr(fwd_Q_block_ptr_5, fwd_q_2, fwd_q_1, stride_qm, stride_qk, 16, 16)
+    fwd_q_11 = _mk_block_ptr(fwd_Q_block_ptr_5, fwd_q_1, fwd_q, stride_qm, stride_qk, 16, 16)
 
-    # local grads for fwd_q_14
-    tl.atomic_add(fwd_q_16, tl.cast(bwd_qk_14, tl.float16))
+    # local grads for fwd_q
+    tl.atomic_add(fwd_q_11, tl.cast(bwd_qk_13, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
     fwd_K_block_ptr_3 = grad_K + fwd_qvk_offset_6
-    fwd_k_12 = _mk_block_ptr(fwd_K_block_ptr_3, fwd_q_1, fwd_q_1, stride_kk, stride_kn, 16, 16)
+    fwd_k_8 = _mk_block_ptr(fwd_K_block_ptr_3, fwd_q, fwd_q, stride_kk, stride_kn, 16, 16)
 
-    # local grads for fwd_k_10
-    tl.atomic_add(fwd_k_12, tl.cast(bwd_qk_18, tl.float16))
+    # local grads for fwd_k
+    tl.atomic_add(fwd_k_8, tl.cast(bwd_qk_17, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
     fwd_V_block_ptr_3 = grad_V + fwd_qvk_offset_6
-    fwd_v_11 = _mk_block_ptr(fwd_V_block_ptr_3, fwd_q_1, fwd_q_1, stride_vk, stride_vn, 16, 16)
+    fwd_v_7 = _mk_block_ptr(fwd_V_block_ptr_3, fwd_q, fwd_q, stride_vk, stride_vn, 16, 16)
 
-    # local grads for fwd_v_9
-    tl.atomic_add(fwd_v_11, tl.cast(bwd_acc_12, tl.float16))
-
+    # local grads for fwd_v
+    tl.atomic_add(fwd_v_7, tl.cast(bwd_acc_12, tl.float16))
 
 # commenting manually
 # N_CTX = 128

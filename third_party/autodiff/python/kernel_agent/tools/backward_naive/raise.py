@@ -13,6 +13,7 @@ import sys
 from triton._C.libtriton import ir as mlir
 
 from utils import build_value_name_hints
+from naming import NameAllocator, NameStyle
 
 # Dialects we emit and common opcode sets
 DIALECTS = ("arith.", "math.", "tt.", "scf.", "cf.", "triton.")
@@ -41,6 +42,8 @@ class RaiserOptions:
     collapse_single_use: bool = True
     # Maximum line length budget for inlined RHS strings
     max_line: int = 110
+    # Naming policy: "unique" (default) or "reuse" (reuse base name after last use)
+    name_style: str = "unique"
 
 
 # ----------------------------- Local inliner ----------------------------------
@@ -326,9 +329,10 @@ class BlockPtrEmitter:
       redundant, single-use intermediates after successful emission.
 
     Design:
-    - Never call Raiser._get during reconstruction; only use bound env/hints via
-      _raw_name to avoid inliner effects.
-    - Keep a tiny cache keyed by SSA id to support tl.advance or a minimal rebuild.
+    - Prefer compact, correct reconstruction without depending on inliner state.
+    - Use bound env/hints, and inline small index expressions when safe so we
+      don’t reference names that haven’t been assigned yet in the Python text.
+    - Keep a small cache keyed by SSA id to support tl.advance or a minimal rebuild.
     """
 
     def __init__(self, raiser: "Raiser"):
@@ -344,7 +348,28 @@ class BlockPtrEmitter:
         s = self.r.env.get(vid)
         if isinstance(s, str) and s:
             return s
-        return self.r._hints.get(vid, f"v{vid}")
+        # Bind on demand to guarantee a usable identifier rather than a hint-only stem.
+        try:
+            return self.r._get(v)
+        except Exception:
+            return self.r._hints.get(vid, f"v{vid}")
+
+    def _inline_or_name(self, v: mlir.value) -> str:
+        """Prefer a compact RHS expression for small index producers; fallback to name.
+
+        Minimal and safe: handles common index producers (casts, arange/make_range,
+        simple adds) to avoid referencing names that may not yet be defined. If the
+        producer is complex or unsupported, fall back to a bound/name hint.
+        """
+        try:
+            op = self.r._def.get(int(v.id()))
+            if op is not None and op.get_num_results() == 1:
+                txt = self.r._emit_rhs_with_get(op, lambda u: self.r._get(u))
+                if isinstance(txt, str) and txt and "\n" not in txt and "=" not in txt:
+                    return txt
+        except Exception:
+            pass
+        return self._raw_name(v)
 
     @staticmethod
     def _is_ptr_grid_type(ty: mlir.type) -> bool:
@@ -497,8 +522,8 @@ class BlockPtrEmitter:
             # Context: we didn't have explicit shape/starts to call tl.make_block_ptr safely.
             # The helper expects BM/BN as compile-time ints and internally casts strides to i64.
             BM, BN = block_shape
-            m_idx_txt = self._raw_name(m_term["idx"]) 
-            n_idx_txt = self._raw_name(n_term["idx"]) 
+            m_idx_txt = self._inline_or_name(m_term["idx"]) 
+            n_idx_txt = self._inline_or_name(n_term["idx"]) 
             s = (
                 f"_mk_block_ptr({base_txt}, {m_idx_txt}, {n_idx_txt}, "
                 f"{stride_m_txt}, {stride_n_txt}, {BM}, {BN})"
@@ -628,23 +653,38 @@ class Raiser:
         self.opts = opts or RaiserOptions()
         self.lines: List[str] = []
         self._n = 0
+        # Naming model:
+        # - utils provides clean, sanitized stems from NameLocs (no uniquing).
+        # - The raiser is the single authority for uniqueness/reuse, because only
+        #   here we have def-use/liveness and region context (esp. with backward ops).
+        # - This avoids noisy or unstable suffixes introduced too early in the flow.
         self._hints: Dict[int, str] = build_value_name_hints(self.m)
         self.env: Dict[int, str] = {}
+        # Pluggable allocator: ensures uniqueness (and optional reuse) at emission time.
+        # Why not in codegen: codegen lacks liveness/region context and backward inserts;
+        # uniquing there easily leads to noisy or unstable names. The raiser knows
+        # last-use and gradient grouping, so it can reuse or suffix only when lifetimes
+        # overlap (semantics-preserving).
+        self._namer = NameAllocator(
+            NameStyle.REUSE_AFTER_LAST_USE if getattr(self.opts, "name_style", "unique") == "reuse" else NameStyle.UNIQUE
+        )
+        # Remaining use counts per SSA value id (decremented on each _get) for reuse mode.
+        self._uses: Dict[int, int] = {}
         self.registry = self._build_registry()
-        # Alias map for elided value-only ops: alias name -> surviving name
-        # Why: After we drop explicit value broadcasts/splats, some forward temps
-        # (e.g., fwd_qk_3) become pure aliases and are not emitted at all. Downstream
-        # code and headers could still refer to these names. We record the mapping
-        # when we elide the alias so later we can resolve labels (and optionally
-        # normalize bwd_* names) to the surviving producer (e.g., fwd_qk).
-        self._alias_of: Dict[str, str] = {}
         # Def map for robust chain inspection (e.g., nested casts) without regex over text
         # Key: SSA id (int), Value: defining MLIR operation
         self._def: Dict[int, mlir.operation] = {}
         # Track current gradient group label to reduce noisy headers
         self._last_grad_of: Optional[str] = None
-        # Track finer-grained per-handler label to show local groups
-        self._last_local_grad_of: Optional[str] = None
+        # Track emitted fine-grained headers by tag id to ensure we print a header
+        # for the first actually-printed statement in each backward tag group.
+        # This avoids losing headers when earlier statements under the same tag are
+        # inlined or DCE'd later.
+        self._emitted_local_tags: set[int] = set()
+        # Also track the last printed local header label to avoid repeating the
+        # exact same "local grads for <label>" comment back-to-back across
+        # consecutive statements mapped to different tags but same label.
+        self._last_local_label: Optional[str] = None
         # Python argument names by kernel-arg index for grouping via raise.gradIdx
         # Inline note: previously headers came from raise.gradOf text and could show
         # stride_* due to provenance landing on stride args. We now prefer
@@ -673,36 +713,27 @@ class Raiser:
             return self.env[vid]
         if name is None:
             name = self._hints.get(vid, self._fresh("v"))
-        # Normalize names that reference elided forward aliases:
-        # If a bwd name mirrors a fwd alias we removed (e.g., bwd_acc_2 and we elided fwd_acc_2 -> fwd_acc),
-        # adopt the surviving base (bwd_acc) when it doesn't collide.
-        name = self._canonicalize_name(name)
-        self.env[vid] = name
-        return name
-
-    def _canonicalize_name(self, name: str) -> str:
-        # Name canonicalization for bwd_*:
-        # If a backward temp mirrors a forward alias we've removed (e.g., bwd_acc_2
-        # while fwd_acc_2 was elided to fwd_acc), adopt the surviving base (bwd_acc)
-        # when it doesn't collide. This keeps bwd_* names aligned with visible fwd_*.
-        if name.startswith("bwd_"):
-            tail = name[4:]
-            key = f"fwd_{tail}"
-            mapped = self._alias_of.get(key)
-            if isinstance(mapped, str):
-                # mapped may be either fwd_* or a bare base; derive bwd_* accordingly
-                base = mapped[4:] if mapped.startswith("fwd_") else mapped
-                candidate = f"bwd_{base}"
-                # Avoid collisions: only adopt if not already used
-                if candidate not in self.env.values():
-                    return candidate
-        return name
+        # Use clean stem from hints; final uniqueness/reuse is handled by the allocator.
+        base = name
+        py = self._namer.claim(base)
+        self.env[vid] = py
+        return py
 
     def _get(self, v: mlir.value, hint: str = "v") -> str:
         vid = self._vid(v)
         if vid not in self.env:
             self._bind(v, self._hints.get(vid, self._fresh(hint)))
-        return self.env[vid]
+        py = self.env[vid]
+        # Only in reuse mode: decrement and release at last use to allow safe base reuse.
+        # In unique mode, release is a no-op to avoid rebinding the same identifier.
+        if vid in self._uses:
+            try:
+                self._uses[vid] -= 1
+                if self._uses[vid] <= 0:
+                    self._namer.release(py)
+            except Exception:
+                pass
+        return py
 
     def _name(self, op: mlir.operation) -> str:
         return op.mnemonic if hasattr(op, "mnemonic") else op.get_name()
@@ -826,15 +857,37 @@ class Raiser:
     def _maybe_emit_local_gradof(self, op) -> None:
         if not self.opts.emit_grad_groups:
             return
-        # Emit finer-grained header based on raise.gradOfTag (stable id)
+        # Emit a fine-grained header exactly once per tag id (first printed stmt).
+        tag = self._int_attr(op, "raise.gradOfTag")
+        if tag is None:
+            return
+        tid = int(tag)
+        if tid in self._emitted_local_tags:
+            return
         py_lbl = self._resolve_local_label(op, None)
         if not py_lbl:
             return
-        if py_lbl != self._last_local_grad_of:
-            self._last_local_grad_of = py_lbl
-            if self.lines and not self.lines[-1].strip() == "":
-                self.lines.append("")
-            self.lines.append(f"    # local grads for {py_lbl}")
+        # Avoid emitting the same local header twice in a row (even if separated
+        # by blank lines). Find the most recent comment line and compare.
+        comment_line = f"    # local grads for {py_lbl}"
+        last_comment = None
+        for i in range(len(self.lines) - 1, -1, -1):
+            s = self.lines[i]
+            if s.strip() == "":
+                continue
+            if s.lstrip().startswith("#"):
+                last_comment = s
+            break
+        # Also suppress if the last printed local label equals this one.
+        if last_comment == comment_line or self._last_local_label == py_lbl:
+            # Same logical header was just printed previously → skip duplicate
+            self._emitted_local_tags.add(tid)
+            return
+        if self.lines and not self.lines[-1].strip() == "":
+            self.lines.append("")
+        self.lines.append(comment_line)
+        self._last_local_label = py_lbl
+        self._emitted_local_tags.add(tid)
 
     def _build_tag_to_py_map(self) -> Dict[int, str]:
         tag2name: Dict[int, str] = {}
@@ -844,23 +897,28 @@ class Raiser:
             tag = self._int_attr(o, "raise.gradOfTag")
             if tag is None:
                 continue
-            # Only consider cloned forward ops
-            if not Attr.bool_attr(o, "isCloned", False):
-                continue
-            # Deterministic selection: prefer first "fwd_" result name, else first available
-            first_fwd = None
-            first_any = None
+            # Deterministic label for this tag:
+            # - Prefer a result stem starting with "fwd_" (forward value names)
+            # - Else prefer any non-bwd stem (to avoid "bwd_*" in headers)
+            # - Else skip (we'll try another op with the same tag or fallback later)
+            best_fwd = None
+            any_non_bwd = None
             for i in range(o.get_num_results()):
                 nm = self._hints.get(self._vid(o.get_result(i)))
                 if isinstance(nm, str):
-                    if first_any is None:
-                        first_any = nm
-                    if first_fwd is None and nm.startswith("fwd_"):
-                        first_fwd = nm
-            chosen = first_fwd if first_fwd is not None else first_any
-            if chosen is None:
+                    if best_fwd is None and nm.startswith("fwd_"):
+                        best_fwd = nm
+                    if any_non_bwd is None and not nm.startswith("bwd_"):
+                        any_non_bwd = nm
+            cand = best_fwd if best_fwd is not None else any_non_bwd
+            if cand is None:
                 continue
-            tag2name[int(tag)] = chosen
+            tid = int(tag)
+            # Prefer to keep an existing fwd_* choice; only overwrite if upgrading
+            # from a non-fwd to a fwd stem.
+            prev = tag2name.get(tid)
+            if prev is None or (not prev.startswith("fwd_") and cand.startswith("fwd_")):
+                tag2name[tid] = cand
         return tag2name
 
     def _resolve_local_label(self, op, fallback: str) -> str:
@@ -870,11 +928,6 @@ class Raiser:
         name = self._fwd_tag_to_py.get(int(tag), fallback)
         if not isinstance(name, str):
             return fallback
-        # Follow alias chain to a surviving identifier if this tag pointed to an elided alias
-        seen = set()
-        while name in self._alias_of and name not in seen:
-            seen.add(name)
-            name = self._alias_of[name]
         return name
 
     # ---- registry
@@ -1310,10 +1363,13 @@ class Raiser:
         # Note: headers are emitted only when we actually print a line for this op
         # (see below), to avoid dangling comments when the op gets fully inlined.
 
-        # Pre-bind results with friendly names (or minted as fallback)
-        res_vars = [self._bind(op.get_result(i)) for i in range(op.get_num_results())]
+        # Bind results AFTER computing RHS to maximize reuse opportunities (previous
+        # operands may release at last use). This also prevents binding names for results
+        # that end up fully inlined by the local inliner.
+        # Delay binding of result names until after RHS emission to maximize base-name reuse
+        res_count = op.get_num_results()
         # Track defining op for robust post-inspection (cast chain, etc.)
-        for i in range(op.get_num_results()):
+        for i in range(res_count):
             self._def[int(op.get_result(i).id())] = op
         emit = self.registry.get(name)
         if emit is None:
@@ -1325,7 +1381,9 @@ class Raiser:
                 self.lines.append(f"    # TODO: raise {name}")
             return
 
-        # Optional tag-local inlining: if enabled, set up consumer context and inline eligible operands
+        # Optional tag-local inlining: if enabled, set up consumer context and inline
+        # eligible operands. The inliner folds only pure, single-use values. It never
+        # folds loads/stores/dots/atomics/addptr/expand_dims or pointers.
         if getattr(self, "_inliner", None) is not None:
             # Skip this op entirely if its single result was fully inlined elsewhere
             if self._inliner.should_skip(op):
@@ -1343,32 +1401,25 @@ class Raiser:
             rhs = emit(op)
         if rhs is None:
             return
-        # Elide alias-only assignments produced by value broadcast/splat removal
-        # Example: "v2 = v1" where v2 came from tt.broadcast/tt.splat after elision
+        # Elide alias-only assignments produced by value broadcast/splat removal.
+        # Example: "v2 = v1" where v2 came from tt.broadcast/tt.splat – bind SSA id to rhs name.
         if op.get_num_results() == 1 and name in ("tt.broadcast", "tt.splat"):
             rvid2 = int(op.get_result(0).id())
             if re.fullmatch(r"[A-Za-z_]\w*", rhs or ""):
-                # Alias-elision: This op is a value-only alias (broadcast/splat) we decided
-                # not to materialize. Bind its SSA result directly to the surviving rhs name,
-                # and record alias->survivor for later label/name normalization.
-                # Example: fwd_qk_3 (alias) -> fwd_qk (survivor). We'll later print
-                #   "# local grads for fwd_qk" instead of a dangling fwd_qk_3.
-                existing = self.env.get(rvid2)
-                if isinstance(existing, str) and existing != rhs:
-                    self._alias_of[existing] = rhs
                 self.env[rvid2] = rhs
                 return
         # Emit headers right before we actually print a statement for this op
         # (after inlining/alias-elision decisions), so they never dangle.
-        # The problem was basically because previously we were alwaus emmiting
-        # the fine gradiend comment even if we gonna inline / fold an op later
-        # (for which this comment was emmited)
+        # This avoids emitting fine-grained comments for ops that get inlined away.
         self._maybe_emit_grad_header(op)
+        # Emit fine-grained headers only for backward ops (not cloned forward ones)
         has_tag = (self._int_attr(op, "raise.gradOfTag") is not None)
         is_cloned = Attr.bool_attr(op, "isCloned", False)
         if has_tag and not is_cloned:
             self._maybe_emit_local_gradof(op)
 
+        # Bind result names now, after operand uses may have released prior owners
+        res_vars = [self._bind(op.get_result(i)) for i in range(res_count)]
         if res_vars:
             lhs = ", ".join(res_vars) if len(res_vars) > 1 else res_vars[0]
             self.lines.append(f"    {lhs} = {rhs}")
@@ -1418,9 +1469,24 @@ class Raiser:
                 target_region_id = func.get_region(0).id()
             except Exception:
                 target_region_id = None
+        # Precompute liveness/use counts for safe name reuse
+        self._uses = {}
+        for op in ops:
+            if not self._in_region(op, target_region_id):
+                continue
+            if not self._is_supported(op.mnemonic):
+                continue
+            for j in range(op.get_num_operands()):
+                try:
+                    vid = int(op.get_operand(j).id())
+                    self._uses[vid] = self._uses.get(vid, 0) + 1
+                except Exception:
+                    pass
         # Prepare defs/uses for optional inlining
         if self.opts.collapse_single_use:
             owner, uses = self._compute_owner_and_uses(ops, target_region_id)
+            # Prefer the same uses for inliner and reuse to keep consistent
+            self._uses = dict(uses)
             self._inliner = GradLocalInliner(
                 registry=self.registry,
                 emit_rhs_cb=lambda o, get_fn: self._emit_rhs_with_get(o, get_fn),
@@ -1447,14 +1513,11 @@ class Raiser:
             if self._is_supported(oname):
                 self._emit_op(op)
 
-        # remove ad-hoc header cleanup and use the unified sweeper instead
-        self._sweep_orphan_headers()
         if not body_started:
             self.lines.append("    pass")
-        # Final pass: drop assigned-but-never-used temporaries and preserve atomics
-        # as side-effecting calls (by removing only the LHS). This keeps output concise
-        # without changing semantics.
+        # Final pass: drop assigned-but-never-used temporaries and then sweep orphan headers.
         self._strip_dead_temporaries()
+        self._sweep_orphan_headers()
         return "\n".join(self.lines)
 
     # small helpers for inliner integration
