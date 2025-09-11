@@ -438,6 +438,55 @@ class BlockPtrEmitter:
 
         return {"axis": axis, "idx": idx_v, "stride": stride_v, "start": start_v, "range_like": range_like}
 
+    # ---- root stem discovery for pointer bases ----
+    def _is_ptr(self, ty: mlir.type) -> bool:
+        """Shallow pointer check used by _root_stem to follow the pointer-bearing side.
+
+        Note: we intentionally do not parse types structurally here; a textual
+        check is sufficient and robust for Triton pointer types in TTIR.
+        """
+        return "!tt.ptr<" in str(ty)
+
+    def _root_stem(self, v: mlir.value) -> str:
+        """Recover a human stem from the original base pointer for grids.
+
+        Algorithm (structure-driven, no regex on names):
+        - Start from the value that feeds the grid (usually the base of a splat).
+        - Walk backwards through ops that preserve the pointer identity:
+          tt.advance, tt.splat, tt.broadcast, bitcast/extend/trunc, and
+          pointer+offset adds (choose the pointer-bearing operand).
+        - Stop at the first non-pointer-preserving op or when we detect a cycle.
+        - Use the raiser-provided stem (hints) of that root pointer as the base.
+
+        Rationale: this avoids brittle suffix chopping and works regardless of
+        kernel-specific naming. The allocator will still ensure uniqueness.
+        """
+        seen = set()
+        cur = v
+        while True:
+            vid = int(cur.id())
+            if vid in seen:
+                break
+            seen.add(vid)
+            op = self.r._def.get(vid)
+            if op is None:
+                break
+            m = getattr(op, "mnemonic", op.get_name())
+            try:
+                if m in ("tt.advance", "tt.splat", "tt.broadcast", "arith.bitcast", "arith.extsi", "arith.extui", "arith.trunci") and op.get_num_operands() >= 1:
+                    cur = op.get_operand(0)
+                    continue
+                if m in ("arith.addi", "arith.addf") and op.get_num_operands() == 2:
+                    a, b = op.get_operand(0), op.get_operand(1)
+                    if self._is_ptr(a.get_type()) and not self._is_ptr(b.get_type()):
+                        cur = a; continue
+                    if self._is_ptr(b.get_type()) and not self._is_ptr(a.get_type()):
+                        cur = b; continue
+            except Exception:
+                pass
+            break
+        return self.r._hints.get(int(cur.id()), f"v{int(cur.id())}")
+
     def _shape_hint_text(self, op: mlir.operation) -> Optional[str]:
         # Prefer raiser-provided metadata if present (opt-in during lowering)
         shp_syms = _text_attr(op, "raise.shape_syms")
@@ -532,6 +581,15 @@ class BlockPtrEmitter:
         # Cache components for potential tl.advance or compact rebuild
         try:
             out_vid = int(op.get_result(0).id())
+            # Hint the result stem to a canonical role name derived from the root pointer.
+            # We normalize to avoid accidental duplication of "_ptr" or "_block_ptr".
+            # This stays a hint only; the allocator enforces uniqueness/reuse.
+            try:
+                root = self._root_stem(base_ptr_v)
+                root_norm = re.sub(r"(_block_ptr|_ptr)$", "", root or "")
+                self.r._hints[out_vid] = f"{root_norm}_block_ptr"
+            except Exception:
+                pass
             self._cache[out_vid] = {
                 "kind": kind, "order": order, "block_shape": tuple(block_shape),
                 "base": base_ptr_v, "m_idx": m_term["idx"], "n_idx": n_term["idx"],
@@ -574,8 +632,14 @@ class BlockPtrEmitter:
         dm = rg(dm_v); dn = rg(dn_v)
         # Prefer tl.advance when base is a simple identifier
         if info.get("kind") == "make" and re.fullmatch(r"[A-Za-z_]\w*", bp_name or ""):
-            # Fast path: base was built via tl.make_block_ptr and has a simple name → tl.advance
-            # Safer and shorter than recomputing the grid; Triton will step the block pointer.
+            # Keep the same human name across advances: if base has a simple identifier,
+            # set the produced result's hint to that base name so the allocator binds it
+            # consistently. This improves readability of successive tl.advance steps.
+            try:
+                out_vid = int(op.get_result(0).id())
+                self.r._hints[out_vid] = bp_name
+            except Exception:
+                pass
             return f"tl.advance({bp_name}, ({dm}, {dn}))"
         # Otherwise, rebuild via the jitted helper with updated indices.
         # Reason: avoids inlining a large zeros+broadcast expression and stays legal device code.

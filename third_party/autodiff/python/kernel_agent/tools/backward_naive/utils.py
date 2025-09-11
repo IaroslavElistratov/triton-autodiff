@@ -57,13 +57,24 @@ def build_value_name_hints(module: mlir.module) -> Dict[int, str]:
       uniqueness/reuse (it has liveness and grouping info).
     """
     vid2name: Dict[int, str] = {}
+    # Prefer semantic/attr-based stems when available (set earlier in the flow),
+    # but avoid importing helpers that may not exist here. The raiser will still
+    # enforce uniqueness/reuse.
+    composer = None
 
     def on_op(op: mlir.operation):
         # Results
         for i in range(op.get_num_results()):
             v = op.get_result(i)
-            s = mlir.value_best_name(v)   # -> py.str or None (C++ binding)
-            stem = _normalize_stem(str(s) if s is not None else None)
+            pref = None
+            # No external composer available here; rely on MLIR best name or
+            # any stems injected upstream (e.g., via attributes).
+            pref = None
+            if isinstance(pref, str) and pref:
+                stem = pref
+            else:
+                s = mlir.value_best_name(v)   # -> py.str or None (C++ binding)
+                stem = _normalize_stem(str(s) if s is not None else None)
             nm = _sanitize_identifier(stem)
             vid2name[int(v.id())] = nm
 
