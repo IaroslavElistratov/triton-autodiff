@@ -947,8 +947,8 @@ class Raiser:
             # Same logical header was just printed previously → skip duplicate
             self._emitted_local_tags.add(tid)
             return
-        if self.lines and not self.lines[-1].strip() == "":
-            self.lines.append("")
+        # Avoid inserting a blank line before the fine-grained local header to
+        # prevent empty lines between successive fine-grained comments.
         self.lines.append(comment_line)
         self._last_local_label = py_lbl
         self._emitted_local_tags.add(tid)
@@ -1025,7 +1025,8 @@ class Raiser:
                     return "True" if x else "False"
                 return str(int(x))
 
-            return (f"tl.full({tuple(shp)}, {_lit(v)}, dtype={dty})" if shp else _lit(v))
+            # Emit a scalar literal and rely on Triton/Python broadcasting for shaped constants.
+            return _lit(v)
         R["arith.constant"] = emit_constant
 
         # --- binary arithmetic
