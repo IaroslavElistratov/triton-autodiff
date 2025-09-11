@@ -344,7 +344,8 @@ namespace triton {
     Operation *clonedOp = builder.clone(*targetOp, mapper);
 
     // add prefix to the name
-    NameLoc prefixedLoc = createNodeName(clonedOp, "fwd_");
+    // NameLoc prefixedLoc = createNodeName(clonedOp, "fwd_");
+    NameLoc prefixedLoc = createNodeName(clonedOp, "");
     clonedOp->setLoc(prefixedLoc);
 
     markVisited(builder, visitedType::Cloned, clonedOp);
