@@ -74,6 +74,7 @@ def run_mlir_pass(path):
     with open(out_path, "w") as f_out:
         try:
             subprocess.run(
+                # [tool, "--convert-triton-to-autodiff", "--canonicalize", "--sccp", "--cse", "--symbol-dce", "--mlir-print-debuginfo", inp_path],
                 [tool, "--convert-triton-to-autodiff", "--mlir-print-debuginfo", inp_path],
                 stdout=f_out,
                 stderr=subprocess.DEVNULL,  # suppress verbose compiler diagnostics

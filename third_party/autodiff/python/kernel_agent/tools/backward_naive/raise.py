@@ -1507,7 +1507,7 @@ class Raiser:
         self.lines.append("    stride_m = tl.cast(stride_m, tl.int64)")
         self.lines.append("    stride_n = tl.cast(stride_n, tl.int64)")
         self.lines.append("    grid = base + tl.zeros((BM, BN), dtype=tl.int64)")
-        self.lines.append("    return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n")
+        self.lines.append("    return grid + m_idx[:, None] * stride_m + n_idx[None, :] * stride_n")
         self.lines.append("")
         self.lines.append("# Legend:")
         self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")

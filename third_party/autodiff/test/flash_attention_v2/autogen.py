@@ -9,7 +9,7 @@ def _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, BM: tl.constexpr, BN: 
     stride_m = tl.cast(stride_m, tl.int64)
     stride_n = tl.cast(stride_n, tl.int64)
     grid = base + tl.zeros((BM, BN), dtype=tl.int64)
-    return grid + tl.expand_dims(m_idx, 1) * stride_m + tl.expand_dims(n_idx, 0) * stride_n
+    return grid + m_idx[:, None] * stride_m + n_idx[None, :] * stride_n
 
 # Legend:
 #    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)
