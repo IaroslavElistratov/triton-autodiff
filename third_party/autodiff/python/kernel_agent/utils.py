@@ -51,6 +51,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
       If provided, do not re-run the MLIR pass; reuse that file instead.
     """
 
+    # answer-now: there's no err handling here -- that's why it fails!
     def exec_module(src: str) -> dict[str, Any]:
         import types, sys  # local to avoid polluting module scope
         module_name = "__kernel_agent_user__"

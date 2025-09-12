@@ -7,7 +7,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
-from .tools.gradcheck.core import check_op_backward_parity_sweep
+from .tools.gradcheck.core import check_op_backward_parity, check_op_backward_parity_sweep
 from .tools.benchmark import bench_op, reduce_bench
 from .strategy import make_strategy, GLOBAL_GUARDRAILS
 
@@ -237,6 +237,7 @@ class KernelOptimizer:
             raise RuntimeError("User kernel must define make_args and SWEEP")
         if not torch_fn:
             raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
+
         # compute shapes for all dims upfront for logging/breadcrumbs
         # shapes = [(inp.shape for inp in make_args(i)[0]) for i in sweep]
         shapes = []
@@ -252,7 +253,6 @@ class KernelOptimizer:
             print(f"[kernel-agent] Initial backward path: {bwd_fp}")
 
 
-        # best_metrics: dict[str, float] | None = None
         device = get_user_device_info()
         best_path = bwd_fp
         # Initialize plateau tracking to avoid unbound locals on early returns
@@ -264,6 +264,20 @@ class KernelOptimizer:
         for it in range(self.cfg.max_iters):
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Begin iteration")
+
+            # only first shape on it==0, then all shapes;
+            # running parity and bench across all entries after attempt 0 makes "loops re‑introduced"
+            # observable and blocks phase advance until the same kernel passes on every shape;
+            # the raised naive backward is unrolled and shape‑specialized; it will fail on varied
+            # shapes until loops are restored
+            #
+            # failed patch apply on attempt 0 "continue"s to attempt 1 and triggers full-SWEEP anyway,
+            # the model will see the failures with dims included in the stats and fix accordingly
+            # todo-high: add phase-specific header even when gradcheck / benchmark fails (together with FIX_HEADER) ?
+            sidecar = ns
+            if it == 0:
+                sidecar = dict(ns)
+                sidecar["SWEEP"] = ns["SWEEP"][:1]
 
             # 1) correctness gate
             if it > 0:
@@ -277,8 +291,6 @@ class KernelOptimizer:
 
             # breadcrumb for LLM continuity
             self.patcher.remember("iteration", f"it={it}, bwd_file={bwd_fp}, shapes={shapes}")
-
-            # compare grads: reference torch implementation vs my fused op
 
             # gradient_check uses autograd, its expectations are: my_op(*inputs) -> true outputs,
             # those outputs must be on a graph back to inputs. The stub satisfies this after @autodiff
@@ -295,8 +307,7 @@ class KernelOptimizer:
                 ok, stats = check_op_backward_parity_sweep(
                     ref_fwd=torch_fn,
                     my_op=op,
-                    make_args=make_args,
-                    sweep=sweep,
+                    sidecar=sidecar,
                     outputs="auto",
                     # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
                     # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
@@ -345,7 +356,7 @@ class KernelOptimizer:
                 # benchmark across the full SWEEP to align with parity gating
                 bench_records = bench_op(
                     op,              # autograd-backed op from create_op(...)
-                    ns,         # sidecar providing SWEEP and make_args
+                    sidecar,         # sidecar providing SWEEP and make_args
                     mode="bwd",
                 )
             except Exception as e:

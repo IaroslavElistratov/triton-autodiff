@@ -152,8 +152,7 @@ def check_op_backward_parity_sweep(
     ref_fwd: Callable[..., MaybeTensors],
     my_op:   Callable[..., MaybeTensors],
     *,
-    make_args: Callable[[Dict[str, Any]], Tuple[Sequence[Tensor], Dict[str, Any]]],
-    sweep: Sequence[Dict[str, Any]],
+    sidecar: Dict[str, Any],
     outputs: OutputSel = "auto",
     upstream: Optional[Sequence[Tensor]] = None,
     compare_dtype: torch.dtype = torch.float32,
@@ -163,6 +162,10 @@ def check_op_backward_parity_sweep(
     only_floating_inputs: bool = True,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Run backward parity once per dims in SWEEP and aggregate results."""
+
+    make_args = sidecar["make_args"]
+    sweep = sidecar["SWEEP"]
+
     grad_pass: list[Dict[str, Any]] = []
     grad_fail: list[Dict[str, Any]] = []
     ok_all = True
