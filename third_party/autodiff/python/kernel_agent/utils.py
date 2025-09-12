@@ -1,5 +1,6 @@
 import os
 import queue
+import traceback
 import threading
 from typing import Any
 from triton.runtime.jit import JITFunction
@@ -51,7 +52,6 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
       If provided, do not re-run the MLIR pass; reuse that file instead.
     """
 
-    # answer-now: there's no err handling here -- that's why it fails!
     def exec_module(src: str) -> dict[str, Any]:
         import types, sys  # local to avoid polluting module scope
         module_name = "__kernel_agent_user__"
@@ -69,8 +69,24 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     with open(file_path, "r", encoding="utf-8") as f:
         src = f.read()
 
-    # todo: use "importlib.import_module(file_path)" below?
-    ns = exec_module(src)
+    try:
+        # sometimes even this step failed, e.g. when model messed up
+        # indentation of python kernel function declaration
+        ns = exec_module(src)
+    except BaseException as e:
+        # surface structured error upwards; let the orchestrator decide how to recover
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        msg = str(e)
+        err = {
+            "phase": "setup_run",
+            "error_type": type(e).__name__,
+            "error_message": msg,
+            "fwd_file": file_path,
+            "traceback": tb,
+            "context_snippet": _read_snippet(file_path, 200),
+        }
+        raise CompileError(err) from e
+
 
     # accept a Triton JITFunction decorated with autodiff-wrapped helper class
     from ._autodiff_api import StubOverrideDCK as StubDCK
@@ -118,8 +134,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     try:
         run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
     except BaseException as e:
-        # Surface structured error upwards; let the orchestrator decide how to recover.
-        import traceback
+        # surface structured error upwards; let the orchestrator decide how to recover
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         msg = str(e)
         err = {
