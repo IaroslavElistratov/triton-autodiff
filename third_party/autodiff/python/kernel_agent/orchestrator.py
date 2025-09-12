@@ -295,7 +295,7 @@ class KernelOptimizer:
             #
             # failed patch apply on attempt 0 "continue"s to attempt 1 and triggers full-SWEEP anyway,
             # the model will see the failures with dims included in the stats and fix accordingly
-            # todo-high: add phase-specific header even when gradcheck / benchmark fails (together with FIX_HEADER) ?
+
             sidecar = ns
             if it == 0:
                 sidecar = dict(ns)
@@ -350,7 +350,9 @@ class KernelOptimizer:
                 self.patcher.remember("gradcheck.error", err)
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=FIX_HEADER,
+                    # prefix every "fix" request with the current phase header. To keep model anchored on the phase goal
+                    # while it fixes concrete errors. Important esp in Phase-1, since the raised backward is unrolled and SWEEP is multi‑shape
+                    header=f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}",
                     state_facts={"runtime_error": {"stage": "gradcheck", "error": err}, "shapes": shapes},
                     temperature=0.35,
                 )
@@ -367,7 +369,7 @@ class KernelOptimizer:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=FIX_HEADER,
+                    header=f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}",
                     state_facts={"grad_summary": stats},
                     temperature=0.35,
                 )
@@ -391,7 +393,7 @@ class KernelOptimizer:
                 self.patcher.remember("bench.error", err)
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=FIX_HEADER,
+                    header=f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}",
                     state_facts={"runtime_error": {"stage": "bench", "error": err}, "shapes": shapes},
                     temperature=0.35,
                 )

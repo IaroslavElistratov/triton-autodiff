@@ -48,6 +48,11 @@ class BaseStrategy:
 class RegularStrategy(BaseStrategy):
     def __init__(self, temp: float = 0.7) -> None:
         self._temp = temp
+    # added this method to be compatible with PhasedStrategy.get_header
+    # because orchestrator unconditionally calls self.strategy.get_header
+    @property
+    def get_header(self):
+        return "Phase = optimize. Improve performance without changing numerics."
     def next_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
         header = "Phase = optimize. Improve performance without changing numerics.\n" + GLOBAL_GUARDRAILS
         return header, self._temp
@@ -56,6 +61,9 @@ class PhasedStrategy(BaseStrategy):
     def __init__(self, phases: Sequence[Phase] = PHASES) -> None:
         self.phases = list(phases)
         self.i = 0
+    @property
+    def get_header(self):
+        return self.phases[self.i].goal
     def next_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
         # Emit a concise header describing the allowed scope for this step.
         p = self.phases[self.i]
