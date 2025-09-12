@@ -7,7 +7,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
-from .tools.gradcheck.core import check_op_backward_parity
+from .tools.gradcheck.core import check_op_backward_parity_sweep
 from .tools.benchmark import bench_op, reduce_bench
 from .strategy import make_strategy, GLOBAL_GUARDRAILS
 
@@ -230,7 +230,24 @@ class KernelOptimizer:
             print("[kernel-agent] Starting run")
             print(f"[kernel-agent] Forward file: {fwd_fp}")
             print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
+
         op, bwd_fp, ns = self._create_op_with_fix(0, fwd_fp, overwrite_fp=None)
+        sweep, make_args, torch_fn = ns.get("SWEEP"), ns.get("make_args"), ns.get("torch_fn")
+        if not callable(make_args) or not isinstance(sweep, (list, tuple)):
+            raise RuntimeError("User kernel must define make_args and SWEEP")
+        if not torch_fn:
+            raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
+        # compute shapes for all dims upfront for logging/breadcrumbs
+        # shapes = [(inp.shape for inp in make_args(i)[0]) for i in sweep]
+        shapes = []
+        for _dims in sweep:
+            _args, _kwargs = make_args(_dims)
+            if isinstance(_args, (list, tuple)):
+                shapes.append(tuple(t.shape for t in _args))
+            else:
+                shapes.append((_args.shape, ))
+
+
         if VERBOSE:
             print(f"[kernel-agent] Initial backward path: {bwd_fp}")
 
@@ -238,7 +255,9 @@ class KernelOptimizer:
         # best_metrics: dict[str, float] | None = None
         device = get_user_device_info()
         best_path = bwd_fp
-        # non_improve = 0
+        # Initialize plateau tracking to avoid unbound locals on early returns
+        best_metrics = None
+        non_improve = 0
         stop_reason = "max_iters"
 
         # optimization loop
@@ -250,23 +269,14 @@ class KernelOptimizer:
             if it > 0:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
-                op, _, ns = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
+                # Rebuild only the op; the sidecar namespace (ns) remains unchanged across iterations by design
+                op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
 
-            # Build inputs for parity check from user's helpers
-            make_args = ns.get("make_args")
-            if not callable(make_args):
-                raise RuntimeError("User kernel must define make_args(dims) -> (args, kwargs)")
-            sweep = ns.get("SWEEP")
-            dims = sweep[0] if isinstance(sweep, (list, tuple)) and sweep else {}
-            args, _kwargs = make_args(dims)
             if VERBOSE:
-                shapes = tuple(getattr(t, "shape", None) for t in args)
-                print(f"[kernel-agent][it={it}] Inputs dims={dims}, shapes={shapes}")
-
-            # (a, b), _ = mod.make_args(mod.SWEEP[0]) 
+                print(f"[kernel-agent][it={it}] Inputs shapes={shapes}")
 
             # breadcrumb for LLM continuity
-            self.patcher.remember("iteration", f"it={it}, bwd_file={bwd_fp}, dims={dims}")
+            self.patcher.remember("iteration", f"it={it}, bwd_file={bwd_fp}, shapes={shapes}")
 
             # compare grads: reference torch implementation vs my fused op
 
@@ -279,14 +289,14 @@ class KernelOptimizer:
             # No change required to check_op_backward_parity.
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Running gradient_check (parity)")
-            torch_fn = ns.get("torch_fn")
-            if not torch_fn:
-                raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
+
             try:
-                ok, stats = check_op_backward_parity(
+                # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction
+                ok, stats = check_op_backward_parity_sweep(
                     ref_fwd=torch_fn,
                     my_op=op,
-                    inputs=args,
+                    make_args=make_args,
+                    sweep=sweep,
                     outputs="auto",
                     # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
                     # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
@@ -305,24 +315,24 @@ class KernelOptimizer:
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=FIX_HEADER,
-                    state_facts={"runtime_error": {"stage": "gradcheck", "error": err}, "dims": dims},
+                    state_facts={"runtime_error": {"stage": "gradcheck", "error": err}, "shapes": shapes},
                     temperature=0.35,
                 )
                 # retry correctness in next iteration
                 continue
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] gradient_check ok={ok}")
-                print(f"[kernel-agent][it={it}] gradient_check stats={json.dumps(stats, default=str) if isinstance(stats, (dict, list)) else stats}")
+                print(f"[kernel-agent][it={it}] gradient_check ok={ok}, stats={stats}")
 
-            self.patcher.remember("gradcheck", f"ok={ok}\n{json.dumps(stats, default=str) if isinstance(stats, (dict, list)) else stats}")
+            # Breadcrumb: minimal
+            self.patcher.remember("gradcheck", stats)
 
             if not ok:
                 if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Parity failed — requesting 'fix' patch from LLM")
+                    print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=FIX_HEADER,
-                    state_facts={"grad_summary": stats, "dims": dims},
+                    state_facts={"grad_summary": stats},
                     temperature=0.35,
                 )
                 # retry correctness in next iteration
@@ -332,15 +342,10 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
             try:
-                # Restrict benchmark shapes during Phase 1 only
-                sidecar = ns
-                if self.strategy.i == 0:
-                    sweep = ns["SWEEP"]
-                    sidecar = dict(ns)
-                    sidecar["SWEEP"] = sweep[:1]
+                # benchmark across the full SWEEP to align with parity gating
                 bench_records = bench_op(
                     op,              # autograd-backed op from create_op(...)
-                    sidecar,         # sidecar providing SWEEP and make_args
+                    ns,         # sidecar providing SWEEP and make_args
                     mode="bwd",
                 )
             except Exception as e:
@@ -351,7 +356,7 @@ class KernelOptimizer:
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=FIX_HEADER,
-                    state_facts={"runtime_error": {"stage": "bench", "error": err}, "dims": dims},
+                    state_facts={"runtime_error": {"stage": "bench", "error": err}, "shapes": shapes},
                     temperature=0.35,
                 )
                 continue
@@ -359,12 +364,7 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
 
-            # Simple plateau logic governed by cfg.patience and min_rel_improvement.
-            if 'best_metrics' not in locals():
-                best_metrics = None
-            if 'non_improve' not in locals():
-                non_improve = 0
-
+            # Simple plateau logic governed by cfg.patience and min_rel_improvement
             improved = (best_metrics is None) or (
                 cand["median_ms"] <= (1.0 - self.cfg.min_rel_improvement) * best_metrics["median_ms"]
             )
@@ -389,7 +389,7 @@ class KernelOptimizer:
                 changed = self._llm_request_and_apply(
                     it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=phase_text,
-                    state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand},
+                    state_facts={"bench": cand, "grad_summary": stats},
                     temperature=temp,
                 )
                 self.strategy.advance(changed=changed, parity_ok=ok)
@@ -406,7 +406,7 @@ class KernelOptimizer:
             changed = self._llm_request_and_apply(
                 it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                 header=phase_text,
-                state_facts={"gradcheck_ok": ok, "dims": dims, "bench": cand},
+                state_facts={"bench": cand, "grad_summary": stats},
                 temperature=temp,
             )
             self.strategy.advance(changed=changed, parity_ok=ok)

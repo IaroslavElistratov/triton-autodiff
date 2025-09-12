@@ -148,6 +148,70 @@ def check_op_backward_parity(
     return ok, dict(ok=ok, per_input=per_input, atol=atol, rtol=rtol, compare_dtype=str(compare_dtype))
 
 
+def check_op_backward_parity_sweep(
+    ref_fwd: Callable[..., MaybeTensors],
+    my_op:   Callable[..., MaybeTensors],
+    *,
+    make_args: Callable[[Dict[str, Any]], Tuple[Sequence[Tensor], Dict[str, Any]]],
+    sweep: Sequence[Dict[str, Any]],
+    outputs: OutputSel = "auto",
+    upstream: Optional[Sequence[Tensor]] = None,
+    compare_dtype: torch.dtype = torch.float32,
+    atol: float = 2e-2,
+    rtol: float = 1e-2,
+    seed: int = 0,
+    only_floating_inputs: bool = True,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Run backward parity once per dims in SWEEP and aggregate results."""
+    grad_pass: list[Dict[str, Any]] = []
+    grad_fail: list[Dict[str, Any]] = []
+    ok_all = True
+    total = 0
+    passed = 0
+    for i, dims in enumerate(list(sweep or [])):
+        try:
+            args, _ = make_args(dims)
+            ok_i, stats_i = check_op_backward_parity(
+                ref_fwd=ref_fwd,
+                my_op=my_op,
+                inputs=args,
+                outputs=outputs,
+                upstream=upstream,
+                compare_dtype=compare_dtype,
+                atol=atol,
+                rtol=rtol,
+                seed=seed + i,
+                only_floating_inputs=only_floating_inputs,
+            )
+        except Exception as e:
+            ok_i, stats_i = False, {"error": f"{type(e).__name__}: {e}"}
+        try:
+            d = dict(dims)
+        except Exception:
+            d = {"dims": str(dims)}
+        total += 1
+        if ok_i:
+            grad_pass.append(d)
+            passed += 1
+        else:
+            grad_fail.append(d)
+        ok_all = ok_all and bool(ok_i)
+
+    # NOTE: i'm omitting tolerances and how close grad is to the truth, as to not confuse the model
+    # with too much info, because seems the simple status of what shape passed and what failed seems
+    # should be enough
+
+    summary: Dict[str, Any] = {
+        "ok": bool(ok_all),
+        "num_total": total,
+        "num_passed": passed,
+        "num_failed": (total - passed),
+        "grad_pass": grad_pass,
+        "grad_fail": grad_fail,
+    }
+    return ok_all, summary
+
+
 # def torch_ref(a, b):
 #     # Typical matmul semantics at fp16: compute in fp32, cast to fp16 for output
 #     return (a.float() @ b.float()).to(a.dtype)    # fp32 accum -> fp16 store

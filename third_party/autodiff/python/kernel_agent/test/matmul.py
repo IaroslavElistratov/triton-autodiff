@@ -120,8 +120,10 @@ def torch_fn(a, b):
 
 SWEEP = [
     # todo: enforce only 1 iteration
-    {"M": size, "N": size, "K": 16}
-    for size in (256, 512, 1024, 2048)
+    # {"M": size, "N": size, "K": 16}
+    # for size in (256, 512, 1024, 2048)
+    {"M": 256, "N": 256, "K": 16},
+    {"M": 256, "N": 256, "K": 32},
 ]
 
 def make_args(dims, device="cuda", dtype=torch.float16):

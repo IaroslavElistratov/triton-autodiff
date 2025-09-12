@@ -9,7 +9,7 @@ from typing import Any, Tuple
 import torch
 
 from kernel_agent.utils import compile_kernel as create_op
-from kernel_agent.tools.gradcheck.core import check_op_backward_parity
+from kernel_agent.tools.gradcheck.core import check_op_backward_parity_sweep
 
 
 def main() -> None:
@@ -32,29 +32,27 @@ def main() -> None:
     if args.verbose:
         print("[gradcheck] Backward path:", bwd_fp)
 
-    make_args = ns.get("make_args")
-    if not callable(make_args):
-        raise RuntimeError("User kernel must define make_args(dims) -> (args, kwargs)")
-    sweep = ns.get("SWEEP")
-    dims = sweep[0] if isinstance(sweep, (list, tuple)) and sweep else {}
-    args_tuple, _kwargs = make_args(dims)
+    if not callable(ns.get("make_args")) or not isinstance(ns.get("SWEEP"), (list, tuple)):
+        raise RuntimeError("User kernel must define make_args and SWEEP")
+    if args.verbose and ns.get("SWEEP"):
+        dims0 = ns["SWEEP"][0]
+        try:
+            args0, _ = ns["make_args"](dims0)
+            shapes = tuple(getattr(t, "shape", None) for t in args0)
+        except Exception:
+            shapes = ()
+        print(f"[gradcheck] Inputs dims={dims0}, shapes={shapes}")
 
-    if args.verbose:
-        shapes = tuple(getattr(t, "shape", None) for t in args_tuple)
-        print(f"[gradcheck] Inputs dims={dims}, shapes={shapes}")
-
-    ok, stats = check_op_backward_parity(
+    ok, stats = check_op_backward_parity_sweep(
         ref_fwd=ns["torch_fn"],
         my_op=op,
-        inputs=args_tuple,
+        make_args=ns["make_args"],
+        sweep=ns["SWEEP"],
         outputs="auto",
-
         # atol=0.1,
         # rtol=0.04,
-
         # atol=0.0015,
         # rtol=0.04,
-
         atol=0.07,
         rtol=0.02,
     )
