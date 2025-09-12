@@ -88,22 +88,22 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     O_block_ptr_8 = grad_Out + qvk_offset_6
     O_block_ptr_10 = _mk_block_ptr(O_block_ptr_8, q_1, q, stride_om, stride_on, 16, 16)
     bwd_O_block_ptr = tl.load(O_block_ptr_10)
-    # local grads for element_ty
+    # grads wrt element_ty
     bwd_element_ty = tl.cast(bwd_O_block_ptr, tl.float32)
-    # local grads for acc
+    # grads wrt acc
     bwd_acc_3 = (1.0 / acc_3) * bwd_element_ty
     bwd_acc_4 = tl.cast(bwd_acc_3, tl.float16)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
     bwd_acc_8 = tl.dot(bwd_acc_4, tl.trans(v_4))
-    # local grads for p
+    # grads wrt p
     bwd_p = tl.cast(bwd_acc_8, tl.float32)
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
     bwd_acc_12 = tl.dot(tl.trans(p_1), bwd_acc_4)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
-    # local grads for acc
+    # grads wrt acc
     bwd_acc_14 = tl.sum(bwd_acc_3, axis=1)[:, None]
     bwd_acc_16 = unnamed_5 * bwd_acc_14
     bwd_acc_23 = (-1.0 * (acc_2 / (acc_3 * acc_3))) * bwd_element_ty
@@ -111,23 +111,23 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     bwd_acc_26 = tl.reshape(bwd_acc_25, (16,))
     bwd_acc_27 = bwd_acc_26 + ((1.0 / (l_i * 0.6931470036506653)) * bwd_m_i)
     bwd_acc_28 = bwd_acc_27 + tl.reshape(bwd_acc_16, (16,))
-    # local grads for alpha
+    # grads wrt alpha
     bwd_alpha_3 = (0.6931470036506653 * alpha_1) * bwd_acc_28
     bwd_m_i_8 = bwd_m_i + (bwd_alpha_3 * -1.0)
-    # local grads for _sum_combine
+    # grads wrt _sum_combine
     bwd_p_1 = bwd_p + bwd_acc_27[:, None]
-    # local grads for p
+    # grads wrt p
     bwd_p_5 = (0.6931470036506653 * p) * bwd_p_1
-    # local grads for qk
+    # grads wrt qk
     bwd_qk_2 = bwd_p_5 * -1.0
     bwd_qk_4 = tl.sum(bwd_qk_2, axis=1)[:, None]
     bwd_m_i_9 = bwd_m_i_8 + tl.reshape(bwd_qk_4, (16,))
-    # local grads for m_ij
+    # grads wrt m_ij
     bwd_m_ij_3 = 1.0
     bwd_m_ij_5 = 0.0
     bwd_m_ij_8 = tl.where((m_ij >= unnamed_4), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
     bwd_m_ij_10 = unnamed_3 * bwd_m_ij_8
-    # local grads for qk
+    # grads wrt qk
     bwd_qk_7 = unnamed_2 * bwd_p_5
     bwd_qk_8 = bwd_qk_7 + tl.where(qk == _elementwise_max[:, None], 1.0, 0.0) * bwd_m_ij_10[:, None]
     bwd_qk_9 = tl.cast(bwd_qk_8, tl.float16)
@@ -141,19 +141,19 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
     Q_block_ptr_6 = grad_Q + qvk_offset_6
     Q_block_ptr_7 = _mk_block_ptr(Q_block_ptr_6, q_1, q, stride_qm, stride_qk, 16, 16)
-    # local grads for q
+    # grads wrt q
     tl.atomic_add(Q_block_ptr_7, tl.cast(bwd_qk_13, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
     K_block_ptr_4 = grad_K + qvk_offset_6
     K_block_ptr_5 = _mk_block_ptr(K_block_ptr_4, q, q, stride_kk, stride_kn, 16, 16)
-    # local grads for k
+    # grads wrt k
     tl.atomic_add(K_block_ptr_5, tl.cast(bwd_qk_17, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
     V_block_ptr_4 = grad_V + qvk_offset_6
     V_block_ptr_5 = _mk_block_ptr(V_block_ptr_4, q, q, stride_vk, stride_vn, 16, 16)
-    # local grads for v
+    # grads wrt v
     tl.atomic_add(V_block_ptr_5, tl.cast(bwd_acc_12, tl.float16))
 
 

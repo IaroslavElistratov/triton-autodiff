@@ -135,7 +135,7 @@ class GradLocalInliner:
         # which broadened the scope and sometimes folded across human‑meaningful
         # grad branches. Now that the C++ pass tags helper ops (constants/splats)
         # with raise.gradOfTag, we can and should rely solely on the fine tag:
-        #   - preserves clear "local grads for ..." grouping and stable headers;
+        #   - preserves clear "grads wrt ..." grouping and stable headers;
         #   - prevents accidental cross‑branch folding when multiple inputs share
         #     a coarse bucket;
         #   - keeps inlining deterministic and predictable (single‑use, pure,
@@ -748,7 +748,7 @@ class Raiser:
         # inlined or DCE'd later.
         self._emitted_local_tags: set[int] = set()
         # Also track the last printed local header label to avoid repeating the
-        # exact same "local grads for <label>" comment back-to-back across
+        # exact same "grads wrt <label>" comment back-to-back across
         # consecutive statements mapped to different tags but same label.
         self._last_local_label: Optional[str] = None
         # Python argument names by kernel-arg index for grouping via raise.gradIdx
@@ -935,7 +935,7 @@ class Raiser:
             return
         # Avoid emitting the same local header twice in a row (even if separated
         # by blank lines). Find the most recent comment line and compare.
-        comment_line = f"    # local grads for {py_lbl}"
+        comment_line = f"    # grads wrt {py_lbl}"
         last_comment = None
         for i in range(len(self.lines) - 1, -1, -1):
             s = self.lines[i]
@@ -1521,7 +1521,7 @@ class Raiser:
         self.lines.append("    return grid + m_idx[:, None] * stride_m + n_idx[None, :] * stride_n")
         self.lines.append("")
         self.lines.append("# Legend:")
-        self.lines.append("#    local grads for <y>                         (fine-grained: backward ops emitted when differentiating a single forward value y)")
+        self.lines.append("#    grads wrt <y>                               (fine-grained: backward ops emitted when differentiating a single forward value y)")
         self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: ops contributing to grad of kernel input X)") # groups of fine-grained nodes computing
         self.lines.append("")
         func = self.m.get_function(self.func_name) if self.m.has_function(self.func_name) else None
@@ -1639,7 +1639,7 @@ class Raiser:
         def is_coarse(s: str) -> bool:
             return s.lstrip().startswith("# ~~~~~~~~~~ grad branch")
         def is_local(s: str) -> bool:
-            return s.lstrip().startswith("# local grads for ")
+            return s.lstrip().startswith("# grads wrt ")
         n = len(self.lines)
         out: List[str] = []
         i = 0
