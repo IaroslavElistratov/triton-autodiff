@@ -61,7 +61,7 @@ def main() -> None:
         get_user_device_info=(lambda: "N/A"),
     )
     print("Best metrics:", out.get("best_metrics", {}))
-    print("Best backward kernel:", out["best_backward_fp"])
+    print("Best backward file:", out["backward_fp"])
     print("Device:", out["device_info"])
     stop_reason = out.get("stop_reason", "")
     if stop_reason:

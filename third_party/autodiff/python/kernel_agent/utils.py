@@ -78,7 +78,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         msg = str(e)
         err = {
-            "phase": "setup_run",
+            "phase": "exec_module",
             "error_type": type(e).__name__,
             "error_message": msg,
             "fwd_file": file_path,
@@ -138,7 +138,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         msg = str(e)
         err = {
-            "phase": "setup_run",
+            "phase": "compile_triton_kernel",
             "error_type": type(e).__name__,
             "error_message": msg,
             "fwd_file": file_path,

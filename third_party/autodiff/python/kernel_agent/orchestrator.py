@@ -7,7 +7,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
-from .tools.gradcheck.core import check_op_backward_parity, check_op_backward_parity_sweep
+from .tools.gradcheck.core import check_op_backward_parity_sweep
 from .tools.benchmark import bench_op, reduce_bench
 from .strategy import make_strategy, GLOBAL_GUARDRAILS
 
@@ -186,23 +186,48 @@ class KernelOptimizer:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
         return changed
 
-    def _create_op_with_fix(self, it: int, fwd_fp: str, overwrite_fp: str | None):
+    def _create_op_with_fix(self, it: int | None, fwd_fp: str, overwrite_fp: str | None):
         try:
             return create_op(fwd_fp, overwrite_fp=overwrite_fp)
+
+        # catch only the CompileError, because there are other types of errors which create_op
+        # raises -- want to surface them to the user, only want to catch the CompileError
         except CompileError as ce:
-            info = ce.info
-            target = info.get("bwd_file") or info.get("fwd_file") or (overwrite_fp or fwd_fp)
-            summary = f"compile_error[{info.get('phase','?')}]: {info.get('error_type')}: {info.get('error_message')}"
+
+            # for initial build (outside the optimization loop), bubble up
+            if it is None:
+                raise ce
+
+            # info = ce.info
+            err = f"{type(ce).__name__}: {ce}"
+            self.patcher.remember("llm.compile_error", err)
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] {summary}")
+                print(f"[kernel-agent][it={it}] compile error: {err}")
             # route via helper with explicit fix header and state_facts
             _ = self._llm_request_and_apply(
-                it, "fix", bwd_fp=str(target), fwd_fp=fwd_fp,
+                it, "fix", bwd_fp=self.bwd_fp, fwd_fp=fwd_fp,
                 header=FIX_HEADER,
-                state_facts={"compile_error": info},
+                state_facts={"compile_error": err},
                 temperature=0.25,
             )
-            return create_op(fwd_fp, overwrite_fp=overwrite_fp)
+            # catch here as well, because this create_op can independently error
+            try:
+                return create_op(fwd_fp, overwrite_fp=overwrite_fp)
+            except CompileError as ce_retry:
+                # info_retry = ce_retry.info
+                err_retry = f"{type(ce_retry).__name__}: {ce_retry}"
+                self.patcher.remember("llm.compile_error", err_retry)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] compile retry error: {err_retry}")
+                _ = self._llm_request_and_apply(
+                    it, "fix", bwd_fp=self.bwd_fp, fwd_fp=fwd_fp,
+                    header=FIX_HEADER,
+                    state_facts={"compile_error": err_retry},
+                    temperature=0.25,
+                )
+                # ugly but need signature consistent with create_op signature
+                # because the caller of _create_op_with_fix can assign to a tuple
+                return None, None, None
 
     def run(self, *,
             fwd_fp: str,
@@ -214,9 +239,6 @@ class KernelOptimizer:
         if not os.path.isfile(fwd_fp):
             raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
-        # try:
-        # except Exception as e:
-        #     raise RuntimeError("kernel malformed, provide a well-formed kernel") from e
 
         # TTIR from autodiff then raise to Python once; use as seed and target
         # using output of triton-autodiff directly as the initial version of the backward kernel
@@ -231,7 +253,8 @@ class KernelOptimizer:
             print(f"[kernel-agent] Forward file: {fwd_fp}")
             print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
 
-        op, bwd_fp, ns = self._create_op_with_fix(0, fwd_fp, overwrite_fp=None)
+        op, bwd_fp, ns = self._create_op_with_fix(None, fwd_fp, overwrite_fp=None)
+        self.bwd_fp = bwd_fp
         sweep, make_args, torch_fn = ns.get("SWEEP"), ns.get("make_args"), ns.get("torch_fn")
         if not callable(make_args) or not isinstance(sweep, (list, tuple)):
             raise RuntimeError("User kernel must define make_args and SWEEP")
@@ -254,7 +277,6 @@ class KernelOptimizer:
 
 
         device = get_user_device_info()
-        best_path = bwd_fp
         # Initialize plateau tracking to avoid unbound locals on early returns
         best_metrics = None
         non_improve = 0
@@ -285,6 +307,9 @@ class KernelOptimizer:
                     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
                 # Rebuild only the op; the sidecar namespace (ns) remains unchanged across iterations by design
                 op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
+                # failed to compile kernel
+                if not op:
+                    continue
 
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Inputs shapes={shapes}")
@@ -382,7 +407,6 @@ class KernelOptimizer:
 
             if improved:
                 best_metrics = cand
-                best_path = bwd_fp
                 non_improve = 0
             else:
                 non_improve += 1
@@ -425,8 +449,8 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] End iteration")
 
         return {
-            "best_metrics": best_metrics or {},
-            "best_backward_fp": best_path,
+            "best_metrics": best_metrics,
+            "backward_fp": bwd_fp,
             "device_info": device,
             "stop_reason": stop_reason,
         }
