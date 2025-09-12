@@ -50,7 +50,7 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     m_ij = _elementwise_max * unnamed_3
     unnamed_4 = float('-inf')
     m_ij_1 = tl.maximum(m_ij, unnamed_4)
-    qk_2 = tl.expand_dims(m_ij_1, axis=1)
+    qk_2 = m_ij_1[:, None]
     qk_3 = qk_1 - qk_2
     p = tl.exp2(qk_3)
     p_1 = tl.cast(p, tl.float16)
@@ -59,13 +59,13 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     v_4 = tl.load(V_block_ptr_3)
     alpha = unnamed_4 - m_ij_1
     alpha_1 = tl.exp2(alpha)
-    acc = tl.expand_dims(alpha_1, axis=1)
+    acc = alpha_1[:, None]
     unnamed_5 = 0.0
     acc_1 = acc * unnamed_5
     acc_2 = tl.dot(p_1, v_4) + acc_1
     _sum_combine = tl.sum(p, axis=1)
     l_i = alpha_1 + _sum_combine
-    acc_3 = tl.expand_dims(l_i, axis=1)
+    acc_3 = l_i[:, None]
     acc_4 = acc_2 / acc_3
     element_ty = tl.cast(acc_4, tl.float16)
     tl.store(O_block_ptr_7, element_ty)
@@ -104,10 +104,10 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
     # local grads for acc
-    bwd_acc_14 = tl.expand_dims(tl.sum(bwd_acc_3, axis=1), axis=1)
+    bwd_acc_14 = tl.sum(bwd_acc_3, axis=1)[:, None]
     bwd_acc_16 = unnamed_5 * bwd_acc_14
     bwd_acc_23 = (-1.0 * (acc_2 / (acc_3 * acc_3))) * bwd_element_ty
-    bwd_acc_25 = tl.expand_dims(tl.sum(bwd_acc_23, axis=1), axis=1)
+    bwd_acc_25 = tl.sum(bwd_acc_23, axis=1)[:, None]
     bwd_acc_26 = tl.reshape(bwd_acc_25, (16,))
     bwd_acc_27 = bwd_acc_26 + ((1.0 / (l_i * 0.6931470036506653)) * bwd_m_i)
     bwd_acc_28 = bwd_acc_27 + tl.reshape(bwd_acc_16, (16,))
@@ -115,12 +115,12 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     bwd_alpha_3 = (0.6931470036506653 * alpha_1) * bwd_acc_28
     bwd_m_i_8 = bwd_m_i + (bwd_alpha_3 * -1.0)
     # local grads for _sum_combine
-    bwd_p_1 = bwd_p + tl.expand_dims(bwd_acc_27, axis=1)
+    bwd_p_1 = bwd_p + bwd_acc_27[:, None]
     # local grads for p
     bwd_p_5 = (0.6931470036506653 * p) * bwd_p_1
     # local grads for qk
     bwd_qk_2 = bwd_p_5 * -1.0
-    bwd_qk_4 = tl.expand_dims(tl.sum(bwd_qk_2, axis=1), axis=1)
+    bwd_qk_4 = tl.sum(bwd_qk_2, axis=1)[:, None]
     bwd_m_i_9 = bwd_m_i_8 + tl.reshape(bwd_qk_4, (16,))
     # local grads for m_ij
     bwd_m_ij_3 = 1.0
@@ -129,7 +129,7 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     bwd_m_ij_10 = unnamed_3 * bwd_m_ij_8
     # local grads for qk
     bwd_qk_7 = unnamed_2 * bwd_p_5
-    bwd_qk_8 = bwd_qk_7 + tl.where((qk == tl.expand_dims(_elementwise_max, axis=1)), 1.0, 0.0) * tl.expand_dims(bwd_m_ij_10, axis=1)
+    bwd_qk_8 = bwd_qk_7 + tl.where(qk == _elementwise_max[:, None], 1.0, 0.0) * bwd_m_ij_10[:, None]
     bwd_qk_9 = tl.cast(bwd_qk_8, tl.float16)
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~

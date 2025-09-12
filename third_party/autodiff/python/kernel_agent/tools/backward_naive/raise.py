@@ -162,12 +162,14 @@ class GradLocalInliner:
             return fallback_get(v)
 
         s = rhs.strip()
-        # Wrap only if not already parenthesized/call/name/literal
+        # Wrap only if not already parenthesized/call/name/literal/indexed.
+        # Treat bracket-indexed forms like x[:, None] as safe (no extra parens).
         is_parenthesized = s.startswith("(") and s.endswith(")")
         is_call_like = bool(re.match(r'^[A-Za-z_][A-Za-z0-9_\.]*\(.*\)$', s))
         is_simple_name = bool(re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', s))
         is_simple_literal = bool(re.match(r'^(-?\d+(?:\.\d+)?)$', s))
-        need_wrap = not (is_parenthesized or is_call_like or is_simple_name or is_simple_literal)
+        is_indexed = s.endswith("]") and "[" in s
+        need_wrap = not (is_parenthesized or is_call_like or is_simple_name or is_simple_literal or is_indexed)
         rhs_final = f"({rhs})" if need_wrap else rhs
         if len(rhs_final) > self.max_len:
             return fallback_get(v)
@@ -1271,7 +1273,16 @@ class Raiser:
             return f"tl.reshape({x}, None)  # TODO: dynamic shape"
         R["tt.reshape"] = emit_reshape
 
-        R["tt.expand_dims"] = lambda op: f"tl.expand_dims({self._get(op.get_operand(0))}, axis={Attr.axis(op, 0)})"
+        # Indexing sugar for rank-1 expand_dims: emit [:, None] / [None, :] with parens for precedence
+        def emit_expand_dims(op):
+            x = self._get(op.get_operand(0))
+            axis = Attr.axis(op, 0)
+            src = _shape_from_tensor_type_string(str(op.get_operand(0).get_type())) or []
+            if len(src) == 1 and axis in (0, 1):
+                # Emit indexing sugar without parentheses universally; rely on Python precedence for indexing.
+                return f"{x}[None, :]" if axis == 0 else f"{x}[:, None]"
+            return f"tl.expand_dims({x}, axis={axis})"
+        R["tt.expand_dims"] = emit_expand_dims
 
         # Value-only broadcast elides to the source. Pointers remain scalar.
         R["tt.broadcast"] = lambda op: self._get(op.get_operand(0))
