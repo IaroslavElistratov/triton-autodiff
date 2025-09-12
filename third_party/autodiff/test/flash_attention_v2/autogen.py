@@ -29,8 +29,7 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     qvk_offset_6 = qvk_offset_2 + qvk_offset_5
     O_block_ptr = Out + qvk_offset_6
     start_m = tl.program_id(axis=0)
-    unnamed = 16
-    Q_block_ptr = start_m * unnamed
+    Q_block_ptr = start_m * 16
     Q_block_ptr_1 = tl.cast(Q_block_ptr, tl.int64)
     offs_m = tl.arange(0, 16)
     q = tl.cast(offs_m, tl.int64)
@@ -38,18 +37,15 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     O_block_ptr_7 = _mk_block_ptr(O_block_ptr, q_1, q, stride_om, stride_on, 16, 16)
     Q_block_ptr_2 = Q + qvk_offset_6
     Q_block_ptr_5 = _mk_block_ptr(Q_block_ptr_2, q_1, q, stride_qm, stride_qk, 16, 16)
-    q_8 = tl.load(Q_block_ptr_5)
+    q_6 = tl.load(Q_block_ptr_5)
     K_block_ptr = K + qvk_offset_6
     K_block_ptr_3 = _mk_block_ptr(K_block_ptr, q, q, stride_kk, stride_kn, 16, 16)
-    k_5 = tl.load(K_block_ptr_3)
-    qk = tl.dot(q_8, k_5)
-    unnamed_2 = 0.7213475108146667
-    qk_1 = qk * unnamed_2
+    k_4 = tl.load(K_block_ptr_3)
+    qk = tl.dot(q_6, k_4)
+    qk_1 = qk * 0.7213475108146667
     _elementwise_max = tl.max(qk, axis=1)
-    unnamed_3 = 0.7213475108146667
-    m_ij = _elementwise_max * unnamed_3
-    unnamed_4 = float('-inf')
-    m_ij_1 = tl.maximum(m_ij, unnamed_4)
+    m_ij = _elementwise_max * 0.7213475108146667
+    m_ij_1 = tl.maximum(m_ij, float('-inf'))
     qk_2 = m_ij_1[:, None]
     qk_3 = qk_1 - qk_2
     p = tl.exp2(qk_3)
@@ -57,19 +53,17 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     V_block_ptr = V + qvk_offset_6
     V_block_ptr_3 = _mk_block_ptr(V_block_ptr, q, q, stride_vk, stride_vn, 16, 16)
     v_4 = tl.load(V_block_ptr_3)
-    alpha = unnamed_4 - m_ij_1
+    alpha = float('-inf') - m_ij_1
     alpha_1 = tl.exp2(alpha)
-    acc = alpha_1[:, None]
-    unnamed_5 = 0.0
-    acc_1 = acc * unnamed_5
-    acc_2 = tl.dot(p_1, v_4) + acc_1
+    acc = alpha_1[:, None] * 0.0
+    acc_1 = tl.dot(p_1, v_4) + acc
     _sum_combine = tl.sum(p, axis=1)
     l_i = alpha_1 + _sum_combine
-    acc_3 = l_i[:, None]
-    acc_4 = acc_2 / acc_3
-    element_ty = tl.cast(acc_4, tl.float16)
+    acc_2 = l_i[:, None]
+    acc_3 = acc_1 / acc_2
+    element_ty = tl.cast(acc_3, tl.float16)
     tl.store(O_block_ptr_7, element_ty)
-    m_ptrs = off_hz * unnamed
+    m_ptrs = off_hz * 16
     m_ptrs_1 = M + tl.cast(m_ptrs, tl.int64)
     m_ptrs_2 = m_ptrs_1 + tl.zeros((16,), dtype=tl.int64)
     offs_m_1 = Q_block_ptr + offs_m
@@ -91,71 +85,67 @@ def backward__attn_fwd(Q, K, V, M, Out, stride_qz, stride_qh, stride_qm, stride_
     # grads wrt element_ty
     bwd_element_ty = tl.cast(bwd_O_block_ptr, tl.float32)
     # grads wrt acc
-    bwd_acc_3 = (1.0 / acc_3) * bwd_element_ty
-    bwd_acc_4 = tl.cast(bwd_acc_3, tl.float16)
+    bwd_acc_2 = (1.0 / acc_2) * bwd_element_ty
+    bwd_acc_3 = tl.cast(bwd_acc_2, tl.float16)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
-    bwd_acc_8 = tl.dot(bwd_acc_4, tl.trans(v_4))
+    bwd_acc_6 = tl.dot(bwd_acc_3, tl.trans(v_4))
     # grads wrt p
-    bwd_p = tl.cast(bwd_acc_8, tl.float32)
+    bwd_p = tl.cast(bwd_acc_6, tl.float32)
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
-    bwd_acc_12 = tl.dot(tl.trans(p_1), bwd_acc_4)
+    bwd_acc_9 = tl.dot(tl.trans(p_1), bwd_acc_3)
 
     # ~~~~~~~~~~ grad branch for {grad_Q,grad_K} ~~~~~~~~~~
     # grads wrt acc
-    bwd_acc_14 = tl.sum(bwd_acc_3, axis=1)[:, None]
-    bwd_acc_16 = unnamed_5 * bwd_acc_14
-    bwd_acc_23 = (-1.0 * (acc_2 / (acc_3 * acc_3))) * bwd_element_ty
-    bwd_acc_25 = tl.sum(bwd_acc_23, axis=1)[:, None]
-    bwd_acc_26 = tl.reshape(bwd_acc_25, (16,))
-    bwd_acc_27 = bwd_acc_26 + ((1.0 / (l_i * 0.6931470036506653)) * bwd_m_i)
-    bwd_acc_28 = bwd_acc_27 + tl.reshape(bwd_acc_16, (16,))
+    bwd_acc_12 = 0.0 * tl.sum(bwd_acc_2, axis=1)[:, None]
+    bwd_acc_18 = (-1.0 * (acc_1 / (acc_2 * acc_2))) * bwd_element_ty
+    bwd_acc_20 = tl.reshape(tl.sum(bwd_acc_18, axis=1)[:, None], (16,))
+    bwd_acc_21 = bwd_acc_20 + ((1.0 / (l_i * 0.6931470036506653)) * bwd_m_i)
+    bwd_acc_22 = bwd_acc_21 + tl.reshape(bwd_acc_12, (16,))
     # grads wrt alpha
-    bwd_alpha_3 = (0.6931470036506653 * alpha_1) * bwd_acc_28
-    bwd_m_i_8 = bwd_m_i + (bwd_alpha_3 * -1.0)
+    bwd_alpha_2 = (0.6931470036506653 * alpha_1) * bwd_acc_22
+    bwd_m_i_6 = bwd_m_i + (bwd_alpha_2 * -1.0)
     # grads wrt _sum_combine
-    bwd_p_1 = bwd_p + bwd_acc_27[:, None]
+    bwd_p_1 = bwd_p + bwd_acc_21[:, None]
     # grads wrt p
-    bwd_p_5 = (0.6931470036506653 * p) * bwd_p_1
+    bwd_p_4 = (0.6931470036506653 * p) * bwd_p_1
     # grads wrt qk
-    bwd_qk_2 = bwd_p_5 * -1.0
-    bwd_qk_4 = tl.sum(bwd_qk_2, axis=1)[:, None]
-    bwd_m_i_9 = bwd_m_i_8 + tl.reshape(bwd_qk_4, (16,))
+    bwd_qk_1 = bwd_p_4 * -1.0
+    bwd_m_i_7 = bwd_m_i_6 + tl.reshape(tl.sum(bwd_qk_1, axis=1)[:, None], (16,))
     # grads wrt m_ij
-    bwd_m_ij_3 = 1.0
-    bwd_m_ij_5 = 0.0
-    bwd_m_ij_8 = tl.where((m_ij >= unnamed_4), bwd_m_ij_3, bwd_m_ij_5) * bwd_m_i_9
-    bwd_m_ij_10 = unnamed_3 * bwd_m_ij_8
+    bwd_m_ij_2 = 1.0
+    bwd_m_ij_3 = 0.0
+    bwd_m_ij_6 = tl.where((m_ij >= float('-inf')), bwd_m_ij_2, bwd_m_ij_3) * bwd_m_i_7
+    bwd_m_ij_8 = 0.7213475108146667 * bwd_m_ij_6
     # grads wrt qk
-    bwd_qk_7 = unnamed_2 * bwd_p_5
-    bwd_qk_8 = bwd_qk_7 + tl.where(qk == _elementwise_max[:, None], 1.0, 0.0) * bwd_m_ij_10[:, None]
-    bwd_qk_9 = tl.cast(bwd_qk_8, tl.float16)
+    bwd_qk_5 = 0.7213475108146667 * bwd_p_4
+    bwd_qk_6 = bwd_qk_5 + tl.where(qk == _elementwise_max[:, None], 1.0, 0.0) * bwd_m_ij_8[:, None]
+    bwd_qk_7 = tl.cast(bwd_qk_6, tl.float16)
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
-    bwd_qk_13 = tl.dot(bwd_qk_9, tl.trans(k_5))
+    bwd_qk_10 = tl.dot(bwd_qk_7, tl.trans(k_4))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
-    bwd_qk_17 = tl.dot(tl.trans(q_8), bwd_qk_9)
+    bwd_qk_13 = tl.dot(tl.trans(q_6), bwd_qk_7)
 
     # ~~~~~~~~~~ grad branch for grad_Q ~~~~~~~~~~
     Q_block_ptr_6 = grad_Q + qvk_offset_6
     Q_block_ptr_7 = _mk_block_ptr(Q_block_ptr_6, q_1, q, stride_qm, stride_qk, 16, 16)
     # grads wrt q
-    tl.atomic_add(Q_block_ptr_7, tl.cast(bwd_qk_13, tl.float16))
+    tl.atomic_add(Q_block_ptr_7, tl.cast(bwd_qk_10, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_K ~~~~~~~~~~
     K_block_ptr_4 = grad_K + qvk_offset_6
     K_block_ptr_5 = _mk_block_ptr(K_block_ptr_4, q, q, stride_kk, stride_kn, 16, 16)
     # grads wrt k
-    tl.atomic_add(K_block_ptr_5, tl.cast(bwd_qk_17, tl.float16))
+    tl.atomic_add(K_block_ptr_5, tl.cast(bwd_qk_13, tl.float16))
 
     # ~~~~~~~~~~ grad branch for grad_V ~~~~~~~~~~
     V_block_ptr_4 = grad_V + qvk_offset_6
     V_block_ptr_5 = _mk_block_ptr(V_block_ptr_4, q, q, stride_vk, stride_vn, 16, 16)
     # grads wrt v
-    tl.atomic_add(V_block_ptr_5, tl.cast(bwd_acc_12, tl.float16))
-
+    tl.atomic_add(V_block_ptr_5, tl.cast(bwd_acc_9, tl.float16))
 
 # commenting manually
 # N_CTX = 128

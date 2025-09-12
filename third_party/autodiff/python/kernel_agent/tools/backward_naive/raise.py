@@ -1477,13 +1477,21 @@ class Raiser:
             rhs = emit(op)
         if rhs is None:
             return
-        # Elide alias-only assignments produced by value broadcast/splat removal.
-        # Example: "v2 = v1" where v2 came from tt.broadcast/tt.splat – bind SSA id to rhs name.
-        if op.get_num_results() == 1 and name in ("tt.broadcast", "tt.splat"):
+        # Elide alias-only assignments more aggressively for readability:
+        # - Always inline scalar constants and expand-dims sugar (rank-1 -> indexing),
+        #   by binding the SSA id directly to the RHS expression and skipping the assignment line.
+        # - Keep existing behavior for broadcast/splat when RHS is a simple name.
+        if op.get_num_results() == 1:
             rvid2 = int(op.get_result(0).id())
-            if re.fullmatch(r"[A-Za-z_]\w*", rhs or ""):
+            if name in ("arith.constant", "tt.expand_dims"):
+                # Inline constants (incl. float('-inf')) and expand-dims like x[:, None]
                 self.env[rvid2] = rhs
                 return
+            if name in ("tt.broadcast", "tt.splat"):
+                # Legacy alias-elision path for broadcasts/splats of names
+                if re.fullmatch(r"[A-Za-z_]\w*", rhs or ""):
+                    self.env[rvid2] = rhs
+                    return
         # Emit headers right before we actually print a statement for this op
         # (after inlining/alias-elision decisions), so they never dangle.
         # This avoids emitting fine-grained comments for ops that get inlined away.
