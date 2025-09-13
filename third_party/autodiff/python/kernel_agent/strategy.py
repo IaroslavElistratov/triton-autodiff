@@ -23,7 +23,7 @@ GLOBAL_GUARDRAILS = (
     "- No rule echoing; diff only.\n"
     "- ≤120 changed lines per patch.\n"
     "- Include at least one '-' anchor line per hunk.\n"
-    "- Preserve function names and all 'backward_*' args.\n"
+    "- Do NOT change the backward stub's signature.\n"
     "- Single backward kernel and single stub."
 )
 
