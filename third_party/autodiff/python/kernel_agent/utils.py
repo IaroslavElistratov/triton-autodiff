@@ -257,6 +257,99 @@ def run_with_timeout(fn, timeout_s: float):
 
 
 
+# import os, runpy, multiprocessing as mp, torch
+
+# def _child(task, q):
+#     try:
+#         mod = runpy.run_path(task["path"])                  # your raised.py
+#         fn  = mod[task["symbol"]]                           # e.g. f"backward_{stub_name}"
+#         _ = fn(*task["args"], **task.get("kwargs", {}))     # run stub/bwd
+#         q.put(("ok", None))
+#     except Exception as e:
+#         try: torch.cuda.synchronize()
+#         except Exception: pass
+#         try: torch.cuda.cudart().cudaDeviceReset()          # child only
+#         except Exception: pass
+#         q.put(("err", f"{type(e).__name__}: {e}"))
+#         os._exit(1)
+
+# def run_stub_isolated(raised_py_path, symbol, *args, **kwargs):
+#     ctx = mp.get_context("spawn")
+#     q = ctx.Queue(1)
+#     p = ctx.Process(target=_child, args=({"path": raised_py_path,
+#                                           "symbol": symbol,
+#                                           "args": args,
+#                                           "kwargs": kwargs}, q),
+#                     daemon=True)
+#     p.start()
+#     status, payload = q.get()
+#     p.join()
+#     if status != "ok":
+#         raise RuntimeError(payload)
+
+
+import os, multiprocessing as mp, torch
+
+def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
+    """
+    Child process worker for the compile canary.
+
+    Rationale:
+      - Run compile+preflight in an isolated CUDA context so OOB or device faults
+        cannot poison the parent's context. Reconstruct everything in the child
+        to avoid passing non-picklable callables/tensors across processes.
+      - Do NOT return live tensors; only a small status/message via a Queue.
+    """
+    try:
+        # Reconstruct everything fresh in the child; this triggers the same
+        # compile path and the in-process backward preflight inside compile_kernel.
+        from .utils import compile_kernel
+        compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        # Ensure pending async device errors surface before we report success.
+        torch.cuda.synchronize()
+        q.put(("ok", None))
+    except Exception as e:
+        # Best-effort cleanup in child: surface any pending errors, then reset
+        # the CUDA context so this process does not leave a poisoned device state.
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            torch.cuda.cudart().cudaDeviceReset()
+        except Exception:
+            pass
+        q.put(("err", f"{type(e).__name__}: {e}"))
+        # Hard-exit to guarantee isolation; parent inspects exit code and status.
+        os._exit(1)
+
+def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
+    """
+    Spawn a short-lived child that runs compile_kernel(...) as a canary.
+
+    Why here and why child:
+      - compile_kernel includes a minimal backward preflight; running it in a child
+        contains OOB/device faults so the main agent loop can continue and let the LLM fix.
+      - We ignore compile return values; the parent will rebuild for real after canary.
+    """
+    ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
+    q = ctx.Queue(1)
+    p = ctx.Process(target=_compile_child, args=(fwd_fp, overwrite_fp, q), daemon=True)
+    p.start()
+    try:
+        status, payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
+    except Exception:
+        # Child wedged or died before posting a status – kill and escalate.
+        p.terminate(); p.join()
+        raise TimeoutError("compile canary hung or child died without reporting")
+    finally:
+        q.close()
+    p.join()
+    if status != "ok":
+        raise RuntimeError(f"compile canary failed: {payload}")
+    if p.exitcode not in (0, None):
+        raise RuntimeError(f"compile canary child exited with code {p.exitcode}")
+
 
 
 # todo-high: use slicing, don't feed entire file

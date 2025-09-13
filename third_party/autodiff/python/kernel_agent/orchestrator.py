@@ -305,6 +305,33 @@ class KernelOptimizer:
             if it > 0:
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
+
+                # Canary compile in a spawned child before using a newly edited backward in‑process.
+                # Motivation: if LLM edits introduce OOB or device faults, running compile+preflight
+                # in a child contains the failure to that child’s CUDA context. The parent remains
+                # healthy and can immediately ask the LLM to fix instead of crashing the whole loop.
+                # The canary ignores return values and only reports status; the parent then rebuilds
+                # the op in‑process as usual on success.
+                from .utils import run_compile_child
+                # convert canary failure into a non-fatal fix step, mirroring compile errors.
+                # Keeps the parent process healthy and lets the LLM repair the backward
+                try:
+                    run_compile_child(fwd_fp, overwrite_fp=bwd_fp)
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] compile canary error: {err}")
+                    self.patcher.remember("compile_err.error", err)
+                    _ = self._llm_request_and_apply(
+                        it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                        header=FIX_HEADER,
+                        state_facts={"runtime_error": {"stage": "compile_err", "error": err}, "shapes": shapes},
+                        temperature=0.25,
+                    )
+                    # Retry correctness in next iteration with the LLM's fix applied
+                    continue
+
+
                 # Rebuild only the op; the sidecar namespace (ns) remains unchanged across iterations by design
                 op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
                 # failed to compile kernel
