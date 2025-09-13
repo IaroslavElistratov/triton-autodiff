@@ -1,3 +1,15 @@
+
+
+*.diff
+*.log
+LOGS/
+**/raise_notes.md
+**.cfg
+**.egg-info/
+**/__*
+**/_saved_generated
+third_party/autodiff/python/kernel_agent/tools/backward_naive/test
+
 **/generated/*
 !generated/annotated/
 #__*
