@@ -170,7 +170,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # this is runtime overwrite
         raised_py_path = _AD_OVERWRITE_FP.get()
 
-
         # new API installs a Python-level backward stub on the forward JITFunction, so backward
         # is not tied to a single forward specialization.
         # To allow retracing: enforce a single shared backward kernel+stub across all
@@ -182,7 +181,17 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # Instead I want to enforce the following behavior: first trace passes; second trace
         # fails until the single backward kernel+stub is generalized by the llm to handle the
         # new shape as well
-        if len(fwd_kernel_cache) != 1:
+        if len(fwd_kernel_cache) > 1:
+            # for call sight clarity: if no explicit overwrite is provided, fall back to the
+            # last artifacts captured in‑process. This keeps a single shared backward across
+            # retraces without requiring the caller to use the context manager;
+            # To stash/read the previous bwd_fp, use a per‑kernel persistent pointer instead of
+            # the short‑lived ContextVar (_AD_ARTIFACTS), the ContextVar is intentionally reset
+            # at the end of record_autodiff_artifacts() to avoid cross‑kernel contamination,
+            # so it is usually None here, instead read the last installed path from the JITFunction._generated_bwd_stub_path
+            if not raised_py_path:
+                raised_py_path = jit_fn._generated_bwd_stub_path
+
             assert raised_py_path, "Forward kernel retraces, but backward overwrite is not provided. Aborting to avoid creating another backward kernel + stub pair."
 
         mod_name, stub_name = jit_fn._autodiff_stub_info
@@ -226,6 +235,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             bwd_stub = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
             # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
             setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
+            # remember path on the kernel for future retraces. We avoid relying on the
+            # thread‑local ContextVar because it is reset after setup() and can point to
+            # artifacts of a different kernel if multiple kernels are traced interleaved
+            setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
 
             # expose artifacts in context store
             # publish raised.py as the backward file pointer
@@ -239,10 +252,13 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
             # ensure the bwd stub is installed on the forward JITFunction when overwrite_fp is used
             # so StubOverrideDCK.backward can find it without regenerating. The hook already does this
-            # on fresh generations; we add a defensive install here for overwrite path.
+            # on fresh generations; we add a defensive install here for overwrite path
+
+            # NOTE: LLM edits are picked up because I rebind each time
             bwd_stub = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
             assert callable(bwd_stub)
             setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
+            setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
 
         # if overwrite_fp is provided then raise the kernel stored in the provided file
         # bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction

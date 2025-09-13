@@ -74,6 +74,11 @@ namespace triton {
     enableNameLocSSA();
 
     // todo-now: enforce only 1 iteration, otherwise confuses the LLM
+    // Especially because not I support re-tracing by re-using the first
+    // fwd trace to create by bwd kernel and then never reset that bwd stub+kernel
+    // forever after (re-using that bwd stub+kernel for all the other fwd traces)
+    // **therefore it's especially important to make sure that bwd I create,
+    // differentiates the fwd which was only unrolled once**
     unrollAllForOps(func);
     // func.getBody().front().dump();
     // exit(1);

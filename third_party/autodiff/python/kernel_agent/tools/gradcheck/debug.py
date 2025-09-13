@@ -9,7 +9,6 @@ from typing import Any, Tuple
 import torch
 
 from kernel_agent.utils import compile_kernel as create_op
-from api import autodiff_overwrite_fp
 from kernel_agent.tools.gradcheck.core import check_op_backward_parity_sweep
 
 
@@ -31,23 +30,20 @@ def main() -> None:
 
     op, bwd_fp, ns = create_op(fwd_fp, overwrite_fp=None)
 
-    # see detailed comment in api.py
-    with autodiff_overwrite_fp(bwd_fp):
+    ok, stats = check_op_backward_parity_sweep(
+        ref_fwd=ns["torch_fn"],
+        my_op=op,
+        sidecar=ns,
+        outputs="auto",
+        # atol=0.1,
+        # rtol=0.04,
 
-        ok, stats = check_op_backward_parity_sweep(
-            ref_fwd=ns["torch_fn"],
-            my_op=op,
-            sidecar=ns,
-            outputs="auto",
-            # atol=0.1,
-            # rtol=0.04,
+        # atol=0.0015,
+        # rtol=0.04,
 
-            # atol=0.0015,
-            # rtol=0.04,
-
-            atol=0.07,
-            rtol=0.02,
-        )
+        atol=0.07,
+        rtol=0.02,
+    )
 
     # Print result
     print("ok:", ok)
