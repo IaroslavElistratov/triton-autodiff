@@ -340,9 +340,6 @@ class KernelOptimizer:
                     atol=0.07,
                     rtol=0.02,
                 )
-            # todo-now:
-            # because I don't run backward in create_op. Although we have code there to catch errors, backward isn't invoked, so the error isn't caught and it hard-fails later when .backward is called (e.g., during gradcheck).
-            # so maybe cleaner to re-emptively run backward in create_op -- so that there's taht concrete boundray, in which if create_op ran then can be certain that both fwd and bwd well formed
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 if VERBOSE:

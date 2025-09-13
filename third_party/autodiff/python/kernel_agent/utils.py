@@ -146,10 +146,79 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
             "context_snippet": _read_snippet(file_path, 200),
         }
         raise CompileError(err) from e
-
     op = ns.get("stub")
     if not callable(op):
         raise RuntimeError("Expected a top-level stub(...) to call the kernel.")
+
+
+    # todo: cleanup the code below
+    # Preemptively run backward to be certain that both fwd and bwd well formed;
+    # run one small forward + backward to surface syntax/import/JIT issues early.
+    # Previously, errors would only show up during the first actual backward (e.g., gradcheck),
+    # which could terminate the process late (since nothing will catch an exeption at that time).
+    # This preflight keeps the same semantics but fails here where the errors are being caught (as part
+    # of compile_kernel and not later, when StubOverrideDCK.backward will be called unguarded e.g.
+    # during gradcheck, where a raised exception will crash the program)
+    sweep = ns.get("SWEEP")
+    make_args = ns.get("make_args")
+    if isinstance(sweep, (list, tuple)) and sweep and callable(make_args):
+        def _preflight_backward():
+            import torch
+            dims = sweep[0]
+            # Obtain exemplar inputs using the user-provided helper
+            args, kwargs = make_args(dims)
+            kwargs = dict(kwargs or {})
+
+            # Enable grads for floating-point tensors only (matches typical autograd expectations)
+            pos_args = list(args or [])
+            for i, v in enumerate(pos_args):
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    pos_args[i] = v.detach().requires_grad_(True)
+            for k, v in kwargs.items():
+                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                    kwargs[k] = v.detach().requires_grad_(True)
+
+            # Forward once via the fused op (stub)
+            y = op(*pos_args, **kwargs)
+            ys = y if isinstance(y, (tuple, list)) else (y,)
+            ys = tuple(t for t in ys if isinstance(t, torch.Tensor))
+            if not ys:
+                return  # nothing to differentiate
+
+            # Reduce outputs to a scalar to avoid constructing explicit upstreams.
+            # This mirrors gradcheck behavior without needing grad_outputs.
+            scalar = None
+            for t in ys:
+                scalar = (t.sum() if scalar is None else scalar + t.sum())
+
+            # Collect grad-requiring inputs (positional + keyword)
+            grad_ins = []
+            for v in pos_args:
+                if isinstance(v, torch.Tensor) and v.requires_grad:
+                    grad_ins.append(v)
+            for v in kwargs.values():
+                if isinstance(v, torch.Tensor) and v.requires_grad:
+                    grad_ins.append(v)
+            if grad_ins and scalar is not None:
+                torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
+
+        try:
+            # Use the same timeout guard as other compile-time steps
+            run_with_timeout(_preflight_backward, CODE_EXEC_TIMEOUT_S)
+        except BaseException as e:
+            # Surface early as a structured CompileError so orchestrator can recover
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            msg = str(e)
+            err = {
+                "phase": "jit_backward",
+                "error_type": type(e).__name__,
+                "error_message": msg,
+                "fwd_file": file_path,
+                "bwd_file": bwd_fp,
+                "traceback": tb,
+                "context_snippet": _read_snippet(bwd_fp, 200) if isinstance(bwd_fp, str) else "",
+            }
+            raise CompileError(err) from e
 
     return op, bwd_fp, ns
 
