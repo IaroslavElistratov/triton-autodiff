@@ -229,12 +229,9 @@ def torch_fn(q, k, v, causal=False, sm_scale=0.5):
 
 SWEEP = [
     {"B": 256, "NUM_HEADS": 64, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
-    for N in (16, ) # (16, 128, 256, 512, 1024, 2048, 4096)
+    for N in (16, 32, ) # (16, 128, 256, 512, 1024, 2048, 4096)
 ]
 
-# todo-now:
-# becuase my naive autodiff unrolls, the first dim should be extremely small
-# in fact it should be one because otherwise confuses the LLM
 
 def make_args(dims, device="cuda", dtype=torch.float16):
     B, NUM_HEADS, SEQ_LEN, HEAD_DIM = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]

@@ -148,8 +148,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         fwd_kernel_cache, target, backend, _binder = jit_fn.device_caches[device]
         # bwd_kernel_cache, target, backend, _binder = bwd_jit_fn.device_caches[device]
 
-        assert len(fwd_kernel_cache) == 1, "Temporary limitation: retracing is not yet supported."
-
         # get the kernel using the same key
         fwd_compiled_kernel = fwd_kernel_cache[key]
 
@@ -171,6 +169,21 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # optionally override via context manager;
         # this is runtime overwrite
         raised_py_path = _AD_OVERWRITE_FP.get()
+
+
+        # new API installs a Python-level backward stub on the forward JITFunction, so backward
+        # is not tied to a single forward specialization.
+        # To allow retracing: enforce a single shared backward kernel+stub across all
+        # forward traces (in other words, require callers to use autodiff_overwrite_fp).
+        # Without the assert below, each new forward signature will silently create
+        # a separate backward kernel+stub for each fwd trace, so multi-shape gradcheck
+        # (e.g. passing different N_CTX to fwd attention kernel) will pass
+        # **but for the wrong reason** (per-trace backward pairs).
+        # Instead I want to enforce the following behavior: first trace passes; second trace
+        # fails until the single backward kernel+stub is generalized by the llm to handle the
+        # new shape as well
+        if len(fwd_kernel_cache) != 1:
+            assert raised_py_path, "Forward kernel retraces, but backward overwrite is not provided. Aborting to avoid creating another backward kernel + stub pair."
 
         mod_name, stub_name = jit_fn._autodiff_stub_info
 

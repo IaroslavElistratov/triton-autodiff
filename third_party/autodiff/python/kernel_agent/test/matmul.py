@@ -119,7 +119,6 @@ def torch_fn(a, b):
 
 
 SWEEP = [
-    # todo: enforce only 1 iteration
     # {"M": size, "N": size, "K": 16}
     # for size in (256, 512, 1024, 2048)
     {"M": 256, "N": 256, "K": 16},
