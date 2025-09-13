@@ -14,7 +14,7 @@ from .orchestrator import KernelOptimizer, Config
 
 def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
-    ap.add_argument("--max-iters", type=int, default=6)
+    ap.add_argument("--max-iters", type=int, default=32)
     ap.add_argument("--patience", type=int, default=4)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
     ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
@@ -42,7 +42,7 @@ def main() -> None:
         from .llm import MinimalLLMPatchProvider  # lazy import
         llm = MinimalLLMPatchProvider(
             temperature=0.7,
-            max_tokens=16384,
+            max_tokens=32768,
             reasoning_effort=args.reasoning_effort,
             context=args.context,
         )
