@@ -38,6 +38,16 @@ from triton.runtime.jit import JITFunction
 #     return ", ".join(f"{k}={v:.4g}" for k, v in m.items() if isinstance(v, (int, float)))
 
 
+# todo:
+# Normalize repetitive wrappers from child/parent to keep the message concise.
+# Root cause of repetition: the child stringifies its exception and sends it via
+# Queue; the parent wraps that into a RuntimeError; then compile_kernel wraps again
+# into CompileError, and log sites often prepend f"{type(e).__name__}: {e}".
+# Each layer adds its own "...Error: ..." prefix, producing repeated headers.
+# Solution: prefer a structured payload (etype/emsg) and collapse to one line.
+# Examples:
+#   "CompileError: compile_error: TypeError: ..." -> type="TypeError", msg="..."
+#   "TypeError: ..." -> type="TypeError", msg="..."
 
 
 class CompileError(Exception):
@@ -69,7 +79,10 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     # to the LLM, and avoids duplicating paths
 
     # In parent (orchestrator.py) run a probe compile in a child before executing user code here.
-    # Avoid recursion by checking a child flag (because run_compile_child calls compile_kernel).
+    # Avoid recursion by checking a child flag (because run_compile_child calls compile_kernel)
+
+    # If i launch a child once and it OOB's and messes the context, then (e.g. on the next iteration of the orchestrator loop)
+    # I'll launch another child and that child will have a fresh working context
     if not os.environ.get("KERNEL_AGENT_PROBE_CHILD"):
         try:
             run_compile_child(file_path, overwrite_fp=overwrite_fp)
@@ -265,7 +278,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
 
 
 # Tunable limits (seconds) — configurable via env
-CODE_EXEC_TIMEOUT_S = float(os.environ.get("TB_CODE_TIMEOUT_S", "15"))
+CODE_EXEC_TIMEOUT_S = float(os.environ.get("TB_CODE_TIMEOUT_S", "30"))
 
 def run_with_timeout(fn, timeout_s: float):
     """
@@ -357,6 +370,7 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     try:
         status, payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
     except (queue.Empty, EOFError):
+        # print(f"[probe] queue wait failed: {type(e).__name__}: {e}; alive={p.is_alive()}, exitcode={p.exitcode}")
         # Child wedged or died before posting a status – kill and escalate
         p.terminate(); p.join(1.0)
         if p.is_alive():
