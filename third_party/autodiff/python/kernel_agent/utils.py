@@ -2,7 +2,11 @@ import os
 import queue
 import traceback
 import threading
+import multiprocessing as mp
+
 from typing import Any
+
+import torch
 from triton.runtime.jit import JITFunction
 
 # def _norm_bench(x) -> dict[str, float]:
@@ -51,6 +55,38 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     - overwrite_fp: path to an existing _raised.py with edited bwd kernel+stub.
       If provided, do not re-run the MLIR pass; reuse that file instead.
     """
+
+    # probe compile in a spawned child before using a newly edited backward in‑process.
+    # Needed because if LLM edits introduce OOB or device faults, running compile+preflight
+    # in a child contains the failure to that child’s CUDA context. The parent remains
+    # healthy and can immediately ask the LLM to fix instead of crashing the whole loop.
+    # The probe ignores return values and only reports status; the parent then rebuilds
+    # the op in‑process as usual on success.
+    #
+    # i put the probe call inside the compile_op, because i already define _create_op_with_fix
+    # which catches the errs from _create_op and shows them to llm, and to avoid duplicating all the logic;
+    # That keeps logic in one place, _create_op_with_fix surface both compile and probe failures
+    # to the LLM, and avoids duplicating paths
+
+    # In parent (orchestrator.py) run a probe compile in a child before executing user code here.
+    # Avoid recursion by checking a child flag (because run_compile_child calls compile_kernel).
+    if not os.environ.get("KERNEL_AGENT_PROBE_CHILD"):
+        try:
+            run_compile_child(file_path, overwrite_fp=overwrite_fp)
+        except Exception as e:
+            # surface as CompileError so the orchestrator can prompt the LLM to fix
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            msg = str(e)
+            err = {
+                "phase": "compile_probe",
+                "error_type": type(e).__name__,
+                "error_message": msg,
+                # "fwd_file": file_path,
+                "traceback": tb,
+                "context_snippet": _read_snippet(file_path, 200),
+            }
+            raise CompileError(err) from e
+
 
     def exec_module(src: str) -> dict[str, Any]:
         import types, sys  # local to avoid polluting module scope
@@ -255,44 +291,9 @@ def run_with_timeout(fn, timeout_s: float):
     raise payload  # type: ignore[misc]
 
 
-
-
-# import os, runpy, multiprocessing as mp, torch
-
-# def _child(task, q):
-#     try:
-#         mod = runpy.run_path(task["path"])                  # your raised.py
-#         fn  = mod[task["symbol"]]                           # e.g. f"backward_{stub_name}"
-#         _ = fn(*task["args"], **task.get("kwargs", {}))     # run stub/bwd
-#         q.put(("ok", None))
-#     except Exception as e:
-#         try: torch.cuda.synchronize()
-#         except Exception: pass
-#         try: torch.cuda.cudart().cudaDeviceReset()          # child only
-#         except Exception: pass
-#         q.put(("err", f"{type(e).__name__}: {e}"))
-#         os._exit(1)
-
-# def run_stub_isolated(raised_py_path, symbol, *args, **kwargs):
-#     ctx = mp.get_context("spawn")
-#     q = ctx.Queue(1)
-#     p = ctx.Process(target=_child, args=({"path": raised_py_path,
-#                                           "symbol": symbol,
-#                                           "args": args,
-#                                           "kwargs": kwargs}, q),
-#                     daemon=True)
-#     p.start()
-#     status, payload = q.get()
-#     p.join()
-#     if status != "ok":
-#         raise RuntimeError(payload)
-
-
-import os, multiprocessing as mp, torch
-
 def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
     """
-    Child process worker for the compile canary.
+    Child process worker for the compile probe.
 
     Rationale:
       - Run compile+preflight in an isolated CUDA context so OOB or device faults
@@ -301,6 +302,9 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
       - Do NOT return live tensors; only a small status/message via a Queue.
     """
     try:
+        # Mark this process as the probe child so compile_kernel won't spawn again.
+        os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
+
         # Reconstruct everything fresh in the child; this triggers the same
         # compile path and the in-process backward preflight inside compile_kernel.
         from .utils import compile_kernel
@@ -325,12 +329,12 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
 
 def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     """
-    Spawn a short-lived child that runs compile_kernel(...) as a canary.
+    Spawn a short-lived child that runs compile_kernel(...) as a probe.
 
     Why here and why child:
       - compile_kernel includes a minimal backward preflight; running it in a child
         contains OOB/device faults so the main agent loop can continue and let the LLM fix.
-      - We ignore compile return values; the parent will rebuild for real after canary.
+      - We ignore compile return values; the parent will rebuild for real after probe.
     """
     ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
     q = ctx.Queue(1)
@@ -341,14 +345,14 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     except Exception:
         # Child wedged or died before posting a status – kill and escalate.
         p.terminate(); p.join()
-        raise TimeoutError("compile canary hung or child died without reporting")
+        raise TimeoutError("compile probe hung or child died without reporting")
     finally:
         q.close()
     p.join()
     if status != "ok":
-        raise RuntimeError(f"compile canary failed: {payload}")
+        raise RuntimeError(f"compile probe failed: {payload}")
     if p.exitcode not in (0, None):
-        raise RuntimeError(f"compile canary child exited with code {p.exitcode}")
+        raise RuntimeError(f"compile probe child exited with code {p.exitcode}")
 
 
 
