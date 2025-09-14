@@ -305,26 +305,36 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Mark this process as the probe child so compile_kernel won't spawn again.
         os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
 
+        # If CUDA is unavailable, treat as a hard error and exit child.
+        if not torch.cuda.is_available():
+            # Signal fatal probe failure to parent and return cleanly; parent raises.
+            q.put(("err", "no_cuda"))
+            q.close(); q.join_thread()
+            os._exit(1)
         # Reconstruct everything fresh in the child; this triggers the same
         # compile path and the in-process backward preflight inside compile_kernel.
-        from .utils import compile_kernel
         compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
-        # Ensure pending async device errors surface before we report success.
-        torch.cuda.synchronize()
+        # Intentionally avoid torch.cuda.synchronize() and any cudaDeviceReset() here.
+        # Rationale: the child process will exit immediately after signaling OK, and
+        # process exit destroys the CUDA context and frees GPU resources. This keeps
+        # the success path fast and avoids backend/version-specific CUDA APIs.
         q.put(("ok", None))
+        q.close(); q.join_thread()
+        os._exit(0)
     except Exception as e:
-        # Best-effort cleanup in child: surface any pending errors, then reset
-        # the CUDA context so this process does not leave a poisoned device state.
+        # First report error to parent and flush queue so parent never hangs
         try:
-            torch.cuda.synchronize()
+            q.put(("err", f"{type(e).__name__}: {e}"))
         except Exception:
             pass
-        try:
-            torch.cuda.cudart().cudaDeviceReset()
-        except Exception:
-            pass
-        q.put(("err", f"{type(e).__name__}: {e}"))
+        q.close(); q.join_thread()
+        # Intentionally avoid torch.cuda.synchronize() and any cudaDeviceReset() here.
+        # Rationale: exiting the child process is sufficient to release GPU resources
+        # and isolate device faults; additional sync/reset is unnecessary and brittle
+        # across CUDA backends/builds. Process exit will destroy the child's context.
         # Hard-exit to guarantee isolation; parent inspects exit code and status.
+        # Reason for not throwing exception instead of os.exit is it seems the child process
+        # shouldn’t rely on raising exceptions across process boundaries?
         os._exit(1)
 
 def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
@@ -338,21 +348,25 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     """
     ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
     q = ctx.Queue(1)
-    p = ctx.Process(target=_compile_child, args=(fwd_fp, overwrite_fp, q), daemon=True)
+    # Use non-daemon child so resources flush cleanly; explicitly join below.
+    p = ctx.Process(target=_compile_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
     p.start()
     try:
         status, payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
-    except Exception:
-        # Child wedged or died before posting a status – kill and escalate.
-        p.terminate(); p.join()
+    except (queue.Empty, EOFError):
+        # Child wedged or died before posting a status – kill and escalate
+        p.terminate(); p.join(1.0)
+        if p.is_alive():
+            getattr(p, "kill", p.terminate)()
+            p.join()
         raise TimeoutError("compile probe hung or child died without reporting")
     finally:
         q.close()
     p.join()
     if status != "ok":
         raise RuntimeError(f"compile probe failed: {payload}")
-    if p.exitcode not in (0, None):
-        raise RuntimeError(f"compile probe child exited with code {p.exitcode}")
+    if p.exitcode != 0:
+        raise RuntimeError(f"compile probe child exited with code {p.exitcode} (status={status})")
 
 
 
