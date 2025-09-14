@@ -179,8 +179,8 @@ class KernelOptimizer:
         # 3) Record + report change. Detect change on raw bytes for simplicity.
         after = _read_bytes(bwd_fp)
         changed = (after != before)
-        # Keep a compact preview for breadcrumbs while avoiding token bloat.
-        self.patcher.remember(f"llm.patch.{stage}", str(patch)[:1200])
+        # don't keep patch in the breadcrumbs, because model keeps the summary
+        # of the changes in the kernel docstring
         self.patcher.remember(f"apply.{stage}", ("ok" if changed else "no-change"))
         if VERBOSE:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
@@ -317,7 +317,7 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] Inputs shapes={shapes}")
 
             # breadcrumb for LLM continuity
-            self.patcher.remember("iteration", f"it={it}, bwd_file={bwd_fp}, shapes={shapes}")
+            self.patcher.remember("iteration", f"it={it}, shapes={shapes}")
 
             # gradient_check uses autograd, its expectations are: my_op(*inputs) -> true outputs,
             # those outputs must be on a graph back to inputs. The stub satisfies this after @autodiff

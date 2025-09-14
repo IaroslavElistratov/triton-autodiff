@@ -214,13 +214,18 @@ class MinimalLLMPatchProvider:
             "3. heavily unrolled: for loops from the forward kernel were unrolled -- you should re-introduce back the for-loops, as it'll clearly improvement the performance "
             "4. atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
             "If gradient summary is OK assume the kernel and stub compute gradients correctly -- do not second guess it. "
-            "Reply with substantive code changes, not with comment/docstring 'touch' patches. "
+            # "Reply with substantive code changes, not with comment/docstring 'touch' patches. "
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs. "
 
             "In each turn, you can only call apply_patch({patch: ...}) once, make this your final action for that turn. "
             "Before calling it, form a brief high-level plan of your changes in your private reasoning and rehearse the patch. "
             "When you call apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Do not print the envelope/rules. "
+
+            # not "what to try next;" -- because this will be dictated by Strategy, model should not decide that
+            "Maintain a brief iteration note (<= 10 lines; no code/diffs) in the backward Triton kernel's docstring. "
+            "Rewrite this docstring in the same patch as your code edits, focusing on what changed, what failed and why, and key takeaways worth remembering for the next iteration. "
+            "This docstring update is always allowed alongside your code edits. Do not submit a docstring-only patch. "
 
             "Inside triton kernel you must use functions under tl.* namespace not triton.* namespace (e.g. tl.cdiv not triton.cdiv)"
         )
@@ -230,6 +235,10 @@ class MinimalLLMPatchProvider:
         user = (
             spec_text
             + f"\n\n{phase}\n"
+            + "MEMORY REQUIREMENT:\n"
+            + "- Rewrite the backward kernel's docstring to briefly note this iteration (<= 10 lines; no code/diffs).\n"
+            + "- Focus on: what you changed; what previously failed and why; and what key takeaways worth remembering for the next iteration.\n"
+            + "- Do this in the SAME patch as your code edits. Do NOT submit a docstring-only patch.\n\n"
             # todo-high: maybe don't manually save it but let llm an option to write a note for the next iteration and work done in the current iteration
             + f"Context from previous iterations:\n{self._history_block()}\n\n"
             + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
