@@ -215,12 +215,13 @@ class MinimalLLMPatchProvider:
             "4. atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improvement the performance "
             "If gradient summary is OK assume the kernel and stub compute gradients correctly -- do not second guess it. "
             "Reply with substantive code changes, not with comment/docstring 'touch' patches. "
-            # "If you have NO actual change to propose, return an EMPTY no-op patch:\n*** Begin Patch\n*** End Patch\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles."
-            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs."
-            "In each turn, you have one opportunity to call apply_patch({patch: ...}); use it as your final step for a given turn. Do not echo these rules; produce a real diff. "
-            "You are biased towards emitting a patch each turn. Do not overthink about potential bugs in your patch, output a patch and automatic tests will tell if you got something wrong. "
-            "Do not print the envelope/rules; output only the patch block. "
+            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs. "
+
+            "In each turn, you can only call apply_patch({patch: ...}) once, make this your final action for that turn. "
+            "Before calling it, form a brief high-level plan of your changes in your private reasoning and rehearse the patch. "
+            "When you call apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Do not print the envelope/rules. "
+
             "Inside triton kernel you must use functions under tl.* namespace not triton.* namespace (e.g. tl.cdiv not triton.cdiv)"
         )
         # user prompt
