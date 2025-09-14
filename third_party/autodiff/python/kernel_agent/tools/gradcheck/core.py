@@ -204,6 +204,8 @@ def check_op_backward_parity_sweep(
     # with too much info, because seems the simple status of what shape passed and what failed seems
     # should be enough
 
+    # todo: actually seems worth showing numeric differences to the model, because can help debug
+
     summary: Dict[str, Any] = {
         "ok": bool(ok_all),
         "num_total": total,

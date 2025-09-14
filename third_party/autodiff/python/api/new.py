@@ -409,5 +409,8 @@ def autodiff(kernel, idxs_buffers, stub_name=None):
             if fn is None:
                 raise RuntimeError("backward stub not ready; run forward once")
             return fn(*args, **kwargs)
-        return _add_kwarg_support(fwd_stub, _bwd_stub_proxy)   # do not return .apply directly
+        wrapped = _add_kwarg_support(fwd_stub, _bwd_stub_proxy)   # do not return .apply directly
+        setattr(wrapped, "__is_autodiff_stub__", True)            # tag for loader detection
+        return wrapped
+
     return inner

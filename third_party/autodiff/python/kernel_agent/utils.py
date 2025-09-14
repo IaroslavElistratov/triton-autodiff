@@ -117,19 +117,22 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
             "phase": "exec_module",
             "error_type": type(e).__name__,
             "error_message": msg,
-            "fwd_file": file_path,
+            # "fwd_file": file_path,
             "traceback": tb,
             "context_snippet": _read_snippet(file_path, 200),
         }
         raise CompileError(err) from e
 
-
-    # accept a Triton JITFunction decorated with autodiff-wrapped helper class
-    from ._autodiff_api import StubOverrideDCK as StubDCK
-
-    has_dck = any(isinstance(v, type) and issubclass(v, Stub) for v in ns.values())
+    # Validate presence of a Triton kernel and an @autodiff-decorated stub.
+    # Don't check for a StubDCK subclass here, bc the decorator returns a callable function,
+    # and the internal autograd class is not exposed as a public subclass in the user module.
+    # Instead i made the @autograd decorator tag the stub (__is_autodiff_stub__), so check for that
     has_kernel = any(isinstance(v, JITFunction) for v in ns.values())
-    if not (has_dck or has_kernel):
+    has_stub = any(
+        callable(v) and bool(getattr(v, "__is_autodiff_stub__", False))
+        for v in ns.values()
+    )
+    if not (has_kernel and has_stub):
         # these errors for invalid *fwd* kernel -- these aren't designed for llm, but for a human
         # so not wrapping into CompileError
         raise RuntimeError(
@@ -137,7 +140,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
             "@triton.jit\n"
             "def my_kernel(...): ...\n\n"
             "@autodiff(kernel=my_kernel, ...)\n"
-            "@my_stub(...): ...\n"
+            "def stub(...): ...\n"
         )
 
     setup_fn = ns.get("setup")
@@ -177,7 +180,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
             "phase": "compile_triton_kernel",
             "error_type": type(e).__name__,
             "error_message": msg,
-            "fwd_file": file_path,
+            # "fwd_file": file_path,
             "traceback": tb,
             "context_snippet": _read_snippet(file_path, 200),
         }
@@ -249,7 +252,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
                 "phase": "jit_backward",
                 "error_type": type(e).__name__,
                 "error_message": msg,
-                "fwd_file": file_path,
+                # "fwd_file": file_path,
                 "bwd_file": bwd_fp,
                 "traceback": tb,
                 "context_snippet": _read_snippet(bwd_fp, 200) if isinstance(bwd_fp, str) else "",
@@ -324,7 +327,7 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
     except Exception as e:
         # First report error to parent and flush queue so parent never hangs
         try:
-            q.put(("err", f"{type(e).__name__}: {e}"))
+            q.put(("err", {"etype": type(e).__name__, "emsg": str(e)}))
         except Exception:
             pass
         q.close(); q.join_thread()
