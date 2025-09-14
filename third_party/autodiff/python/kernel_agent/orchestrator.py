@@ -59,9 +59,8 @@ class KernelOptimizer:
         self.patcher = patcher
         # Strategy encapsulates per-step phase text and temperature; keeps the
         # main loop clean and allows switching behavior via env
-        self.strategy = make_strategy(os.environ.get("KERNEL_AGENT_STRATEGY", "regular"))
-        # Toggle optimize path: "simple" (strategy + error echo, default) or "legacy" (original _llm_request_and_apply helper)
-        self.optimize_mode = str(os.environ.get("KERNEL_AGENT_OPTIMIZE_MODE", "simple")).strip().lower()
+        self.strategy_name = os.environ.get("KERNEL_AGENT_STRATEGY", "regular")
+        self.strategy = make_strategy(self.strategy_name)
 
     def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, header: str, state_facts: dict, temperature: float | None = None) -> bool:
         """Ask for one patch, apply with one retry on apply error, return True if apply succeeded.
@@ -417,24 +416,9 @@ class KernelOptimizer:
                         print(f"[kernel-agent][it={it}] Early stop: patience reached (non_improve={non_improve})")
                     break
 
-            # 3) Optimize step (toggleable to keep loop disentangled from policy)
-            if self.optimize_mode == "legacy":
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM (legacy path)")
-                phase_text, temp = self.strategy.next_phase(parity_ok=ok, last_runtime=cand.get("median_ms"))
-                changed = self._llm_request_and_apply(
-                    it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=phase_text,
-                    state_facts={"bench": cand, "grad_summary": stats},
-                    temperature=temp,
-                )
-                self.strategy.advance(changed=changed, parity_ok=ok)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] End iteration")
-                continue
 
-            # Strategy-based path: generate phase text + temp, request patch, and
-            # let the patcher apply/raise; echo apply errors back into next prompt.
+            # 3) Optimize step (toggleable to keep loop disentangled from policy)
+
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
 
@@ -445,9 +429,24 @@ class KernelOptimizer:
                 state_facts={"bench": cand, "grad_summary": stats},
                 temperature=temp,
             )
-            self.strategy.advance(changed=changed, parity_ok=ok)
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] End iteration")
+            if not changed:
+                continue
+
+            if self.strategy_name == "regular":
+                advance_changed = changed and ok
+                self.strategy.advance(changed=advance_changed, parity_ok=ok)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] End iteration")
+
+            elif self.strategy_name == "phased":
+                advance_changed = changed and ok and self.strategy.verify_guardrails(bwd_fp)
+                self.strategy.advance(changed=advance_changed, parity_ok=ok)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] End iteration")
+
+            else:
+                print(self.strategy_name)
+                raise ValueError(f"Unreachable, mode should be either 'regular' or 'phased'. Got {self.strategy_name}")
 
         return {
             "best_metrics": best_metrics,
