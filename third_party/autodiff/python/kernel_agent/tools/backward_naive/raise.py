@@ -579,6 +579,8 @@ class BlockPtrEmitter:
                 f"_mk_block_ptr({base_txt}, {m_idx_txt}, {n_idx_txt}, "
                 f"{stride_m_txt}, {stride_n_txt}, {BM}, {BN})"
             )
+            # Mark usage so the helper is emitted only when actually needed
+            self.r._needs_mk_block_ptr = True
 
         # Cache components for potential tl.advance or compact rebuild
         try:
@@ -763,6 +765,8 @@ class Raiser:
         self._fwd_tag_to_py: Dict[int, str] = self._build_tag_to_py_map()
         # Isolated helper for block‑ptr recovery/advance
         self._bp = BlockPtrEmitter(self)
+        # Track whether the fallback helper is needed for this emission
+        self._needs_mk_block_ptr: bool = False
 
     # ---- small utils
     def _fresh(self, base="v") -> str:
@@ -1519,15 +1523,7 @@ class Raiser:
         # Reason: allows short, readable calls from kernels without violating Triton's rule
         # about non-constexpr globals. BM/BN are compile-time ints (tile shape), so calls
         # like _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, 16, 16) are valid.
-        self.lines.append("@triton.jit")
-        self.lines.append("def _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, BM: tl.constexpr, BN: tl.constexpr):")
-        self.lines.append("    # Device helper: rebuild a pointer grid without broadcasting the pointer itself.")
-        self.lines.append("    # BM/BN are constexpr tile sizes. Casts strides to int64 to satisfy addptr rules.")
-        self.lines.append("    stride_m = tl.cast(stride_m, tl.int64)")
-        self.lines.append("    stride_n = tl.cast(stride_n, tl.int64)")
-        self.lines.append("    grid = base + tl.zeros((BM, BN), dtype=tl.int64)")
-        self.lines.append("    return grid + m_idx[:, None] * stride_m + n_idx[None, :] * stride_n")
-        self.lines.append("")
+        # Defer emitting _mk_block_ptr until after body generation; add only if used
         self.lines.append("# Legend:")
         self.lines.append("#    grads wrt <y>                               (fine-grained: backward ops emitted when differentiating a single forward value y)")
         self.lines.append("#    ~~~~~~~~~~ grad branch for <X> ~~~~~~~~~~   (coarse: ops contributing to grad of kernel input X)") # groups of fine-grained nodes computing
@@ -1602,6 +1598,20 @@ class Raiser:
         # Final pass: drop assigned-but-never-used temporaries and then sweep orphan headers.
         self._strip_dead_temporaries()
         self._sweep_orphan_headers()
+        # Emit the fallback helper only if referenced during emission (append at end for simplicity)
+        if self._needs_mk_block_ptr:
+            self.lines.extend([
+                "",
+                "@triton.jit",
+                "def _mk_block_ptr(base, m_idx, n_idx, stride_m, stride_n, BM: tl.constexpr, BN: tl.constexpr):",
+                "    # Device helper: rebuild a pointer grid without broadcasting the pointer itself.",
+                "    # BM/BN are constexpr tile sizes. Casts strides to int64 to satisfy addptr rules.",
+                "    stride_m = tl.cast(stride_m, tl.int64)",
+                "    stride_n = tl.cast(stride_n, tl.int64)",
+                "    grid = base + tl.zeros((BM, BN), dtype=tl.int64)",
+                "    return grid + m_idx[:, None] * stride_m + n_idx[None, :] * stride_n",
+                "",
+            ])
         return "\n".join(self.lines)
 
     # small helpers for inliner integration
