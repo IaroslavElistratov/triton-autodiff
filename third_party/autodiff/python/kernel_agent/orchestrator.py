@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import os, re, json, sys
+import os, re, json, sys, shutil
 
 import torch
 
@@ -43,6 +43,58 @@ FIX_HEADER = (
     "Phase = fix. ONLY restore correctness to pass gradcheck.\n"
     + GLOBAL_GUARDRAILS
 )
+
+class Rollback:
+    """Lock-wins snapshot manager for the backward kernel file.
+
+    - Snapshots the current kernel to a sidecar file on improved parity/perf
+    - Restores from that snapshot on plateau/regress (e.g., patience stop)
+    - Tracks best parity coverage across iterations
+    """
+    def __init__(self, backward_fp: str) -> None:
+        self.backward_fp = backward_fp
+        self.lock_fp = f"{backward_fp}.lock"
+        self.best_pass_count: int = 0
+
+    def _log(self, text: str) -> None:
+        if VERBOSE:
+            print(f"[kernel-agent][rollback] {text}")
+
+    def snapshot(self, note: str = "") -> None:
+        """Save current kernel contents to the lock file.
+        This is the single I/O point used by higher-level triggers
+        (parity/perf). Keeping it here avoids duplicate try/except noise.
+        """
+        try:
+            shutil.copyfile(self.backward_fp, self.lock_fp)
+            msg = f"locked -> {self.lock_fp}"
+            if note:
+                msg += f" ({note})"
+            self._log(msg)
+        except Exception as e:
+            self._log(f"warning: snapshot failed: {type(e).__name__}: {e}")
+
+    def _restore(self) -> None:
+        """Restore kernel from the last snapshot, if present."""
+        try:
+            if os.path.isfile(self.lock_fp):
+                shutil.copyfile(self.lock_fp, self.backward_fp)
+                self._log(f"restored {self.lock_fp} -> {self.backward_fp}")
+        except Exception as e:
+            self._log(f"warning: restore failed: {type(e).__name__}: {e}")
+
+    def maybe_snapshot(self, stats):
+        """Lock when the number of passing shapes increases"""
+        # Parity regression handling:
+        # - If fewer shapes pass than our best so far, revert to the locked snapshot.
+        # - If more shapes pass (but not all), snapshot this incremental improvement.
+        # - If equal, leave the current file as-is.
+        curr_passed, total = stats.get("num_passed", 0) stats.get("num_passed", 0), stats.get("num_total", 0)
+        if curr_passed < self.best_pass_count:
+            self._restore()
+        elif curr_passed > self.best_pass_count:
+            self.best_pass_count = passed
+            self.snapshot(f"parity {passed}/{total}")
 
 class KernelOptimizer:
     """
@@ -260,6 +312,9 @@ class KernelOptimizer:
         if not torch_fn:
             raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
 
+        # Rollback manager: owns the lock-wins snapshot and pass-count tracking
+        rollback = Rollback(bwd_fp)
+
         # compute shapes for all dims upfront for logging/breadcrumbs
         # shapes = [(inp.shape for inp in make_args(i)[0]) for i in sweep]
         shapes = []
@@ -361,6 +416,10 @@ class KernelOptimizer:
 
             # Breadcrumb: minimal
             self.patcher.remember("gradcheck", stats)
+
+
+            rollback.maybe_snapshot(stats)
+
 
             if not ok:
                 if VERBOSE:
