@@ -89,11 +89,12 @@ class Rollback:
         except Exception as e:
             self._log(f"warning: restore failed: {type(e).__name__}: {e}")
 
-    def maybe_snapshot_or_restore(self, stats):
+    def maybe_snapshot_or_restore(self, stats) -> bool:
         """Lock on parity improvement; optionally restore after sustained regression.
         Correctness-first. Snapshot immediately on increases in num_passed.
         If parity regresses, tolerate a few attempts (patience_parity_restore) to
         let the model iterate on a risky refactor before restoring the last lock.
+        Returns True iff a restore occurred (caller can skip fix prompt and re-run).
         """
         # Parity regression handling:
         # - If fewer shapes pass than our best so far, revert to the locked snapshot.
@@ -109,14 +110,17 @@ class Rollback:
                 self._log("parity regress threshold reached -> restore")
                 self._restore()
                 self._parity_regress_streak = 0
+                return True
         elif curr_passed > self.best_pass_count:
             self.best_pass_count = curr_passed
             prev = self.best_pass_count
             self._log(f"parity improve: best {prev} -> {self.best_pass_count} of {total} -> snapshot")
             self.snapshot(f"parity {curr_passed}/{total}")
             self._parity_regress_streak = 0
+            return False
         else:
             self._log(f"parity unchanged: {curr_passed}/{total} == best {self.best_pass_count}")
+            return False
 
 class KernelOptimizer:
     """
@@ -439,11 +443,15 @@ class KernelOptimizer:
             # Breadcrumb: minimal
             self.patcher.remember("gradcheck", stats)
 
-
-            rollback.maybe_snapshot_or_restore(stats)
-
+            was_restored = rollback.maybe_snapshot_or_restore(stats)
 
             if not ok:
+                if was_restored:
+                    # avoid showing stale errors to the model after a restore by skipping the fix prompt and
+                    # advancing to re-run gradcheck on the restored kernel next iteration
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
+                    continue
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
                 _ = self._llm_request_and_apply(
