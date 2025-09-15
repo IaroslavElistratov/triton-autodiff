@@ -58,6 +58,9 @@ class Rollback:
         self.best_pass_count: int = 0
         self._parity_regress_streak: int = 0
         self._patience_parity_restore: int = int(max(0, patience_parity_restore))
+        self._log(
+            f"init: patience_parity_restore={self._patience_parity_restore} | lock={self.lock_fp}"
+        )
 
     def _log(self, text: str) -> None:
         if VERBOSE:
@@ -70,7 +73,7 @@ class Rollback:
         """
         try:
             shutil.copyfile(self.backward_fp, self.lock_fp)
-            msg = f"locked -> {self.lock_fp}"
+            msg = f"snapshot: {self.backward_fp} -> {self.lock_fp}"
             if note:
                 msg += f" ({note})"
             self._log(msg)
@@ -82,7 +85,7 @@ class Rollback:
         try:
             if os.path.isfile(self.lock_fp):
                 shutil.copyfile(self.lock_fp, self.backward_fp)
-                self._log(f"restored {self.lock_fp} -> {self.backward_fp}")
+                self._log(f"restore: {self.lock_fp} -> {self.backward_fp}")
         except Exception as e:
             self._log(f"warning: restore failed: {type(e).__name__}: {e}")
 
@@ -99,13 +102,21 @@ class Rollback:
         curr_passed, total = int(stats.get("num_passed", 0)), int(stats.get("num_total", 0))
         if curr_passed < self.best_pass_count:
             self._parity_regress_streak += 1
+            self._log(
+                f"parity regress: {curr_passed}/{total} < best {self.best_pass_count} | streak {self._parity_regress_streak}/{self._patience_parity_restore}"
+            )
             if self._parity_regress_streak >= self._patience_parity_restore:
+                self._log("parity regress threshold reached -> restore")
                 self._restore()
                 self._parity_regress_streak = 0
         elif curr_passed > self.best_pass_count:
             self.best_pass_count = curr_passed
+            prev = self.best_pass_count
+            self._log(f"parity improve: best {prev} -> {self.best_pass_count} of {total} -> snapshot")
             self.snapshot(f"parity {curr_passed}/{total}")
             self._parity_regress_streak = 0
+        else:
+            self._log(f"parity unchanged: {curr_passed}/{total} == best {self.best_pass_count}")
 
 class KernelOptimizer:
     """
