@@ -30,14 +30,20 @@ GLOBAL_GUARDRAILS = (
 
 # Default phase sequence — light guidance per step; can be replaced/tuned.
 PHASES: Sequence[Phase] = (
-    Phase("1 / Refactor only", "Re-introduce loops and tail masks. Keep atomics.", "Only loop structure and pointer math.", 0.25),
-    Phase("2 / Atomics->private", "Privatize accumulators per CTA. One write per output tile.", "No other unrelated kernel changes.", 0.5),
+    Phase("1 / Re-introduce loops", "Re-introduce loops. Add tail masks where appropriate. Keep atomics.", "Only loop structure and pointer math.", 0.25),
+    Phase(
+        "2 / Atomics->private",
+        "Privatize accumulators per CTA. One write per output tile. Remove atomics by privatizing accumulation within a CTA and writing each output tile once after a local reduction. ",
+        # "Do NOT blindly swap atomics for direct store, remove atomics while preserving numerics semantics: privatize accumulation per CTA and write once per output tile. Potentially, adjust grid/tiling or add an explicit reduction; do not loop over the wrong axis. No other unrelated kernel changes.",
+        #  " try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improve the performance. "
+        "You may change tiling/parallelization or introduce an explicit reduction to replace atomics. Do not drop required reductions, reduce over the wrong axis, or blindly swap atomics with stores (introduces races). Preserve numerics (gradcheck must continue to pass across test shapes). No unrelated kernel changes.",
+        0.5,
+    ),
     # todo: add a check to verify that
     Phase("3 / Coalesce/layout", "Coalesce loads/stores; adopt tl.make_block_ptr; adjust tile shapes.", "Algorithm unchanged.", 0.5),
-    # Phase("2 / Index & strides", "Add masks where appropriate.", "No atomics changes.", 0.25),
-    # Phase("5 / Meta tune", "Sweep BLOCK_SIZE_{M,N,K}, num_warps, num_stages.", "Emit one patch per turn.", 0.25),
+    # Phase("4 / Meta tune", "Sweep BLOCK_SIZE_{M,N,K}, num_warps, num_stages.", "Emit one patch per turn.", 0.25),
     # todo: requires ability to change the fwd kernel
-    # Phase("6 / Recompute vs read", "Recompute-vs-read forward intermediates.", "No new atomics.", 0.25),
+    # Phase("5 / Recompute vs read", "Recompute-vs-read forward intermediates.", "No new atomics.", 0.25),
 )
 
 class BaseStrategy:
@@ -60,7 +66,11 @@ class RegularStrategy(BaseStrategy):
         return "Phase = optimize. Improve performance without changing numerics."
 
     def next_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
-        header = "Phase = optimize. Improve performance without changing numerics.\n" + GLOBAL_GUARDRAILS
+        header = (
+            "Phase = optimize. Improve performance without changing numerics.\n"
+            " * atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improve the performance. "
+            + GLOBAL_GUARDRAILS
+        )
         return header, self._temp
 
 class PhasedStrategy(BaseStrategy):
@@ -104,6 +114,7 @@ class PhasedStrategy(BaseStrategy):
             f"Guardrails (phase-specific): {p.guardrails}"
         )
         return header, p.temp
+
     def advance(self, changed: bool, parity_ok: bool) -> None:
         # Advance to the next phase only on a successful, gradcheck-passing change.
         if changed and parity_ok and self.i < len(self.phases) - 1:
