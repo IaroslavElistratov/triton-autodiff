@@ -15,7 +15,8 @@ from .orchestrator import KernelOptimizer, Config
 def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
     ap.add_argument("--max-iters", type=int, default=32)
-    ap.add_argument("--patience", type=int, default=4)
+    ap.add_argument("--patience_perf_stop", type=int, default=4)
+    ap.add_argument("--patience_parity_restore", type=int, default=3)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
     ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
 
@@ -35,7 +36,9 @@ def main() -> None:
     # Strategy toggle (regular | phased)
     os.environ["KERNEL_AGENT_STRATEGY"] = args.mode
 
-    cfg = Config(max_iters=args.max_iters, patience=args.patience,
+    cfg = Config(max_iters=args.max_iters,
+                 patience_perf_stop=args.patience_perf_stop,
+                 patience_parity_restore=args.patience_parity_restore,
                  min_rel_improvement=args.min_rel_impr)
     # Defer heavy LLM imports unless we're actually iterating
     if args.max_iters > 0:

@@ -33,7 +33,8 @@ def _file_mtime_ns(p: str) -> int | None:
 @dataclass
 class Config:
     max_iters: int = 6
-    patience: int = 2
+    patience_perf_stop: int = 2  # stop loop after this many non-improving full-parity iterations (performance patience)
+    patience_parity_restore: int = 2  # allow this many parity-regression iterations before restoring snapshot
     min_rel_improvement: float = 0.10   # require >= +10% throughput to accept
     # todo: a better way?
     snippet_max_lines: int = 400        # bound context shown to the LLM
@@ -51,10 +52,12 @@ class Rollback:
     - Restores from that snapshot on plateau/regress (e.g., patience stop)
     - Tracks best parity coverage across iterations
     """
-    def __init__(self, backward_fp: str) -> None:
+    def __init__(self, backward_fp: str, patience_parity_restore: int = 0) -> None:
         self.backward_fp = backward_fp
         self.lock_fp = f"{backward_fp}.lock"
         self.best_pass_count: int = 0
+        self._parity_regress_streak: int = 0
+        self._patience_parity_restore: int = int(max(0, patience_parity_restore))
 
     def _log(self, text: str) -> None:
         if VERBOSE:
@@ -62,8 +65,8 @@ class Rollback:
 
     def snapshot(self, note: str = "") -> None:
         """Save current kernel contents to the lock file.
-        This is the single I/O point used by higher-level triggers
-        (parity/perf). Keeping it here avoids duplicate try/except noise.
+        Single I/O choke point used by higher-level triggers (parity/perf).
+        Keeping it here avoids duplicate try/except noise and centralizes logging.
         """
         try:
             shutil.copyfile(self.backward_fp, self.lock_fp)
@@ -83,18 +86,26 @@ class Rollback:
         except Exception as e:
             self._log(f"warning: restore failed: {type(e).__name__}: {e}")
 
-    def maybe_snapshot(self, stats):
-        """Lock when the number of passing shapes increases"""
+    def maybe_snapshot_or_restore(self, stats):
+        """Lock on parity improvement; optionally restore after sustained regression.
+        Correctness-first. Snapshot immediately on increases in num_passed.
+        If parity regresses, tolerate a few attempts (patience_parity_restore) to
+        let the model iterate on a risky refactor before restoring the last lock.
+        """
         # Parity regression handling:
         # - If fewer shapes pass than our best so far, revert to the locked snapshot.
         # - If more shapes pass (but not all), snapshot this incremental improvement.
         # - If equal, leave the current file as-is.
-        curr_passed, total = stats.get("num_passed", 0) stats.get("num_passed", 0), stats.get("num_total", 0)
+        curr_passed, total = int(stats.get("num_passed", 0)), int(stats.get("num_total", 0))
         if curr_passed < self.best_pass_count:
-            self._restore()
+            self._parity_regress_streak += 1
+            if self._parity_regress_streak >= self._patience_parity_restore:
+                self._restore()
+                self._parity_regress_streak = 0
         elif curr_passed > self.best_pass_count:
-            self.best_pass_count = passed
-            self.snapshot(f"parity {passed}/{total}")
+            self.best_pass_count = curr_passed
+            self.snapshot(f"parity {curr_passed}/{total}")
+            self._parity_regress_streak = 0
 
 class KernelOptimizer:
     """
@@ -313,7 +324,7 @@ class KernelOptimizer:
             raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
-        rollback = Rollback(bwd_fp)
+        rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore)
 
         # compute shapes for all dims upfront for logging/breadcrumbs
         # shapes = [(inp.shape for inp in make_args(i)[0]) for i in sweep]
@@ -418,7 +429,7 @@ class KernelOptimizer:
             self.patcher.remember("gradcheck", stats)
 
 
-            rollback.maybe_snapshot(stats)
+            rollback.maybe_snapshot_or_restore(stats)
 
 
             if not ok:
@@ -460,16 +471,21 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
 
             # Simple plateau logic governed by cfg.patience and min_rel_improvement
-            improved = (best_metrics is None) or (
+            # Only consider performance when parity is full; otherwise ignore perf for acceptance
+            full_parity = bool(stats.get("num_total", 0)) and (int(stats.get("num_passed", 0)) == int(stats.get("num_total", 0)))
+            improved = full_parity and ((best_metrics is None) or (
                 cand["median_ms"] <= (1.0 - self.cfg.min_rel_improvement) * best_metrics["median_ms"]
-            )
+            ))
 
             if improved:
                 best_metrics = cand
                 non_improve = 0
+                # lock perf improvement only under full parity
+                rollback.snapshot("perf-improved (on full parity)")
             else:
                 non_improve += 1
-                if non_improve >= self.cfg.patience:
+                # patience triggers only in full parity mode
+                if full_parity and (non_improve >= self.cfg.patience_perf_stop):
                     stop_reason = "patience"
                     if VERBOSE:
                         print(f"[kernel-agent][it={it}] Early stop: patience reached (non_improve={non_improve})")
