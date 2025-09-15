@@ -139,7 +139,7 @@ class MinimalLLMPatchProvider:
     # from other failure modes and report errors upstream.
     last_stop_reason: str = ""
     # Max breadcrumbs kept for prompt context; small to avoid token bloat.
-    history_max_items: int = 8
+    history_max_items: int = 2
 
     # Optional streaming sink for thinking tokens; if None and
     # KERNEL_AGENT_STREAM_THINKING is truthy, a default console printer is used.
