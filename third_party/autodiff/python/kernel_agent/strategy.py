@@ -33,13 +33,23 @@ PHASES: Sequence[Phase] = (
     Phase("1 / Re-introduce loops", "Re-introduce loops. Add tail masks where appropriate. Keep atomics.", "Only loop structure and pointer math.", 0.25),
     Phase(
         "2 / Atomics->private",
-        "Privatize accumulators per CTA. One write per output tile. Remove atomics by privatizing accumulation within a CTA and writing each output tile once after a local reduction. ",
         # "Do NOT blindly swap atomics for direct store, remove atomics while preserving numerics semantics: privatize accumulation per CTA and write once per output tile. Potentially, adjust grid/tiling or add an explicit reduction; do not loop over the wrong axis. No other unrelated kernel changes.",
-        #  " try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improve the performance. "
-        "You may change tiling/parallelization or introduce an explicit reduction to replace atomics. Do not drop required reductions, reduce over the wrong axis, or blindly swap atomics with stores (introduces races). Preserve numerics (gradcheck must continue to pass across test shapes). No unrelated kernel changes.",
+        # "Privatize accumulators per CTA. One write per output tile. Remove atomics by privatizing accumulation within a CTA and writing each output tile once after a local reduction. ",
+        "Privatize accumulators per CTA and write each output tile once after a local reduction. Remove atomics by local accumulation. You may change tiling/parallelization or add an explicit reduction. " +
+        "Do not drop required reductions, reduce over the wrong axis, or swap atomics for direct stores. Preserve numerics across all test shapes (gradcheck must pass). No unrelated changes.\n",
+        (
+            "Checklist:\n"
+            "- One write per output tile after a per-CTA reduction.\n"
+            "- No direct-store swaps in place of atomics.\n"
+            "- Ensure reducing over correct axis.\n"
+            "- Tiling/parallelization/grid changes allowed; explicit reduction allowed.\n"
+            "- Gradcheck must pass across the sweep.\n"
+            "- No unrelated changes.\n"
+        ),
         0.5,
     ),
-    # todo: add a check to verify that
+    # todo: implement guardrails_check_phase3
+    # todo-high: make it an open-end goal instead? since i can't verify "Coalesce loads/stores" anyway
     Phase("3 / Coalesce/layout", "Coalesce loads/stores; adopt tl.make_block_ptr; adjust tile shapes.", "Algorithm unchanged.", 0.5),
     # Phase("4 / Meta tune", "Sweep BLOCK_SIZE_{M,N,K}, num_warps, num_stages.", "Emit one patch per turn.", 0.25),
     # todo: requires ability to change the fwd kernel

@@ -230,15 +230,16 @@ class MinimalLLMPatchProvider:
             "Use the analysis channel for planning (no patcher tool call). Then, as your final action, call the function tool apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}. No prose.\n"
 
             # not "what to try next;" -- because this will be dictated by Strategy, model should not decide that
-            "Maintain a brief iteration note (<= 10 lines; no code/diffs) in the backward Triton kernel's docstring.\n"
-            "Rewrite this docstring in the same patch as your code edits, focusing on what changed, what failed and why, and key takeaways worth remembering for the next iteration.\n"
-            "This docstring update is always allowed alongside your code edits. Do not submit a docstring-only patch.\n"
+            "Maintain a concise iteration note (<= 15 lines; no code/diffs; no future plans) in the backward Triton kernel's docstring.\n"
+            "Whenever you modify the backward kernel code you MUST rewrite/update this docstring in the same patch as your code edits, focusing on key takeaways worth remembering for the next iteration (e.g. what changed, what failed and why, etc.).\n"
+            "This docstring update is always required alongside your code edits. Do not submit a docstring-only patch.\n"
 
             # observed error cases:
             # "Reply with substantive code changes.\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles.\n"
             "If gradient summary is OK assume the kernel and stub compute gradients correctly -- do not second guess it.\n"
-            "If you change the kernel signature, don't forget to update the kernel's call-site in the stub; and vice versa. Keep the kernel call-site and the kernel's signature in sync.\n"
+            "Remember that the backward_kernel is called from the backward_stub. So when you e.g. add/replace/remove arguments in the backward_kernel function definition, always make sure that you also updated the place (in the backward_stub) where this backward_kernel is called from.\n"
+            "If you change the backward_kernel signature, don't forget to update the kernel's call-site in the backward_stub and vice versa. Always keep the backward_kernel's call-site (in backward_stub) and the backward_kernel's signature in sync.\n"
             "Under no circumstance replace triton kernel with pytorch operations.\n"
             "Inside triton kernel you must use functions under tl.* namespace not triton.* namespace (e.g. tl.cdiv not triton.cdiv).\n"
         )
@@ -258,7 +259,7 @@ class MinimalLLMPatchProvider:
             spec_text
             + f"\n\n{phase}\n"
             + "MEMORY REQUIREMENT:\n"
-            + " - Rewrite the backward kernel's docstring to briefly note this iteration (<= 10 lines; no code/diffs).\n"
+            + " - Rewrite the backward kernel's docstring to briefly note this iteration (<= 15 lines; no code/diffs).\n"
             + " - Focus on: what you changed; what previously failed and why; and what key takeaways worth remembering for the next iteration.\n"
             + " - Do this in the SAME patch as your code edits. Do NOT submit a docstring-only patch.\n\n"
             # todo-high: maybe don't manually save it but let llm an option to write a note for the next iteration and work done in the current iteration
