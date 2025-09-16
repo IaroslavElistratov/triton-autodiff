@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 from triton.runtime.jit import JITFunction
+from .worker import run_compile_child
 
 # def _norm_bench(x) -> dict[str, float]:
 #     """Normalize benchmark() result to {'throughput': float} if possible."""
@@ -211,48 +212,49 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     # This preflight keeps the same semantics but fails here where the errors are being caught (as part
     # of compile_kernel and not later, when StubOverrideDCK.backward will be called unguarded e.g.
     # during gradcheck, where a raised exception will crash the program)
+    is_worker = os.environ.get("KERNEL_AGENT_WORKER") in {"gradcheck", "bench"}
     sweep = ns.get("SWEEP")
     make_args = ns.get("make_args")
-    if isinstance(sweep, (list, tuple)) and sweep and callable(make_args):
+    if is_worker and isinstance(sweep, (list, tuple)) and sweep and callable(make_args):
         def _preflight_backward():
             import torch
-            dims = sweep[0]
-            # Obtain exemplar inputs using the user-provided helper
-            args, kwargs = make_args(dims)
-            kwargs = dict(kwargs or {})
+            for dims in sweep:
+                # Obtain exemplar inputs using the user-provided helper
+                args, kwargs = make_args(dims)
+                kwargs = dict(kwargs or {})
 
-            # Enable grads for floating-point tensors only (matches typical autograd expectations)
-            pos_args = list(args or [])
-            for i, v in enumerate(pos_args):
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    pos_args[i] = v.detach().requires_grad_(True)
-            for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                    kwargs[k] = v.detach().requires_grad_(True)
+                # Enable grads for floating-point tensors only (matches typical autograd expectations)
+                pos_args = list(args or [])
+                for i, v in enumerate(pos_args):
+                    if isinstance(v, torch.Tensor) and v.is_floating_point():
+                        pos_args[i] = v.detach().requires_grad_(True)
+                for k, v in kwargs.items():
+                    if isinstance(v, torch.Tensor) and v.is_floating_point():
+                        kwargs[k] = v.detach().requires_grad_(True)
 
-            # Forward once via the fused op (stub)
-            y = op(*pos_args, **kwargs)
-            ys = y if isinstance(y, (tuple, list)) else (y,)
-            ys = tuple(t for t in ys if isinstance(t, torch.Tensor))
-            if not ys:
-                return  # nothing to differentiate
+                # Forward once via the fused op (stub)
+                y = op(*pos_args, **kwargs)
+                ys = y if isinstance(y, (tuple, list)) else (y,)
+                ys = tuple(t for t in ys if isinstance(t, torch.Tensor))
+                if not ys:
+                    continue  # nothing to differentiate
 
-            # Reduce outputs to a scalar to avoid constructing explicit upstreams.
-            # This mirrors gradcheck behavior without needing grad_outputs.
-            scalar = None
-            for t in ys:
-                scalar = (t.sum() if scalar is None else scalar + t.sum())
+                # Reduce outputs to a scalar to avoid constructing explicit upstreams.
+                # This mirrors gradcheck behavior without needing grad_outputs.
+                scalar = None
+                for t in ys:
+                    scalar = (t.sum() if scalar is None else scalar + t.sum())
 
-            # Collect grad-requiring inputs (positional + keyword)
-            grad_ins = []
-            for v in pos_args:
-                if isinstance(v, torch.Tensor) and v.requires_grad:
-                    grad_ins.append(v)
-            for v in kwargs.values():
-                if isinstance(v, torch.Tensor) and v.requires_grad:
-                    grad_ins.append(v)
-            if grad_ins and scalar is not None:
-                torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
+                # Collect grad-requiring inputs (positional + keyword)
+                grad_ins = []
+                for v in pos_args:
+                    if isinstance(v, torch.Tensor) and v.requires_grad:
+                        grad_ins.append(v)
+                for v in kwargs.values():
+                    if isinstance(v, torch.Tensor) and v.requires_grad:
+                        grad_ins.append(v)
+                if grad_ins and scalar is not None:
+                    torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
 
         try:
             # Use the same timeout guard as other compile-time steps
@@ -273,7 +275,6 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
             raise CompileError(err) from e
 
     return op, bwd_fp, ns
-
 
 
 
@@ -305,85 +306,6 @@ def run_with_timeout(fn, timeout_s: float):
     if ok:
         return payload
     raise payload  # type: ignore[misc]
-
-
-def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
-    """
-    Child process worker for the compile probe.
-
-    Rationale:
-      - Run compile+preflight in an isolated CUDA context so OOB or device faults
-        cannot poison the parent's context. Reconstruct everything in the child
-        to avoid passing non-picklable callables/tensors across processes.
-      - Do NOT return live tensors; only a small status/message via a Queue.
-    """
-    try:
-        # Mark this process as the probe child so compile_kernel won't spawn again.
-        os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
-
-        # If CUDA is unavailable, treat as a hard error and exit child.
-        if not torch.cuda.is_available():
-            # Signal fatal probe failure to parent and return cleanly; parent raises.
-            q.put(("err", "no_cuda"))
-            q.close(); q.join_thread()
-            os._exit(1)
-        # Reconstruct everything fresh in the child; this triggers the same
-        # compile path and the in-process backward preflight inside compile_kernel.
-        compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
-        # Intentionally avoid torch.cuda.synchronize() and any cudaDeviceReset() here.
-        # Rationale: the child process will exit immediately after signaling OK, and
-        # process exit destroys the CUDA context and frees GPU resources. This keeps
-        # the success path fast and avoids backend/version-specific CUDA APIs.
-        q.put(("ok", None))
-        q.close(); q.join_thread()
-        os._exit(0)
-    except Exception as e:
-        # First report error to parent and flush queue so parent never hangs
-        try:
-            q.put(("err", {"etype": type(e).__name__, "emsg": str(e)}))
-        except Exception:
-            pass
-        q.close(); q.join_thread()
-        # Intentionally avoid torch.cuda.synchronize() and any cudaDeviceReset() here.
-        # Rationale: exiting the child process is sufficient to release GPU resources
-        # and isolate device faults; additional sync/reset is unnecessary and brittle
-        # across CUDA backends/builds. Process exit will destroy the child's context.
-        # Hard-exit to guarantee isolation; parent inspects exit code and status.
-        # Reason for not throwing exception instead of os.exit is it seems the child process
-        # shouldn’t rely on raising exceptions across process boundaries?
-        os._exit(1)
-
-def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
-    """
-    Spawn a short-lived child that runs compile_kernel(...) as a probe.
-
-    Why here and why child:
-      - compile_kernel includes a minimal backward preflight; running it in a child
-        contains OOB/device faults so the main agent loop can continue and let the LLM fix.
-      - We ignore compile return values; the parent will rebuild for real after probe.
-    """
-    ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
-    q = ctx.Queue(1)
-    # Use non-daemon child so resources flush cleanly; explicitly join below.
-    p = ctx.Process(target=_compile_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
-    p.start()
-    try:
-        status, payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
-    except (queue.Empty, EOFError):
-        # print(f"[probe] queue wait failed: {type(e).__name__}: {e}; alive={p.is_alive()}, exitcode={p.exitcode}")
-        # Child wedged or died before posting a status – kill and escalate
-        p.terminate(); p.join(1.0)
-        if p.is_alive():
-            getattr(p, "kill", p.terminate)()
-            p.join()
-        raise TimeoutError("compile probe hung or child died without reporting")
-    finally:
-        q.close()
-    p.join()
-    if status != "ok":
-        raise RuntimeError(f"compile probe failed: {payload}")
-    if p.exitcode != 0:
-        raise RuntimeError(f"compile probe child exited with code {p.exitcode} (status={status})")
 
 
 

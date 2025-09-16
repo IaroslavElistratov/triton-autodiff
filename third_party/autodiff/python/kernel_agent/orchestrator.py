@@ -7,8 +7,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, CompileError
-from .tools.gradcheck.core import check_op_backward_parity_sweep
-from .tools.benchmark import bench_op, reduce_bench
+from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy, GLOBAL_GUARDRAILS
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
@@ -411,18 +410,12 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] Running gradient_check (parity)")
 
             try:
-                # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction
-                ok, stats = check_op_backward_parity_sweep(
-                    ref_fwd=torch_fn,
-                    my_op=op,
-                    sidecar=sidecar,
-                    outputs="auto",
-                    # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
-                    # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
-                    # todo-high: rm; too-high deltas
-                    atol=0.07,
-                    rtol=0.02,
-                )
+                # Run parity in an isolated child process;
+                # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
+                # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
+                # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
+                # todo-high: rm; too-high deltas
+                ok, stats = run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 if VERBOSE:
@@ -468,12 +461,8 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
             try:
-                # benchmark across the full SWEEP to align with parity gating
-                bench_records = bench_op(
-                    op,              # autograd-backed op from create_op(...)
-                    sidecar,         # sidecar providing SWEEP and make_args
-                    mode="bwd",
-                )
+                # Benchmark in an isolated child process
+                cand = run_bench_child(fwd_fp, overwrite_fp=bwd_fp)
             except Exception as e:
                 err = f"{type(e).__name__}: {e}"
                 if VERBOSE:
@@ -486,7 +475,6 @@ class KernelOptimizer:
                     temperature=0.35,
                 )
                 continue
-            cand = reduce_bench(bench_records)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
 
