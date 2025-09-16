@@ -94,7 +94,13 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
               BLOCK_N: tl.constexpr,  #
               STAGE: tl.constexpr  #
               ):
-
+    """
+    explanation of the forward kernel
+    basically (ignoring batch and num_heads dims and is_casual flag):
+    - each kernel instance gets a tile of Q (it holds on to that tile/slice of Q for the duration of the kernel)
+    - each kernel instance then splits K and V (by BLOCK_SIZE_N), and loops over the resulting number of tiles (in K, and V) -- red loop
+    - to compute a tile_q@tile_k@tile_v, and accumulate these results (across the iterations of the red loop) into a private buffer, which eventually (after the last iteration of the RED loop) is a tile Out
+    """
 
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -228,8 +234,12 @@ def torch_fn(q, k, v, causal=False, sm_scale=0.5):
 
 
 SWEEP = [
-    {"B": 256, "NUM_HEADS": 64, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
-    for N in (16, 32, ) # (16, 128, 256, 512, 1024, 2048, 4096)
+    # todo: use these instead
+    # "HEAD_DIM": 64
+
+    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
+    for N in (16, 1024, 2048, 4096, 8192, 16384)
+    # for N in (16, 32, )
 ]
 
 

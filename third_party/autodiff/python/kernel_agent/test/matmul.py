@@ -121,9 +121,17 @@ def torch_fn(a, b):
 SWEEP = [
     # {"M": size, "N": size, "K": 16}
     # for size in (256, 512, 1024, 2048)
+
+    # {"M": 256, "N": 256, "K": 16},
+    # {"M": 256, "N": 256, "K": 32},
+
+    # {"M": 2**i, "N": 2**i, "K": 2**i}
+    # for i in range(8, 13)
+
     {"M": 256, "N": 256, "K": 16},
-    {"M": 256, "N": 256, "K": 32},
 ]
+SWEEP += [{"M": 2**i, "N": 2**i, "K": 2**i} for i in range(8, 13)]
+
 
 def make_args(dims, device="cuda", dtype=torch.float16):
     M, N, K = dims["M"], dims["N"], dims["K"]
