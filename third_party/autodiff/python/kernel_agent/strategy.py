@@ -22,7 +22,8 @@ GLOBAL_GUARDRAILS = (
     # That's not needed strictly speaking but I think cleaner when model output tool call in the final channel
     "- Use analysis for planning only (no patcher tool call); call apply_patch once as your final action.\n"
     "- No rule echoing; diff only.\n"
-    "- ≤120 changed lines per patch.\n"
+    # note: attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
+    # "- ≤120 changed lines per patch.\n"
     "- Include at least one '-' anchor line per hunk.\n"
     "- Do NOT change the backward stub's signature.\n"
     "- Single backward kernel and single stub."

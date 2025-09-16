@@ -287,6 +287,7 @@ class KernelOptimizer:
                 state_facts={"compile_error": err},
                 temperature=0.25,
             )
+            # todo: but _llm_request_and_apply already catches errors twice -- no, it only catches patch application fails
             # catch here as well, because this create_op can independently error
             try:
                 return create_op(fwd_fp, overwrite_fp=overwrite_fp)

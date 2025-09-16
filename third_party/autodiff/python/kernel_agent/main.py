@@ -2,6 +2,7 @@
 # cd /root/triton-autodiff/third_party/autodiff/python/kernel_agent
 # export KERNEL_AGENT_VERBOSE=1 KERNEL_AGENT_CAPTURE_THINKING=1 KERNEL_AGENT_STREAM=1 TRITON_AUTODIFF_DIR=/root/triton-autodiff
 # kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --reasoning-effort medium --mode phased > /root/triton-autodiff/LOGS/out.txt
+# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/attention.py --reasoning-effort medium --mode phased > /root/triton-autodiff/LOGS/out.txt
 
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
     ap.add_argument("--max-iters", type=int, default=32)
     ap.add_argument("--patience_perf_stop", type=int, default=4)
-    ap.add_argument("--patience_parity_restore", type=int, default=3)
+    ap.add_argument("--patience_parity_restore", type=int, default=4)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
     ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
 
