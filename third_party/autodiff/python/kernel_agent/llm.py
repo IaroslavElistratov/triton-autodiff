@@ -224,13 +224,13 @@ class MinimalLLMPatchProvider:
         # )
 
         # tail = (
-            "In each turn, you can only call apply_patch({patch: ...}) once, make this your final action for that turn.\n"
+            "In each turn, you can call functions.apply_patch({patch: ...}) at most once, and only as your final action for that turn.\n"
             "Before calling it, form a brief high-level plan of your changes in your private reasoning and rehearse the patch.\n"
-            "When you call apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Do not print the envelope/rules.\n"
-            "Use the analysis channel for planning (no patcher tool call). Then, as your final action, call the function tool apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}. No prose.\n"
+            "When you call functions.apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Include the *** Begin Patch / *** End Patch envelope inside the patch argument; do not echo the rule list.\n"
+            "Use the analysis channel for planning (no functions.apply_patch in analysis). Then, as your final action, call the function tool functions.apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}. No prose.\n"
 
             # not "what to try next;" -- because this will be dictated by Strategy, model should not decide that
-            "Maintain a concise iteration note (<= 15 lines; no code/diffs; no future plans) in the backward Triton kernel's docstring.\n"
+            "Maintain a concise iteration note (<= 15 lines; no code/diffs; no future plans) in the backward Triton kernel's docstring. That note should contain a concise but informative note to your future self about this iteration.\n"
             "Whenever you modify the backward kernel code you MUST rewrite/update this docstring in the same patch as your code edits, focusing on key takeaways worth remembering for the next iteration (e.g. what changed, what failed and why, etc.).\n"
             "This docstring update is always required alongside your code edits. Do not submit a docstring-only patch.\n"
 

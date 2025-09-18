@@ -257,8 +257,12 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
                     torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
 
         try:
+            # todo-now: run check_op_backward_parity_sweep here to make it closer to what the parent will run
             # Use the same timeout guard as other compile-time steps
             run_with_timeout(_preflight_backward, CODE_EXEC_TIMEOUT_S)
+            # todo: but taht seems to be device-wide
+            # forces any pending async device faults from the preflight thread to surface immediately in the child, so they get converted into a CompileError before returning to the parent
+            torch.cuda.synchronize()
         except BaseException as e:
             # Surface early as a structured CompileError so orchestrator can recover
             tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))

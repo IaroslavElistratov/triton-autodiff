@@ -443,6 +443,11 @@ class KernelOptimizer:
                 if was_restored:
                     # avoid showing stale errors to the model after a restore by skipping the fix prompt and
                     # advancing to re-run gradcheck on the restored kernel next iteration
+                    #
+                    # Restore happened this iteration: skip prompting the model with stale failures
+                    # and immediately re-test on the restored kernel next iteration.
+                    # Also reset perf patience counter so a prior non_improve streak doesn't trip early.
+                    non_improve = 0  # reset perf patience after restore
                     if VERBOSE:
                         print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
                     continue
