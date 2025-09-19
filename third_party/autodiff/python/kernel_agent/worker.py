@@ -2,7 +2,7 @@ import os
 import multiprocessing as mp
 import queue
 import traceback
-import torch
+ 
 import sys
 
 # todo-high: ugly, restructure project folders to solve that
@@ -56,14 +56,15 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         os.environ["KERNEL_AGENT_WORKER"] = "compile"
         # Lazy import to avoid circular imports at module load time
         from .utils import compile_kernel
-        _ensure_triton_autodiff_api_alias()
         # Ensure triton_autodiff_api alias is registered for _autodiff_api consumers
-        from ..api import autodiff as _ad  # noqa: F401
+        _ensure_triton_autodiff_api_alias()
+        # Import torch lazily inside the child process only
+        import torch as _t
         # Mark this process as the probe child so compile_kernel won't spawn again.
         os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
 
         # If CUDA is unavailable, treat as a hard error and exit child.
-        if not torch.cuda.is_available():
+        if not _t.cuda.is_available():
             # Signal fatal probe failure to parent and return cleanly; parent raises.
             q.put(("err", "no_cuda"))
             q.close(); q.join_thread()
@@ -74,7 +75,7 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         _op, _bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
         # Ensure any pending device work (e.g., preflight backward) is observed before exit,
         # so device-side asserts surface in this child, not later in the parent.
-        torch.cuda.synchronize()
+        _t.cuda.synchronize()
         q.put(("ok", _bwd_fp))
         q.close(); q.join_thread()
         os._exit(0)
@@ -152,7 +153,6 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Late import inside the child to avoid importing CUDA stacks in parent.
         from .utils import compile_kernel
         _ensure_triton_autodiff_api_alias()
-        from ..api import autodiff as _ad  # noqa: F401
         from .tools.gradcheck.core import check_op_backward_parity_sweep
         import torch as _t
 
@@ -213,7 +213,6 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
     try:
         from .utils import compile_kernel
         _ensure_triton_autodiff_api_alias()
-        from ..api import autodiff as _ad  # noqa: F401
         from .tools.benchmark import bench_op, reduce_bench
         import torch as _t
 
