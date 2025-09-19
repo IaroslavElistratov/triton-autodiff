@@ -3,7 +3,7 @@
 A fork of [Triton](https://github.com/openai/triton) with an experimental automatic differentiation support.
 
 This work clones the main Triton repository, but intends to minimize
-divergences in the core. Most of the autodiff work is in [third_party/autodiff](third_party/autodiff)
+divergences in the core. Most of the autodiff work is in [third_party/autodiff](triton_autodiff/third_party/autodiff)
 subdirectory.
 
 **NOTE: This project is in its early stages and under heavy development -- it is not yet stable, and not yet feature complete.**
@@ -24,7 +24,7 @@ Below I show how this repo helps to simplify your kernel definitions. The projec
 
 Let's look at flash attention v2 impl from [official triton tutorial](https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py).
 
-I'll show code snippets below. **For end to end example see: [autodiff/test/flash_attention_v2](third_party/autodiff/test/flash_attention_v2)**
+I'll show code snippets below. **For end to end example see: [autodiff/test/flash_attention_v2](triton_autodiff/third_party/autodiff/test/flash_attention_v2)**
 
 <details>
   <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
@@ -385,7 +385,7 @@ v.requires_grad = True
 
 Let's look at layer-norm impl from [official triton tutorial](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py).
 
-I'll show code snippets below. **For end to end example see: [autodiff/test/layernorm](third_party/autodiff/test/layernorm)**
+I'll show code snippets below. **For end to end example see: [autodiff/test/layernorm](triton_autodiff/third_party/autodiff/test/layernorm)**
 
 <details>
   <summary>❗ CLICK TO EXPAND DIFF ❗</summary>
@@ -576,7 +576,7 @@ bias.requires_grad = True
 # 🔧 Other examples
 
 <!-- **See 10 more examples in [third_party/autodiff/test](backend/autodiff/test)**. -->
-For more examples see [third_party/autodiff/test](third_party/autodiff/test).
+For more examples see [third_party/autodiff/test](triton_autodiff/third_party/autodiff/test).
 
 
 
@@ -632,7 +632,7 @@ Adding not just auto-diff itself, but rather, adding cool things *on top of* it.
 <!-- 
 # How to use it?
 
-TBD: For now see examples at [third_party/autodiff/test](third_party/autodiff/test). -->
+TBD: For now see examples at [third_party/autodiff/test](triton_autodiff/third_party/autodiff/test). -->
 
 
 
