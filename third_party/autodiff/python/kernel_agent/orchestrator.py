@@ -6,9 +6,13 @@ import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
-from .utils import _read_snippet, compile_kernel as create_op, CompileError
+from .utils import _read_snippet, compile_kernel as create_op, UserError
 from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy, GLOBAL_GUARDRAILS
+from .worker import run_compile_child
+
+TEMP_CREATE_OP = 0.25
+TEMP_GRAD_AND_BENCH = 0.35
 
 # Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
 VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
@@ -190,6 +194,11 @@ class KernelOptimizer:
             self.patcher.remember("llm.propose.error", msg)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] propose error: {msg}")
+            # low = msg.lower()
+            # # If the LLM backend itself tripped a CUDA/device-side assert, this is not LLM-fixable.
+            # # Escalate as a user-facing infrastructure error to stop the loop instead of spamming retries.
+            # if ("device-side assert" in low) or ("cuda error" in low) or ("acceleratorerror" in low):
+            #     raise UserError(f"LLM backend error during propose: {msg}")
             return False
 
         if VERBOSE:
@@ -262,13 +271,29 @@ class KernelOptimizer:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
         return changed
 
-    def _create_op_with_fix(self, it: int | None, fwd_fp: str, overwrite_fp: str | None):
+    # todo-low: more descriptive name run_catch_errs_and_retry
+    #
+    # previously I wrapped create_op in _create_op_with_fix -- which allowed llm to fix it, but lost that functionality after i moved e.g. compile->bwd into child process,
+    # so i expose the below method to "run and retry" which takes in a callable, and wraps it in some structure similar to _create_op_with_fix,
+    # so that in the orchestrator's loop I can call self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
+    def run_with_fix(self, it, fn, temperature, err_category, header):
+        # todo: run_compile_child raises RuntimeError (with an error dict), not CompileError. current catch uses CompileError when err_category == "compile_error", so initial compile errors will bypass the except and crash
+        # catch_errs_type = CompileError if err_category == "compile_error" else Exception
         try:
-            return create_op(fwd_fp, overwrite_fp=overwrite_fp)
+            return True, fn()
+        except UserError as ue:
+            # User-facing forward-file error: do not loop, surface to caller
+            raise ue
 
         # catch only the CompileError, because there are other types of errors which create_op
         # raises -- want to surface them to the user, only want to catch the CompileError
-        except CompileError as ce:
+        # todo-now:
+        # except CompileError as ce:
+        except Exception as ce:
+        # except catch_errs_type as ce:
+
+            if isinstance(ce, UserError):
+                raise ce
 
             # for initial build (outside the optimization loop), bubble up
             if it is None:
@@ -276,35 +301,38 @@ class KernelOptimizer:
 
             # info = ce.info
             err = f"{type(ce).__name__}: {ce}"
-            self.patcher.remember("llm.compile_error", err)
+            self.patcher.remember(err_category, err)
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] compile error: {err}")
+                print(f"[kernel-agent][it={it}] {err_category}: {err}")
             # route via helper with explicit fix header and state_facts
             _ = self._llm_request_and_apply(
-                it, "fix", bwd_fp=self.bwd_fp, fwd_fp=fwd_fp,
-                header=FIX_HEADER,
-                state_facts={"compile_error": err},
-                temperature=0.25,
+                it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
+                header=header,
+                state_facts={err_category: err}, # , "shapes": shapes
+                temperature=temperature,
             )
             # todo: but _llm_request_and_apply already catches errors twice -- no, it only catches patch application fails
             # catch here as well, because this create_op can independently error
             try:
-                return create_op(fwd_fp, overwrite_fp=overwrite_fp)
-            except CompileError as ce_retry:
+                return True, fn()
+            except UserError as ue2:
+                raise ue2
+            # except CompileError as ce_retry:
+            except Exception as ce_retry:
+            # except catch_errs_type as ce_retry:
+
                 # info_retry = ce_retry.info
                 err_retry = f"{type(ce_retry).__name__}: {ce_retry}"
-                self.patcher.remember("llm.compile_error", err_retry)
+                self.patcher.remember(err_category, err_retry)
                 if VERBOSE:
-                    print(f"[kernel-agent][it={it}] compile retry error: {err_retry}")
+                    print(f"[kernel-agent][it={it}] {err_category} on retry: {err_retry}")
                 _ = self._llm_request_and_apply(
-                    it, "fix", bwd_fp=self.bwd_fp, fwd_fp=fwd_fp,
-                    header=FIX_HEADER,
-                    state_facts={"compile_error": err_retry},
-                    temperature=0.25,
+                    it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
+                    header=header,
+                    state_facts={err_category: err_retry}, # , "shapes": shapes
+                    temperature=temperature,
                 )
-                # ugly but need signature consistent with create_op signature
-                # because the caller of _create_op_with_fix can assign to a tuple
-                return None, None, None
+                return False, None
 
     def run(self, *,
             fwd_fp: str,
@@ -321,8 +349,6 @@ class KernelOptimizer:
         # using output of triton-autodiff directly as the initial version of the backward kernel
         # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodif instead just using output of trtion-autodiff as patcher.kernel_snippet)
 
-        # todo-high: support overwritting stub (current api.py integration doens't support it)
-
         # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
         # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
         if VERBOSE:
@@ -330,26 +356,27 @@ class KernelOptimizer:
             print(f"[kernel-agent] Forward file: {fwd_fp}")
             print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
 
-        op, bwd_fp, ns = self._create_op_with_fix(None, fwd_fp, overwrite_fp=None)
+        # todo-now: a separate run_compile_child is redundant because gradcheck/bench workers already call compile_kernel in their own process
+        def run_create_op():
+            # for consistency call this in a child process as well (run_compile_child)
+            # even though compiler generated bwd doesn't OOB
+            return run_compile_child(fwd_fp, overwrite_fp=None)
+        child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, TEMP_CREATE_OP, "compile_error", FIX_HEADER)
         self.bwd_fp = bwd_fp
-        sweep, make_args, torch_fn = ns.get("SWEEP"), ns.get("make_args"), ns.get("torch_fn")
-        if not callable(make_args) or not isinstance(sweep, (list, tuple)):
-            raise RuntimeError("User kernel must define make_args and SWEEP")
-        if not torch_fn:
-            raise RuntimeError("Please define torch_fn semantically equivalent to your triton kernel + stub")
+        self.fwd_fp = fwd_fp
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
         rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore)
 
         # compute shapes for all dims upfront for logging/breadcrumbs
         # shapes = [(inp.shape for inp in make_args(i)[0]) for i in sweep]
-        shapes = []
-        for _dims in sweep:
-            _args, _kwargs = make_args(_dims)
-            if isinstance(_args, (list, tuple)):
-                shapes.append(tuple(t.shape for t in _args))
-            else:
-                shapes.append((_args.shape, ))
+        # shapes = []
+        # for _dims in ns.get("SWEEP"):
+        #     _args, _kwargs = make_args(_dims)
+        #     if isinstance(_args, (list, tuple)):
+        #         shapes.append(tuple(t.shape for t in _args))
+        #     else:
+        #         shapes.append((_args.shape, ))
 
 
         if VERBOSE:
@@ -376,28 +403,40 @@ class KernelOptimizer:
             # failed patch apply on attempt 0 "continue"s to attempt 1 and triggers full-SWEEP anyway,
             # the model will see the failures with dims included in the stats and fix accordingly
 
-            sidecar = ns
-            if it == 0:
-                sidecar = dict(ns)
-                sidecar["SWEEP"] = ns["SWEEP"][:1]
+            # todo-now: handle that logic where i run the first iteartion only on the 1st shape, i broke this logic whenre moved gradchekc and bench calls to children
+            # sidecar = ns
+            # if it == 0:
+            #     sidecar = dict(ns)
+            #     sidecar["SWEEP"] = ns["SWEEP"][:1]
 
             # 1) correctness gate
+            # NOTE: Parent no longer rebuilds the op; child runners handle compilation/isolation
+            # if it > 0:
+            #     if VERBOSE:
+            #         print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
+
+            #     # Rebuild only the op; the sidecar namespace (ns) remains unchanged across iterations by design
+            #     op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
+            #     # failed to compile kernel
+            #     if not op:
+            #         continue
+
             if it > 0:
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
-
-
-                # Rebuild only the op; the sidecar namespace (ns) remains unchanged across iterations by design
-                op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
-                # failed to compile kernel
-                if not op:
+                # todo-now: rm double compile each iter
+                # get rid of this because gradcheck_child and bench_child already run create_op, the reason i kept the below for is for ease of initial separation of run_with_fix
+                # and to keep backward compatibility with previous COT tests (to keep previous semantics)
+                # todo: once this is removed can remove run_compile_child altogether
+                def run_create_op():
+                    return run_compile_child(fwd_fp, overwrite_fp=bwd_fp)
+                child_ran_ok, _ = self.run_with_fix(it, run_create_op, TEMP_CREATE_OP, "compile_error", FIX_HEADER)
+                if not child_ran_ok:
                     continue
 
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] Inputs shapes={shapes}")
+                print(f"[kernel-agent][it={it}]") #  Inputs shapes={shapes}"
 
             # breadcrumb for LLM continuity
-            self.patcher.remember("iteration", f"it={it}, shapes={shapes}")
+            self.patcher.remember("iteration", f"it={it}") # , shapes={shapes}
 
             # gradient_check uses autograd, its expectations are: my_op(*inputs) -> true outputs,
             # those outputs must be on a graph back to inputs. The stub satisfies this after @autodiff
@@ -409,37 +448,49 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Running gradient_check (parity)")
 
-            try:
-                # Run parity in an isolated child process;
-                # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
-                # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
-                # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
-                # todo-high: rm; too-high deltas
-                ok, stats = run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
-            except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] gradcheck error: {err}")
-                self.patcher.remember("gradcheck.error", err)
-                _ = self._llm_request_and_apply(
-                    it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    # prefix every "fix" request with the current phase header. To keep model anchored on the phase goal
-                    # while it fixes concrete errors. Important esp in Phase-1, since the raised backward is unrolled and SWEEP is multi‑shape
-                    header=f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}",
-                    state_facts={"runtime_error": {"stage": "gradcheck", "error": err}, "shapes": shapes},
-                    temperature=0.35,
-                )
-                # retry correctness in next iteration
+
+            # todo-now:
+            # but that's also seems wrong now when i introduce the additional tests and i'm basically here requesting to fix the bench wihtout showing detailed phase guardrealls and other info; also showing the phase header here
+            # it just an artifact from linear were i had logc where "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet"
+            # but now e.g. for phase 1 the phase's goal (add for loops is exactly what should be shown on the gradhceck fail).
+            # !!! ==> so that "don't proceed with phase goals on gradcheck falier" (which is effectively what i'm doing below by continue'ing if not parity_ok)
+            #   also hacked the header_with_strategy thing. Which is complitely wrong, as in, should just use the stratagy header!
+            # !!! ==> it basically all came together bc i left over the old logic of "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet" WHILE I ALSO ADDED A PHASE WHOSE GOAL IS TO SOLVE EXACTLY THAT (PASSING THE GRADCHECK)
+            #
+            # prefix every "fix" request with the current phase header. To keep model anchored on the phase goal
+            # while it fixes concrete errors. Important esp in Phase-1, since the raised backward is unrolled and SWEEP is multi‑shape
+            header_with_strategy = f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}"
+
+            # Run parity in an isolated child process;
+            # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
+            # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
+            # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
+            # todo-high: rm; too-high deltas
+            def _run_gradcheck_child():
+                return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
+            child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, TEMP_GRAD_AND_BENCH, "gradcheck_error", header_with_strategy)
+            if not child_ran_ok:
                 continue
+            # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
+            parity_ok, grad_stats = payload_gradcheck
+            # parity_ok = child_ran_ok and grad_passed
             if VERBOSE:
-                print(f"[kernel-agent][it={it}] gradient_check ok={ok}, stats={stats}")
+                print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
             # Breadcrumb: minimal
-            self.patcher.remember("gradcheck", stats)
+            self.patcher.remember("gradcheck", grad_stats)
 
-            was_restored = rollback.maybe_snapshot_or_restore(stats)
 
-            if not ok:
+            # if gradcheck_ok:
+            #     # ? otherwise when gradcheck fails, grad_stats is None and this will crash
+            # rollback.maybe_snapshot_or_restore(grad_stats)
+            was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
+
+            # if not parity_ok:
+            #     continue
+
+            # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
+            if not parity_ok:
                 if was_restored:
                     # avoid showing stale errors to the model after a restore by skipping the fix prompt and
                     # advancing to re-run gradcheck on the restored kernel next iteration
@@ -451,13 +502,17 @@ class KernelOptimizer:
                     if VERBOSE:
                         print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
                     continue
+
+                # todo-now:  rm this as well? do just "if not parity_ok: continue"
+                # but seems that would cause just continue on parity failure (no LLM “fix” turn), the kernel never changes, so there’s nothing to snapshot or to regress from
+                # doublecheck that this logic is correct: Gradcheck parity fail path lost the “fix” turn. I currently continue without prompting the LLM, so parity will likely never improve and rollback won’t engage. Minimal fix: when child returns ok but parity_ok is False, call the fix prompt once with grad_stats, then continue
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}",
-                    state_facts={"grad_summary": stats},
-                    temperature=0.35,
+                    header=header_with_strategy,
+                    state_facts={"grad_summary": grad_stats},
+                    temperature=TEMP_GRAD_AND_BENCH,
                 )
                 # retry correctness in next iteration
                 continue
@@ -465,27 +520,20 @@ class KernelOptimizer:
             # Benchmark the current autograd op (backward), independent of optimize path
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Benchmarking backward")
-            try:
-                # Benchmark in an isolated child process
-                cand = run_bench_child(fwd_fp, overwrite_fp=bwd_fp)
-            except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] bench error: {err}")
-                self.patcher.remember("bench.error", err)
-                _ = self._llm_request_and_apply(
-                    it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}",
-                    state_facts={"runtime_error": {"stage": "bench", "error": err}, "shapes": shapes},
-                    temperature=0.35,
-                )
+
+            # Benchmark in an isolated child process
+            def _run_bench_child():
+                return run_bench_child(fwd_fp, overwrite_fp=bwd_fp)
+            child_ran_ok, cand = self.run_with_fix(it, _run_bench_child, TEMP_GRAD_AND_BENCH, "bench_error", header_with_strategy)
+            if not child_ran_ok:
                 continue
+
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
 
             # Simple plateau logic governed by cfg.patience and min_rel_improvement
             # Only consider performance when parity is full; otherwise ignore perf for acceptance
-            full_parity = bool(stats.get("num_total", 0)) and (int(stats.get("num_passed", 0)) == int(stats.get("num_total", 0)))
+            full_parity = bool(grad_stats.get("num_total", 0)) and (int(grad_stats.get("num_passed", 0)) == int(grad_stats.get("num_total", 0)))
             improved = full_parity and ((best_metrics is None) or (
                 cand["median_ms"] <= (1.0 - self.cfg.min_rel_improvement) * best_metrics["median_ms"]
             ))
@@ -510,25 +558,30 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
 
-            phase_text, temp = self.strategy.next_phase(parity_ok=ok, last_runtime=cand.get("median_ms"))
+
+            # comment: i guess i can think of it that the only time phase header and constraints are shown in here
+            # and all the previous llm calls were basically fixes in one from or another (e.g. patch fixes, grad-correctness fixes)
+            phase_text, temp = self.strategy.current_phase(parity_ok=parity_ok, last_runtime=cand.get("median_ms"))
             changed = self._llm_request_and_apply(
                 it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                 header=phase_text,
-                state_facts={"bench": cand, "grad_summary": stats},
+                state_facts={"bench": cand, "grad_summary": grad_stats},
                 temperature=temp,
             )
             if not changed:
                 continue
 
             if self.strategy_name == "regular":
-                advance_changed = changed and ok
-                self.strategy.advance(changed=advance_changed, parity_ok=ok)
+                # at this point both ok_gracheck and ok_bench and changed are all true
+                self.strategy.advance(changed=changed, parity_ok=parity_ok)
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] End iteration")
 
             elif self.strategy_name == "phased":
-                advance_changed = changed and ok and self.strategy.verify_guardrails(bwd_fp)
-                self.strategy.advance(changed=advance_changed, parity_ok=ok)
+                # at this point both ok_gracheck and ok_bench and changed are all true
+                # so just check for verify_guardrails
+                advance_changed = self.strategy.verify_guardrails(bwd_fp)
+                self.strategy.advance(changed=advance_changed, parity_ok=parity_ok)
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] End iteration")
 

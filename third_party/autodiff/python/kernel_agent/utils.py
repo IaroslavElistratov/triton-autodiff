@@ -8,7 +8,6 @@ from typing import Any
 
 import torch
 from triton.runtime.jit import JITFunction
-from .worker import run_compile_child
 
 # def _norm_bench(x) -> dict[str, float]:
 #     """Normalize benchmark() result to {'throughput': float} if possible."""
@@ -51,10 +50,16 @@ from .worker import run_compile_child
 #   "TypeError: ..." -> type="TypeError", msg="..."
 
 
+# todo: remove, not needed anymore. Can just raise e
 class CompileError(Exception):
     def __init__(self, info: dict):
         self.info = info
         super().__init__(f"compile_error: {info.get('error_type')}: {info.get('error_message')}")
+
+
+#  my whole thing with catating compileERROR is that it was there are orther ers taht compile_Kernel raises ad these were meant for the user. so maybe i should create some UserError class? and basically in my run_with_fix check for User error in the expct block so if dedect i cought user er i'l re-raise it
+class UserError(Exception):
+    pass
 
 
 def compile_kernel(file_path: str, overwrite_fp: str | None = None):
@@ -86,6 +91,8 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     # I'll launch another child and that child will have a fresh working context
     if not os.environ.get("KERNEL_AGENT_PROBE_CHILD"):
         try:
+            # Import here to avoid circular import when worker imports utils.
+            from .worker import run_compile_child
             run_compile_child(file_path, overwrite_fp=overwrite_fp)
         except Exception as e:
             # surface as CompileError so the orchestrator can prompt the LLM to fix
@@ -149,7 +156,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     if not (has_kernel and has_stub):
         # these errors for invalid *fwd* kernel -- these aren't designed for llm, but for a human
         # so not wrapping into CompileError
-        raise RuntimeError(
+        raise UserError(
             "Expected your code to define (1) top-level kernel decorated with @triton.jit and (2) a stub function decorated with @autodiff, e.g.:\n"
             "@triton.jit\n"
             "def my_kernel(...): ...\n\n"
@@ -159,7 +166,12 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
 
     setup_fn = ns.get("setup")
     if not callable(setup_fn):
-        raise RuntimeError("Expected a top-level setup() that runs the stub once. The stub must call the kernel.")
+        raise UserError("Expected a top-level setup() that runs the stub once. The stub must call the kernel.")
+
+    if not callable(ns.get("make_args")) or not isinstance(ns.get("SWEEP"), (list, tuple)):
+        raise UserError("User kernel must define make_args and SWEEP")
+    if not ns.get("torch_fn"):
+        raise UserError("Please define torch_fn semantically equivalent to your triton kernel + stub")
 
 
     bwd_fp = None
@@ -201,82 +213,87 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
         raise CompileError(err) from e
     op = ns.get("stub")
     if not callable(op):
-        raise RuntimeError("Expected a top-level stub(...) to call the kernel.")
+        raise UserError("Expected a top-level stub(...) to call the kernel.")
 
 
-    # todo: cleanup the code below
-    # Preemptively run backward to be certain that both fwd and bwd well formed;
-    # run one small forward + backward to surface syntax/import/JIT issues early.
-    # Previously, errors would only show up during the first actual backward (e.g., gradcheck),
-    # which could terminate the process late (since nothing will catch an exeption at that time).
-    # This preflight keeps the same semantics but fails here where the errors are being caught (as part
-    # of compile_kernel and not later, when StubOverrideDCK.backward will be called unguarded e.g.
-    # during gradcheck, where a raised exception will crash the program)
-    is_worker = os.environ.get("KERNEL_AGENT_WORKER") in {"gradcheck", "bench"}
-    sweep = ns.get("SWEEP")
-    make_args = ns.get("make_args")
-    if is_worker and isinstance(sweep, (list, tuple)) and sweep and callable(make_args):
-        def _preflight_backward():
-            import torch
-            for dims in sweep:
-                # Obtain exemplar inputs using the user-provided helper
-                args, kwargs = make_args(dims)
-                kwargs = dict(kwargs or {})
 
-                # Enable grads for floating-point tensors only (matches typical autograd expectations)
-                pos_args = list(args or [])
-                for i, v in enumerate(pos_args):
-                    if isinstance(v, torch.Tensor) and v.is_floating_point():
-                        pos_args[i] = v.detach().requires_grad_(True)
-                for k, v in kwargs.items():
-                    if isinstance(v, torch.Tensor) and v.is_floating_point():
-                        kwargs[k] = v.detach().requires_grad_(True)
+    # answer-now:
+    # don't the below anymore, instead just directly run gracheck / bench in the child -- if it oob's then no problem.
+    # the blow was needed easier when i tried to do a canary compile_kernel in the child to try to guard oob's before the main process runs
+    # but now since gracheck and bench both run in child -- that logic below seems isn't needed anyore
+    #
+    # # Preemptively run backward to be certain that both fwd and bwd well formed;
+    # # run one small forward + backward to surface syntax/import/JIT issues early.
+    # # Previously, errors would only show up during the first actual backward (e.g., gradcheck),
+    # # which could terminate the process late (since nothing will catch an exeption at that time).
+    # # This preflight keeps the same semantics but fails here where the errors are being caught (as part
+    # # of compile_kernel and not later, when StubOverrideDCK.backward will be called unguarded e.g.
+    # # during gradcheck, where a raised exception will crash the program)
+    # is_worker = os.environ.get("KERNEL_AGENT_WORKER") in {"gradcheck", "bench"}
+    # sweep = ns.get("SWEEP")
+    # make_args = ns.get("make_args")
+    # if is_worker and isinstance(sweep, (list, tuple)) and sweep and callable(make_args):
+    #     def _preflight_backward():
+    #         import torch
+    #         for dims in sweep:
+    #             # Obtain exemplar inputs using the user-provided helper
+    #             args, kwargs = make_args(dims)
+    #             kwargs = dict(kwargs or {})
 
-                # Forward once via the fused op (stub)
-                y = op(*pos_args, **kwargs)
-                ys = y if isinstance(y, (tuple, list)) else (y,)
-                ys = tuple(t for t in ys if isinstance(t, torch.Tensor))
-                if not ys:
-                    continue  # nothing to differentiate
+    #             # Enable grads for floating-point tensors only (matches typical autograd expectations)
+    #             pos_args = list(args or [])
+    #             for i, v in enumerate(pos_args):
+    #                 if isinstance(v, torch.Tensor) and v.is_floating_point():
+    #                     pos_args[i] = v.detach().requires_grad_(True)
+    #             for k, v in kwargs.items():
+    #                 if isinstance(v, torch.Tensor) and v.is_floating_point():
+    #                     kwargs[k] = v.detach().requires_grad_(True)
 
-                # Reduce outputs to a scalar to avoid constructing explicit upstreams.
-                # This mirrors gradcheck behavior without needing grad_outputs.
-                scalar = None
-                for t in ys:
-                    scalar = (t.sum() if scalar is None else scalar + t.sum())
+    #             # Forward once via the fused op (stub)
+    #             y = op(*pos_args, **kwargs)
+    #             ys = y if isinstance(y, (tuple, list)) else (y,)
+    #             ys = tuple(t for t in ys if isinstance(t, torch.Tensor))
+    #             if not ys:
+    #                 continue  # nothing to differentiate
 
-                # Collect grad-requiring inputs (positional + keyword)
-                grad_ins = []
-                for v in pos_args:
-                    if isinstance(v, torch.Tensor) and v.requires_grad:
-                        grad_ins.append(v)
-                for v in kwargs.values():
-                    if isinstance(v, torch.Tensor) and v.requires_grad:
-                        grad_ins.append(v)
-                if grad_ins and scalar is not None:
-                    torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
+    #             # Reduce outputs to a scalar to avoid constructing explicit upstreams.
+    #             # This mirrors gradcheck behavior without needing grad_outputs.
+    #             scalar = None
+    #             for t in ys:
+    #                 scalar = (t.sum() if scalar is None else scalar + t.sum())
 
-        try:
-            # todo-now: run check_op_backward_parity_sweep here to make it closer to what the parent will run
-            # Use the same timeout guard as other compile-time steps
-            run_with_timeout(_preflight_backward, CODE_EXEC_TIMEOUT_S)
-            # todo: but taht seems to be device-wide
-            # forces any pending async device faults from the preflight thread to surface immediately in the child, so they get converted into a CompileError before returning to the parent
-            torch.cuda.synchronize()
-        except BaseException as e:
-            # Surface early as a structured CompileError so orchestrator can recover
-            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            msg = str(e)
-            err = {
-                "phase": "jit_backward",
-                "error_type": type(e).__name__,
-                "error_message": msg,
-                # "fwd_file": file_path,
-                "bwd_file": bwd_fp,
-                "traceback": tb,
-                "context_snippet": _read_snippet(bwd_fp, 200) if isinstance(bwd_fp, str) else "",
-            }
-            raise CompileError(err) from e
+    #             # Collect grad-requiring inputs (positional + keyword)
+    #             grad_ins = []
+    #             for v in pos_args:
+    #                 if isinstance(v, torch.Tensor) and v.requires_grad:
+    #                     grad_ins.append(v)
+    #             for v in kwargs.values():
+    #                 if isinstance(v, torch.Tensor) and v.requires_grad:
+    #                     grad_ins.append(v)
+    #             if grad_ins and scalar is not None:
+    #                 torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
+
+    #     try:
+    #         # todo: run check_op_backward_parity_sweep here to make it closer to what the parent will run
+    #         # Use the same timeout guard as other compile-time steps
+    #         run_with_timeout(_preflight_backward, CODE_EXEC_TIMEOUT_S)
+    #         # todo: but taht seems to be device-wide
+    #         # forces any pending async device faults from the preflight thread to surface immediately in the child, so they get converted into a CompileError before returning to the parent
+    #         torch.cuda.synchronize()
+    #     except BaseException as e:
+    #         # Surface early as a structured CompileError so orchestrator can recover
+    #         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    #         msg = str(e)
+    #         err = {
+    #             "phase": "jit_backward",
+    #             "error_type": type(e).__name__,
+    #             "error_message": msg,
+    #             # "fwd_file": file_path,
+    #             "bwd_file": bwd_fp,
+    #             "traceback": tb,
+    #             "context_snippet": _read_snippet(bwd_fp, 200) if isinstance(bwd_fp, str) else "",
+    #         }
+    #         raise CompileError(err) from e
 
     return op, bwd_fp, ns
 

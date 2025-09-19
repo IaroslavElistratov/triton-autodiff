@@ -115,7 +115,7 @@ class PhasedStrategy(BaseStrategy):
     def get_header(self):
         return self.phases[self.i].goal
 
-    def next_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
+    def current_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
         # Emit a concise header describing the allowed scope for this step.
         p = self.phases[self.i]
         header = (

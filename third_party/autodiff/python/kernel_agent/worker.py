@@ -37,6 +37,11 @@ GRADCHECK_TIMEOUT_S = float(os.environ.get("TB_GRADCHECK_TIMEOUT_S", "180"))
 BENCH_TIMEOUT_S     = float(os.environ.get("TB_BENCH_TIMEOUT_S", "180"))
 
 
+# comment:
+# these aren't called anymore, because each (run_gradcheck_child, run_bench_child) already create an agent
+# so from inside run_gradcheck_child and run_bench_child can just directly call compile_kernel (will run in the main process as which e.g. run_gradcheck_child spawned)
+
+
 def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
     """
     Child process worker for the compile probe.
