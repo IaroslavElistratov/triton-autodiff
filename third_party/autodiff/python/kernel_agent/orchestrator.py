@@ -277,51 +277,37 @@ class KernelOptimizer:
     # so i expose the below method to "run and retry" which takes in a callable, and wraps it in some structure similar to _create_op_with_fix,
     # so that in the orchestrator's loop I can call self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
     def run_with_fix(self, it, fn, temperature, err_category, header):
-        # todo: run_compile_child raises RuntimeError (with an error dict), not CompileError. current catch uses CompileError when err_category == "compile_error", so initial compile errors will bypass the except and crash
-        # catch_errs_type = CompileError if err_category == "compile_error" else Exception
         try:
             return True, fn()
+        # raise only UserError, catch the rest of the errors
         except UserError as ue:
             # User-facing forward-file error: do not loop, surface to caller
             raise ue
-
-        # catch only the CompileError, because there are other types of errors which create_op
-        # raises -- want to surface them to the user, only want to catch the CompileError
-        # todo-now:
-        # except CompileError as ce:
         except Exception as ce:
-        # except catch_errs_type as ce:
-
-            if isinstance(ce, UserError):
-                raise ce
 
             # for initial build (outside the optimization loop), bubble up
             if it is None:
                 raise ce
 
-            # info = ce.info
             err = f"{type(ce).__name__}: {ce}"
             self.patcher.remember(err_category, err)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] {err_category}: {err}")
-            # route via helper with explicit fix header and state_facts
+
             _ = self._llm_request_and_apply(
                 it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
                 header=header,
                 state_facts={err_category: err}, # , "shapes": shapes
                 temperature=temperature,
             )
-            # todo: but _llm_request_and_apply already catches errors twice -- no, it only catches patch application fails
+            # _llm_request_and_apply also catches errors, but only for patch application fails;
+
             # catch here as well, because this create_op can independently error
             try:
                 return True, fn()
             except UserError as ue2:
                 raise ue2
-            # except CompileError as ce_retry:
             except Exception as ce_retry:
-            # except catch_errs_type as ce_retry:
-
-                # info_retry = ce_retry.info
                 err_retry = f"{type(ce_retry).__name__}: {ce_retry}"
                 self.patcher.remember(err_category, err_retry)
                 if VERBOSE:
@@ -410,19 +396,11 @@ class KernelOptimizer:
             #     sidecar["SWEEP"] = ns["SWEEP"][:1]
 
             # 1) correctness gate
-            # NOTE: Parent no longer rebuilds the op; child runners handle compilation/isolation
-            # if it > 0:
-            #     if VERBOSE:
-            #         print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
-
-            #     # Rebuild only the op; the sidecar namespace (ns) remains unchanged across iterations by design
-            #     op, _, _ = self._create_op_with_fix(it, fwd_fp, overwrite_fp=bwd_fp)
-            #     # failed to compile kernel
-            #     if not op:
-            #         continue
-
             if it > 0:
+                # if VERBOSE:
+                #     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
                 # todo-now: rm double compile each iter
+                # parent should no longer rebuild the op; runners handle compilation/isolation
                 # get rid of this because gradcheck_child and bench_child already run create_op, the reason i kept the below for is for ease of initial separation of run_with_fix
                 # and to keep backward compatibility with previous COT tests (to keep previous semantics)
                 # todo: once this is removed can remove run_compile_child altogether
@@ -451,11 +429,11 @@ class KernelOptimizer:
 
             # todo-now:
             # but that's also seems wrong now when i introduce the additional tests and i'm basically here requesting to fix the bench wihtout showing detailed phase guardrealls and other info; also showing the phase header here
-            # it just an artifact from linear were i had logc where "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet"
+            # it just an artifact from earlier were i had logc where "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet"
             # but now e.g. for phase 1 the phase's goal (add for loops is exactly what should be shown on the gradhceck fail).
             # !!! ==> so that "don't proceed with phase goals on gradcheck falier" (which is effectively what i'm doing below by continue'ing if not parity_ok)
-            #   also hacked the header_with_strategy thing. Which is complitely wrong, as in, should just use the stratagy header!
-            # !!! ==> it basically all came together bc i left over the old logic of "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet" WHILE I ALSO ADDED A PHASE WHOSE GOAL IS TO SOLVE EXACTLY THAT (PASSING THE GRADCHECK)
+            #   also hacked the header_with_strategy thing. Which is completely wrong, as in, should just use the stratagy header!
+            # !!! ==> it basically all came together bc i left over the old logic of "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet" **while i also added a phase whose goal is to solve exactly that** (passing the gradcheck)
             #
             # prefix every "fix" request with the current phase header. To keep model anchored on the phase goal
             # while it fixes concrete errors. Important esp in Phase-1, since the raised backward is unrolled and SWEEP is multi‑shape
@@ -480,14 +458,7 @@ class KernelOptimizer:
             # Breadcrumb: minimal
             self.patcher.remember("gradcheck", grad_stats)
 
-
-            # if gradcheck_ok:
-            #     # ? otherwise when gradcheck fails, grad_stats is None and this will crash
-            # rollback.maybe_snapshot_or_restore(grad_stats)
             was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
-
-            # if not parity_ok:
-            #     continue
 
             # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
             if not parity_ok:
