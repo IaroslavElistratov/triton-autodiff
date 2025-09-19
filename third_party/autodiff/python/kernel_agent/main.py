@@ -1,8 +1,7 @@
 # python -m pip install -e /root/triton-autodiff/third_party/autodiff/python
 # cd /root/triton-autodiff/third_party/autodiff/python/kernel_agent
-# export KERNEL_AGENT_VERBOSE=1 KERNEL_AGENT_CAPTURE_THINKING=1 KERNEL_AGENT_STREAM=1 TRITON_AUTODIFF_DIR=/root/triton-autodiff
-# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --reasoning-effort medium --mode phased > /root/triton-autodiff/LOGS/out.txt
-# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/attention.py --reasoning-effort medium --mode phased > /root/triton-autodiff/LOGS/out.txt
+# export TRITON_AUTODIFF_DIR=/root/triton-autodiff && kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/matmul.py --reasoning-effort medium --mode phased > /root/triton-autodiff/third_party/autodiff/LOGS/out.txt
+# export TRITON_AUTODIFF_DIR=/root/triton-autodiff && kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --file-path /root/triton-autodiff/third_party/autodiff/python/kernel_agent/test/attention.py --reasoning-effort medium --mode phased > /root/triton-autodiff/third_party/autodiff/LOGS/out.txt
 
 
 from __future__ import annotations

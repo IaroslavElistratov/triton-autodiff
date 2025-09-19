@@ -2,6 +2,12 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 import os
 
+from .utils import _env_truthy
+
+
+# Default verbose ON unless explicitly disabled
+VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
+
 # Strategy module: encapsulates per-step instructions and temperature, so the
 # orchestrator can toggle this behavior without changing its main loop.
 
@@ -103,8 +109,7 @@ class PhasedStrategy(BaseStrategy):
         }
         fn = checks.get(self.i)
         ok = fn(backward_fp)
-        is_verbose = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
-        if is_verbose:
+        if VERBOSE:
             phase_name = self.phases[self.i].name
             status = "guardrails satisfied" if ok else "guardrails NOT satisfied"
             action = "advancing to next phase" if ok else "holding at current phase"

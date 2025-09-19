@@ -28,7 +28,11 @@ from openai_harmony import (
 )
 
 
-VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
+from .utils import _env_truthy
+
+
+VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
+KERNEL_AGENT_STREAM = _env_truthy("KERNEL_AGENT_STREAM", "1")
 
 BEGIN_PATCH = "*** Begin Patch"
 END_PATCH = "*** End Patch"
@@ -82,12 +86,6 @@ def _ensure_update_file_target(patch_text: str, target_file: str) -> str:
         insert_at = begin_idx + 1
         lines.insert(insert_at, f"*** Update File: {target_file}")
     return "\n".join(lines)
-
-
-def _env_truthy(name: str, default: str = "0") -> bool:
-    """Parse boolean-like env flags from environment."""
-    val = os.environ.get(name, default)
-    return str(val).lower() not in ("0", "", "false", "no", "off")
 
 
 # Canonical, tool-only contract shown to the model.
@@ -279,7 +277,7 @@ class MinimalLLMPatchProvider:
 
         # Streaming toggle via a single env flag; install default sink if enabled.
         thinking_sink = self.on_thinking_chunk
-        if thinking_sink is None and _env_truthy("KERNEL_AGENT_STREAM", "0"):
+        if thinking_sink is None and KERNEL_AGENT_STREAM:
             def _print_sink(chunk: str) -> None:
                 # keep minimal/no prefix to avoid noisy logs; orchestrator can add one
                 print(chunk, end="", flush=True)

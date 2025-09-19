@@ -6,7 +6,7 @@ import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
-from .utils import _read_snippet, compile_kernel as create_op, UserError
+from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy
 from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy, GLOBAL_GUARDRAILS
 from .worker import run_compile_child
@@ -14,8 +14,8 @@ from .worker import run_compile_child
 TEMP_CREATE_OP = 0.25
 TEMP_GRAD_AND_BENCH = 0.35
 
-# Verbose flag: set KERNEL_AGENT_VERBOSE=1|true to enable detailed logs
-VERBOSE = str(os.environ.get("KERNEL_AGENT_VERBOSE", "")).strip().lower() in ("1", "true", "yes", "y")
+# Verbose logs default ON (use shared truthy parser)
+VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
 
 def _read_bytes(path: str) -> bytes:
     try:

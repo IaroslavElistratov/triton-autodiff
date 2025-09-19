@@ -402,3 +402,10 @@ def _read_snippet(path: str, max_lines: int) -> str:
 #         "Use triton_backward.slice to read windows."
 #     )
 # payload = json.dumps(payload_dict)
+
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    """Parse boolean-like env flags from environment."""
+    val = os.environ.get(name, default)
+    return str(val).lower() not in ("0", "", "false", "no", "off")
