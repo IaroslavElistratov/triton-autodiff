@@ -3,6 +3,34 @@ import multiprocessing as mp
 import queue
 import traceback
 import torch
+import sys
+
+
+# Dedicated timeouts for long-running child tasks (env-overridable)
+def _ensure_triton_autodiff_api_alias() -> None:
+    """Ensure sys.modules has 'triton_autodiff_api' registered.
+    Tries normal import; on failure, imports api.py by path which registers the alias.
+    """
+    if "triton_autodiff_api" in sys.modules:
+        return
+    # Prefer loading the package __init__ directly under the canonical alias,
+    # regardless of whether the dotted import is available, to guarantee aliasing.
+    try:
+        import importlib.util
+        here = os.path.dirname(__file__)
+        repo_root = os.path.abspath(os.path.join(here, "../../../.."))
+        api_dir = os.path.join(repo_root, "third_party", "autodiff", "python", "api")
+        api_init = os.path.join(api_dir, "__init__.py")
+        spec = importlib.util.spec_from_file_location(
+            "triton_autodiff_api", api_init, submodule_search_locations=[api_dir]
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["triton_autodiff_api"] = mod
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(mod)
+    except Exception:
+        # Leave unresolved; compile_kernel will raise a clear error later
+        pass
 
 # Dedicated timeouts for long-running child tasks (env-overridable)
 GRADCHECK_TIMEOUT_S = float(os.environ.get("TB_GRADCHECK_TIMEOUT_S", "180"))
@@ -20,8 +48,18 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
       - Do NOT return live tensors; only a small status/message via a Queue.
     """
     try:
+        # Make launch sync so device-side assert triggers here, not later.
+        os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+        # Mark worker type for any child-side gating; also guard recursion elsewhere.
+        os.environ["KERNEL_AGENT_WORKER"] = "compile"
         # Lazy import to avoid circular imports at module load time
         from .utils import compile_kernel
+        _ensure_triton_autodiff_api_alias()
+        # Ensure triton_autodiff_api alias is registered for _autodiff_api consumers
+        try:
+            from ..api import autodiff as _ad  # noqa: F401
+        except Exception:
+            pass
         # Mark this process as the probe child so compile_kernel won't spawn again.
         os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
 
@@ -33,21 +71,22 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
             os._exit(1)
         # Reconstruct everything fresh in the child; this triggers the same
         # compile path and the in-process backward preflight inside compile_kernel.
-        compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
-        # Intentionally avoid torch.cuda.synchronize() and any cudaDeviceReset() here.
-        # Rationale: the child process will exit immediately after signaling OK, and
-        # process exit destroys the CUDA context and frees GPU resources. This keeps
-        # the success path fast and avoids backend/version-specific CUDA APIs.
-        q.put(("ok", None))
+        # Capture bwd_fp to return to the parent (ns is not pickleable; return only bwd_fp).
+        _op, _bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        # Ensure any pending device work (e.g., preflight backward) is observed before exit,
+        # so device-side asserts surface in this child, not later in the parent.
+        torch.cuda.synchronize()
+        q.put(("ok", _bwd_fp))
         q.close(); q.join_thread()
         os._exit(0)
     except Exception as e:
-        # First report error to parent and flush queue so parent never hangs
+        # First report error to parent and flush queue so parent never hangs.
+        # Deliberately omit traceback from payload to keep LLM-facing messages concise
+        # and avoid leaking file paths. Full tracebacks are still available in logs.
         try:
             q.put(("err", {
                 "etype": type(e).__name__,
                 "emsg": str(e),
-                "traceback": "".join(traceback.format_exception(type(e), e, e.__traceback__)),
             }))
         except Exception:
             pass
@@ -68,7 +107,7 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     Why here and why child:
       - compile_kernel includes a minimal backward preflight; running it in a child
         contains OOB/device faults so the main agent loop can continue and let the LLM fix.
-      - We ignore compile return values; the parent will rebuild for real after probe.
+      - Only the backward file path (string) is returned to avoid pickling large objects.
     """
     # Lazy import to avoid circular imports and pick up runtime-configured timeout
     from .utils import CODE_EXEC_TIMEOUT_S
@@ -94,6 +133,8 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
         raise RuntimeError(f"compile probe failed: {payload}")
     if p.exitcode != 0:
         raise RuntimeError(f"compile probe child exited with code {p.exitcode} (status={status})")
+    # payload is the bwd_fp (string)
+    return payload
 
 
 
@@ -111,6 +152,11 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
     try:
         # Late import inside the child to avoid importing CUDA stacks in parent.
         from .utils import compile_kernel
+        _ensure_triton_autodiff_api_alias()
+        try:
+            from ..api import autodiff as _ad  # noqa: F401
+        except Exception:
+            pass
         from .tools.gradcheck.core import check_op_backward_parity_sweep
         import torch as _t
 
@@ -170,6 +216,11 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
     try:
         from .utils import compile_kernel
+        _ensure_triton_autodiff_api_alias()
+        try:
+            from ..api import autodiff as _ad  # noqa: F401
+        except Exception:
+            pass
         from .tools.benchmark import bench_op, reduce_bench
         import torch as _t
 
@@ -182,10 +233,10 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
             pass
         q.put(("ok", cand))
     except BaseException as e:
+        # Keep payload minimal: no traceback for model consumption.
         q.put(("err", {
             "etype": type(e).__name__,
             "emsg": str(e),
-            "traceback": "".join(traceback.format_exception(type(e), e, e.__traceback__)),
         }))
     finally:
         try:
