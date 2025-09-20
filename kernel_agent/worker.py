@@ -5,34 +5,6 @@ import traceback
  
 import sys
 
-# todo-high: ugly, restructure project folders to solve that
-
-# Dedicated timeouts for long-running child tasks (env-overridable)
-def _ensure_triton_autodiff_api_alias() -> None:
-    """Ensure sys.modules has 'triton_autodiff_api' registered.
-    Tries normal import; on failure, imports api.py by path which registers the alias.
-    """
-    if "triton_autodiff_api" in sys.modules:
-        return
-    # Prefer loading the package __init__ directly under the canonical alias,
-    # regardless of whether the dotted import is available, to guarantee aliasing.
-    import importlib.util
-    # Use TRITON_AUTODIFF_DIR (must point to 'triton_autodiff' subdir) for robust resolution
-    base = os.environ.get("TRITON_AUTODIFF_DIR", "")
-    assert base
-    api_dir = os.path.join(base, "third_party", "autodiff", "python", "api")
-    api_init = os.path.join(api_dir, "__init__.py")
-    spec = importlib.util.spec_from_file_location(
-        "triton_autodiff_api", api_init, submodule_search_locations=[api_dir]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    # Register canonical alias used by kernel_agent codepaths
-    sys.modules["triton_autodiff_api"] = mod
-    assert spec is not None and spec.loader is not None
-    spec.loader.exec_module(mod)
-    # Also expose as a backend module so user kernels can `import triton.backends.autodiff`
-    # even if packaging/symlink layout changes (e.g., after moving kernel_agent/)
-    sys.modules.setdefault("triton.backends.autodiff", mod)
 
 # Dedicated timeouts for long-running child tasks (env-overridable)
 GRADCHECK_TIMEOUT_S = float(os.environ.get("TB_GRADCHECK_TIMEOUT_S", "180"))
@@ -61,8 +33,6 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         os.environ["KERNEL_AGENT_WORKER"] = "compile"
         # Lazy import to avoid circular imports at module load time
         from .utils import compile_kernel
-        # Ensure triton_autodiff_api alias is registered for _autodiff_api consumers
-        _ensure_triton_autodiff_api_alias()
         # Import torch lazily inside the child process only
         import torch as _t
         # Mark this process as the probe child so compile_kernel won't spawn again.
@@ -157,7 +127,7 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
     try:
         # Late import inside the child to avoid importing CUDA stacks in parent.
         from .utils import compile_kernel
-        _ensure_triton_autodiff_api_alias()
+        # autodiff API is imported on demand inside utils.compile_kernel
         from .tools.gradcheck.core import check_op_backward_parity_sweep
         import torch as _t
 
@@ -217,7 +187,7 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
     try:
         from .utils import compile_kernel
-        _ensure_triton_autodiff_api_alias()
+        # autodiff API is imported on demand inside utils.compile_kernel
         from .tools.benchmark import bench_op, reduce_bench
         import torch as _t
 

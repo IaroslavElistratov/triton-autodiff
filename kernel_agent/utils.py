@@ -178,7 +178,8 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     def _exec_setup():
         nonlocal bwd_fp
         if overwrite_fp:
-            from ._autodiff_api import autodiff_overwrite_fp
+            # Use the canonical backend re-export to control overwrite path
+            from triton.backends.autodiff import autodiff_overwrite_fp
             # this adds the "overwrite_fp" argument to my autograd function
             # so that the hook knows to use the backward from "overwrite_fp",
             # and not the backward created by my mlir pass
@@ -189,7 +190,8 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
                 # not used, keeping for clarity
                 bwd_fp = overwrite_fp
         else:
-            from ._autodiff_api import record_autodiff_artifacts, get_last_bwd_fp
+            # Record/collect the generated backward path via backend re-export
+            from triton.backends.autodiff import record_autodiff_artifacts, get_last_bwd_fp
             with record_autodiff_artifacts():
                 exec(setup_fn.__code__, ns, ns)
                 # record path to the last generated/selected backward before context resets
