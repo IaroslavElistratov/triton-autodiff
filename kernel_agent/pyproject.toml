@@ -12,6 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["kernel_agent"]
+package-dir = {"kernel_agent" = "."}
 
 [project.scripts]
 kernel-agent = "kernel_agent.main:main"

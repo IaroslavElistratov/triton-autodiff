@@ -10,9 +10,10 @@ from .common import *
 def raise_to_triton_lang(ttir_path: str):
     out_dir = os.path.dirname(ttir_path)
     os.makedirs(out_dir, exist_ok=True)
-    # Use repo root (TRITON_AUTODIFF_DIR) to locate raise.py in third_party tree
-    # This avoids relying on the backend file location.
-    raise_py = os.path.join(dir, "third_party/autodiff/python/kernel_agent/tools/backward_naive/raise.py")
+    # Assume TRITON_AUTODIFF_DIR points to the subdir 'triton_autodiff'.
+    # The top-level 'kernel_agent' lives one level up from there.
+    repo_root = os.path.abspath(os.path.join(dir, ".."))
+    raise_py = os.path.join(repo_root, "kernel_agent", "tools", "backward_naive", "raise.py")
     proc = subprocess.run([sys.executable, raise_py, ttir_path],
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
@@ -33,10 +34,9 @@ def emit_stub_to_file(
     idx_folded,
     signature_key: str,
 ):
-    # Use repo root (TRITON_AUTODIFF_DIR) to locate emit_stub.py in third_party tree
-    emit_stub_py = os.path.join(
-        dir, "third_party/autodiff/python/kernel_agent/tools/backward_naive/emit_stub.py"
-    )
+    # Assume TRITON_AUTODIFF_DIR points to 'triton_autodiff' and locate tools one level up
+    repo_root = os.path.abspath(os.path.join(dir, ".."))
+    emit_stub_py = os.path.join(repo_root, "kernel_agent", "tools", "backward_naive", "emit_stub.py")
     proc = subprocess.run(
         [
             sys.executable,

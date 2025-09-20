@@ -590,7 +590,7 @@ cd triton-autodiff
 pip install -e python
 
 # todo: cleanup
-export TRITON_AUTODIFF_DIR=$(pwd)
+export TRITON_AUTODIFF_DIR=$(pwd)/triton_autodiff
 ln -s $TRITON_AUTODIFF_DIR/third_party/autodiff/python/api.py $TRITON_AUTODIFF_DIR/python/triton/backends/autodiff.py
 
 cd third_party/autodiff/test

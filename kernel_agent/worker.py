@@ -17,17 +17,22 @@ def _ensure_triton_autodiff_api_alias() -> None:
     # Prefer loading the package __init__ directly under the canonical alias,
     # regardless of whether the dotted import is available, to guarantee aliasing.
     import importlib.util
-    here = os.path.dirname(__file__)
-    repo_root = os.path.abspath(os.path.join(here, "../../../.."))
-    api_dir = os.path.join(repo_root, "third_party", "autodiff", "python", "api")
+    # Use TRITON_AUTODIFF_DIR (must point to 'triton_autodiff' subdir) for robust resolution
+    base = os.environ.get("TRITON_AUTODIFF_DIR", "")
+    assert base
+    api_dir = os.path.join(base, "third_party", "autodiff", "python", "api")
     api_init = os.path.join(api_dir, "__init__.py")
     spec = importlib.util.spec_from_file_location(
         "triton_autodiff_api", api_init, submodule_search_locations=[api_dir]
     )
     mod = importlib.util.module_from_spec(spec)
+    # Register canonical alias used by kernel_agent codepaths
     sys.modules["triton_autodiff_api"] = mod
     assert spec is not None and spec.loader is not None
     spec.loader.exec_module(mod)
+    # Also expose as a backend module so user kernels can `import triton.backends.autodiff`
+    # even if packaging/symlink layout changes (e.g., after moving kernel_agent/)
+    sys.modules.setdefault("triton.backends.autodiff", mod)
 
 # Dedicated timeouts for long-running child tasks (env-overridable)
 GRADCHECK_TIMEOUT_S = float(os.environ.get("TB_GRADCHECK_TIMEOUT_S", "180"))
