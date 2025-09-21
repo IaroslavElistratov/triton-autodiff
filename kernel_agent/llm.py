@@ -386,6 +386,16 @@ class _GenerateSampler:
             case "vllm":
                 from gpt_oss.vllm.token_generator import TokenGenerator as VLLMGenerator
                 self.generator = VLLMGenerator(self.checkpoint, tensor_parallel_size=2)
+            case "openai":
+                # OpenAI backend: no local token generator.
+                # Keep a persistent API client to avoid re-initializing per call.
+                self.generator = None
+                # Resolve model once from a single project-specific env.
+                self._oa_model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL", "gpt-5-mini")
+                # Lazy import keeps OpenAI optional unless backend=openai.
+                from openai import OpenAI  # type: ignore
+                # Use default constructor; it reads OPENAI_API_KEY from env.
+                self._oa_client = OpenAI()
             case "stub":
                 # class _NoopPatcher:
                 #     def propose_patch(self, *_, **__):
@@ -413,14 +423,88 @@ class _GenerateSampler:
     def __call__(self, message_list: list[dict[str, str]],
                  on_thinking_chunk: Callable[[str], None] | None = None) -> SamplerResponse:
         """
-        Single-turn generation.
-        Contract: model MUST call functions.apply_patch once with {"patch": "<apply_patch.md>"}.
-        Stream with Harmony, stop after generation, and return the first tool payload.
-        Do not apply the patch here, yeild to the orchestrator.
+        Single‑turn generation via Harmony (local backends) or OpenAI Responses API (for --backend openai).
+
+        Local/Harmony contract:
+          - The model emits one functions.apply_patch tool call with the patch payload.
+          - We stream tokens, stop after the first tool payload, and return it (do not apply it here).
+
+        OpenAI/Responses contract:
+          - The model must emit one function_call named "apply_patch" with {"patch": "<apply_patch.md>"}.
+          - We make one non‑stream responses.create() call with a single tool and tool_choice="required".
+          - We parse resp.output for that function_call and return its arguments; we do not apply the patch here.
         """
 
         system_text = next((m.get("content", "") for m in message_list if m.get("role") == "system"), "")
         user_text   = next((m.get("content", "") for m in message_list if m.get("role") == "user"), "")
+
+        # OpenAI Responses API path
+        if self.backend == "openai":
+            client = getattr(self, "_oa_client", None)
+            model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL") or getattr(self, "_oa_model", "gpt-5-mini")
+
+            # OpenAI Responses path: send system as `instructions`, user as `input`.
+            instructions = next((m.get("content", "") for m in message_list if m.get("role") == "system"), "")
+            user_input   = next((m.get("content", "") for m in message_list if m.get("role") == "user"), "")
+
+            # Define exactly one custom function tool at the top level (Responses tools schema).
+            # Forcing tool use: with a single tool, tool_choice="required" deterministically calls it.
+            tools = [{
+                "type": "function",
+                "name": "apply_patch",
+                "description": "Apply a single apply_patch.md diff",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"patch": {"type": "string"}},
+                    "required": ["patch"],
+                    "additionalProperties": False,
+                },
+            }]
+
+            # One non‑stream call. Forces a single tool call. Use Responses param names.
+            resp = client.responses.create(
+                model=model,
+                instructions=(instructions or None),
+                input=user_input,
+                tools=tools,
+                tool_choice="required",
+                max_output_tokens=self.max_tokens,
+            )
+
+            # Extract the function_call -> arguments -> patch.
+            # Responses returns custom calls as items with type == "function_call".
+            patch_text = ""
+            try:
+                for item in (getattr(resp, "output", []) or []):
+                    # Responses returns custom function calls as function_call items
+                    if getattr(item, "type", None) == "function_call" and getattr(item, "name", None) == "apply_patch":
+                        raw_args = getattr(item, "arguments", "") or ""
+                        try:
+                            obj = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                            patch_text = (obj.get("patch", "") if isinstance(obj, dict) else str(obj)) or ""
+                        except Exception:
+                            patch_text = str(raw_args) or ""
+                        break
+                if not patch_text:
+                    # Last‑ditch: parse free text if the model didn’t emit a tool item
+                    patch_text = extract_patch(getattr(resp, "output_text", "") or "") or ""
+            except Exception:
+                patch_text = ""
+
+            if patch_text:
+                pt = patch_text.strip()
+                if BEGIN_PATCH not in pt and END_PATCH not in pt:
+                    patch_text = f"{BEGIN_PATCH}\n{pt}\n{END_PATCH}"
+                else:
+                    patch_text = pt
+
+            finish = "produced_patch" if patch_text else "no_patch"
+            return SamplerResponse(
+                response_text=(patch_text or ""),
+                actual_queried_message_list=message_list,
+                response_metadata={"tool": ("functions.apply_patch" if patch_text else ""), "stop_reason": finish},
+            )
+
 
         # System + Developer (advertise the tool) + User
         sys_msg = Message.from_role_and_content(
