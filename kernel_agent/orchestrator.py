@@ -342,10 +342,9 @@ class KernelOptimizer:
             print(f"[kernel-agent] Forward file: {fwd_fp}")
             print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
 
-        # todo-now: a separate run_compile_child is redundant because gradcheck/bench workers already call compile_kernel in their own process
         def run_create_op():
-            # for consistency call this in a child process as well (run_compile_child)
-            # even though compiler generated bwd doesn't OOB
+            # for consistency call this in a child process as well (run_compile_child) even though compiler generated bwd doesn't OOB;
+            # and if it OOBs a failure here should terminate the program anyway (so the that safety around "run_compile_child" is redundant)
             return run_compile_child(fwd_fp, overwrite_fp=None)
         child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, TEMP_CREATE_OP, "compile_error", FIX_HEADER)
         self.bwd_fp = bwd_fp
@@ -394,21 +393,6 @@ class KernelOptimizer:
             # if it == 0:
             #     sidecar = dict(ns)
             #     sidecar["SWEEP"] = ns["SWEEP"][:1]
-
-            # 1) correctness gate
-            if it > 0:
-                # if VERBOSE:
-                #     print(f"[kernel-agent][it={it}] Rebuilding op with current backward: {bwd_fp}")
-                # todo-now: rm double compile each iter
-                # parent should no longer rebuild the op; runners handle compilation/isolation
-                # get rid of this because gradcheck_child and bench_child already run create_op, the reason i kept the below for is for ease of initial separation of run_with_fix
-                # and to keep backward compatibility with previous COT tests (to keep previous semantics)
-                # todo: once this is removed can remove run_compile_child altogether
-                def run_create_op():
-                    return run_compile_child(fwd_fp, overwrite_fp=bwd_fp)
-                child_ran_ok, _ = self.run_with_fix(it, run_create_op, TEMP_CREATE_OP, "compile_error", FIX_HEADER)
-                if not child_ran_ok:
-                    continue
 
             if VERBOSE:
                 print(f"[kernel-agent][it={it}]") #  Inputs shapes={shapes}"
@@ -530,7 +514,8 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
 
 
-            # comment: i guess i can think of it that the only time phase header and constraints are shown in here
+            # comment:
+            # i guess i can think of it that the only time phase header and constraints are shown in here
             # and all the previous llm calls were basically fixes in one from or another (e.g. patch fixes, grad-correctness fixes)
             phase_text, temp = self.strategy.current_phase(parity_ok=parity_ok, last_runtime=cand.get("median_ms"))
             changed = self._llm_request_and_apply(
