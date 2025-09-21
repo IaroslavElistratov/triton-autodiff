@@ -363,7 +363,7 @@ class _GenerateSampler:
     def __init__(self, temperature: float, max_tokens: int, context: int, reasoning_effort: str) -> None:
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.backend = os.environ.get("KERNEL_AGENT_BACKEND", "stub").lower()
+        self.backend = os.environ.get("KERNEL_AGENT_BACKEND", "triton").lower()
         self.checkpoint = os.environ.get("KERNEL_AGENT_CHECKPOINT", "")
         self.context = context
         self.reasoning_effort = reasoning_effort
@@ -396,19 +396,6 @@ class _GenerateSampler:
                 from openai import OpenAI  # type: ignore
                 # Use default constructor; it reads OPENAI_API_KEY from env.
                 self._oa_client = OpenAI()
-            case "stub":
-                # class _NoopPatcher:
-                #     def propose_patch(self, *_, **__):
-                #         return "*** Begin Patch\n*** End Patch"
-                # llm = _NoopPatcher()
-                # Generator stub that echoes back a no-op patch
-                class _StubGen:
-                    def generate(self, *_ , **__):
-                        # Emit a trivial no-op apply_patch block
-                        text = "*** Begin Patch\n*** End Patch"
-                        # Return once, in tokenized form; our stub encoding just decodes raw
-                        yield (0,)
-                self.generator = _StubGen()
             case _:
                 raise ValueError(f"Invalid backend: {self.backend}")
 

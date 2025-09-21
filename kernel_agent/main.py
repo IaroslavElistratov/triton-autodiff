@@ -11,7 +11,7 @@ import argparse
 import os
 
 from .orchestrator import KernelOptimizer, Config
-# from .llm import MinimalLLMPatchProvider
+from .llm import MinimalLLMPatchProvider
 
 
 def main() -> None:
@@ -22,7 +22,7 @@ def main() -> None:
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
     ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
 
-    ap.add_argument("--backend", type=str, default="stub", choices=["stub", "triton", "torch", "vllm", "openai"], help="LLM backend: local samplers or OpenAI API")
+    ap.add_argument("--backend", type=str, default="triton", choices=["triton", "torch", "vllm", "openai"], help="LLM backend: local samplers or OpenAI API")
     ap.add_argument("--openai-model", type=str, default=os.environ.get("KERNEL_AGENT_OPENAI_MODEL", "gpt-5-mini"), help="OpenAI model name (only when --backend openai)")
     ap.add_argument("--checkpoint", metavar="FILE", type=str, help="Path to the SafeTensors checkpoint (ignored when --backend openai)")
     ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="high", choices=["high", "medium", "low"], help="Reasoning effort")
@@ -45,20 +45,12 @@ def main() -> None:
                  patience_perf_stop=args.patience_perf_stop,
                  patience_parity_restore=args.patience_parity_restore,
                  min_rel_improvement=args.min_rel_impr)
-    # Defer heavy LLM imports unless we're actually iterating
-    if args.max_iters > 0:
-        from .llm import MinimalLLMPatchProvider  # lazy import
-        llm = MinimalLLMPatchProvider(
-            temperature=0.7,
-            max_tokens=32768,
-            reasoning_effort=args.reasoning_effort,
-            context=args.context,
-        )
-    else:
-        class _Noop:
-            def propose_patch(self, *_, **__):
-                return "*** Begin Patch\n*** End Patch"
-        llm = _Noop()
+    llm = MinimalLLMPatchProvider(
+        temperature=0.7,
+        max_tokens=32768,
+        reasoning_effort=args.reasoning_effort,
+        context=args.context,
+    )
     agent = KernelOptimizer(cfg, llm)
 
     out = agent.run(
