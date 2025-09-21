@@ -458,9 +458,9 @@ class KernelOptimizer:
                         print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
                     continue
 
-                # todo-now:  rm this as well? do just "if not parity_ok: continue"
-                # but seems that would cause just continue on parity failure (no LLM “fix” turn), the kernel never changes, so there’s nothing to snapshot or to regress from
-                # doublecheck that this logic is correct: Gradcheck parity fail path lost the “fix” turn. I currently continue without prompting the LLM, so parity will likely never improve and rollback won’t engage. Minimal fix: when child returns ok but parity_ok is False, call the fix prompt once with grad_stats, then continue
+                # when child returns ok (no err was raised) but parity_ok is False (some gradcheck test failed), call the fix prompt, then continue;
+                # can't just rm this and just do "if not parity_ok: continue" bc that would just continue on parity failure (no LLM "fix" turn)
+                # -- the kernel would never change
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
                 _ = self._llm_request_and_apply(
