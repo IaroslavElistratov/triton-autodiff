@@ -427,8 +427,8 @@ class _GenerateSampler:
 
         # OpenAI Responses API path
         if self.backend == "openai":
-            client = getattr(self, "_oa_client", None)
-            model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL") or getattr(self, "_oa_model", "gpt-5-mini")
+            client = self._oa_client
+            model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL")
 
             # OpenAI Responses path: send system as `instructions`, user as `input`.
             instructions = next((m.get("content", "") for m in message_list if m.get("role") == "system"), "")

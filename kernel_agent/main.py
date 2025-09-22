@@ -23,7 +23,7 @@ def main() -> None:
     ap.add_argument("--file-path", metavar="FILE", type=str, required=True, help="Path to the forward kernel to be optimized")
 
     ap.add_argument("--backend", type=str, default="triton", choices=["triton", "torch", "vllm", "openai"], help="LLM backend: local samplers or OpenAI API")
-    ap.add_argument("--openai-model", type=str, default=os.environ.get("KERNEL_AGENT_OPENAI_MODEL", "gpt-5-mini"), help="OpenAI model name (only when --backend openai)")
+    ap.add_argument("--openai-model", type=str, default="gpt-5-mini", help="OpenAI model name (only when --backend openai)")
     ap.add_argument("--checkpoint", metavar="FILE", type=str, help="Path to the SafeTensors checkpoint (ignored when --backend openai)")
     ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="high", choices=["high", "medium", "low"], help="Reasoning effort")
 
