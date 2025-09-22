@@ -42,38 +42,30 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         # If CUDA is unavailable, treat as a hard error and exit child.
         if not _t.cuda.is_available():
             # Signal fatal probe failure to parent and return cleanly; parent raises.
-            q.put(("err", "no_cuda"))
+            q.put({"etype": "RuntimeError", "emsg": "no_cuda"})
             q.close(); q.join_thread()
             os._exit(1)
         # Reconstruct everything fresh in the child; this triggers the same
         # compile path and the in-process backward preflight inside compile_kernel.
         # Capture bwd_fp to return to the parent (ns is not pickleable; return only bwd_fp).
-        _op, _bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        _op, bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
         # Ensure any pending device work (e.g., preflight backward) is observed before exit,
         # so device-side asserts surface in this child, not later in the parent.
         _t.cuda.synchronize()
-        q.put(("ok", _bwd_fp))
+        q.put(bwd_fp)
         q.close(); q.join_thread()
         os._exit(0)
     except Exception as e:
         # First report error to parent and flush queue so parent never hangs.
         # Deliberately omit traceback from payload to keep LLM-facing messages concise
         # and avoid leaking file paths. Full tracebacks are still available in logs.
-        try:
-            q.put(("err", {
-                "etype": type(e).__name__,
-                "emsg": str(e),
-            }))
-        except Exception:
-            pass
+        q.put({"etype": type(e).__name__, "emsg": str(e)})
         q.close(); q.join_thread()
-        # Intentionally avoid torch.cuda.synchronize() and any cudaDeviceReset() here.
-        # Rationale: exiting the child process is sufficient to release GPU resources
+        # avoid torch.cuda.synchronize() and any cudaDeviceReset() here, bc
+        # exiting the child process is sufficient to release GPU resources
         # and isolate device faults; additional sync/reset is unnecessary and brittle
         # across CUDA backends/builds. Process exit will destroy the child's context.
-        # Hard-exit to guarantee isolation; parent inspects exit code and status.
-        # Reason for not throwing exception instead of os.exit is it seems the child process
-        # shouldn’t rely on raising exceptions across process boundaries?
+        # Hard-exit to guarantee isolation; parent inspects exit code and status
         os._exit(1)
 
 def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
@@ -93,7 +85,7 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     p = ctx.Process(target=_compile_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
     p.start()
     try:
-        status, payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
+        payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
     except (queue.Empty, EOFError):
         # print(f"[probe] queue wait failed: {type(e).__name__}: {e}; alive={p.is_alive()}, exitcode={p.exitcode}")
         # Child wedged or died before posting a status – kill and escalate
@@ -105,10 +97,9 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     finally:
         q.close()
     p.join()
-    if status != "ok":
-        raise RuntimeError(f"compile probe failed: {payload}")
+    # Use child exit code to decide success; queue carries payload only.
     if p.exitcode != 0:
-        raise RuntimeError(f"compile probe child exited with code {p.exitcode} (status={status})")
+        raise RuntimeError(f"compile probe failed: {payload}")
     # payload is the bwd_fp (string)
     return payload
 
@@ -125,6 +116,7 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
     os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
     # Make launch sync so device-side assert triggers here, not later.
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+    status_ok = False
     try:
         # Late import inside the child to avoid importing CUDA stacks in parent.
         from .utils import compile_kernel
@@ -143,15 +135,17 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
             _t.cuda.synchronize()
         except Exception:
             pass
-        q.put(("ok", (bool(ok), stats)))
+        q.put((bool(ok), stats))
+        status_ok = True
     except BaseException as e:
-        q.put(("err", {"etype": type(e).__name__, "emsg": str(e)}))
+        q.put({"etype": type(e).__name__, "emsg": str(e)})
     finally:
         try:
             q.close(); q.join_thread()
         except Exception:
             pass
-        os._exit(0 if 'ok' in locals() and ok else 1)
+        # Exit 0 on success (payload posted), 1 on error; parent gates on exit code
+        os._exit(0 if status_ok else 1)
 
 
 def run_gradcheck_child(fwd_fp: str, overwrite_fp: str | None):
@@ -160,7 +154,8 @@ def run_gradcheck_child(fwd_fp: str, overwrite_fp: str | None):
     p = ctx.Process(target=_gradcheck_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
     p.start()
     try:
-        status, payload = q.get(timeout=GRADCHECK_TIMEOUT_S)
+        # Queue returns only the payload (parity_ok, stats)
+        payload = q.get(timeout=GRADCHECK_TIMEOUT_S)
     except (queue.Empty, EOFError):
         try: p.terminate()
         except Exception: pass
@@ -175,7 +170,9 @@ def run_gradcheck_child(fwd_fp: str, overwrite_fp: str | None):
         try: q.close()
         except Exception: pass
     p.join()
-    if status != "ok" or p.exitcode != 0:
+    # Use child exit code to decide success; payload contains (parity_ok, stats).
+    # Partial parity is a successful run (exit 0). Parent can inspect stats and run rollback/LLM fix.
+    if p.exitcode != 0:
         raise RuntimeError(f"gradcheck failed: {payload}")
     return payload  # (ok: bool, stats: dict)
 
@@ -186,6 +183,7 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
     os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
     # Make launch sync so device-side assert triggers here, not later.
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+    status_ok = False
     try:
         from .utils import compile_kernel
         # autodiff API is imported on demand inside utils.compile_kernel
@@ -199,19 +197,18 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
             _t.cuda.synchronize()
         except Exception:
             pass
-        q.put(("ok", cand))
+        q.put(cand)
+        status_ok = True
     except BaseException as e:
         # Keep payload minimal: no traceback for model consumption.
-        q.put(("err", {
-            "etype": type(e).__name__,
-            "emsg": str(e),
-        }))
+        q.put({"etype": type(e).__name__, "emsg": str(e)})
     finally:
         try:
             q.close(); q.join_thread()
         except Exception:
             pass
-        os._exit(0 if 'cand' in locals() else 1)
+        # Exit 0 on success (payload posted), 1 on error; parent gates on exit code
+        os._exit(0 if status_ok else 1)
 
 
 def run_bench_child(fwd_fp: str, overwrite_fp: str | None):
@@ -220,7 +217,8 @@ def run_bench_child(fwd_fp: str, overwrite_fp: str | None):
     p = ctx.Process(target=_bench_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
     p.start()
     try:
-        status, payload = q.get(timeout=BENCH_TIMEOUT_S)
+        # Queue returns only the payload (benchmark summary)
+        payload = q.get(timeout=BENCH_TIMEOUT_S)
     except (queue.Empty, EOFError):
         try: p.terminate()
         except Exception: pass
@@ -235,7 +233,8 @@ def run_bench_child(fwd_fp: str, overwrite_fp: str | None):
         try: q.close()
         except Exception: pass
     p.join()
-    if status != "ok" or p.exitcode != 0:
+    # Use child exit code to decide success; queue payload contains the benchmark summary.
+    if p.exitcode != 0:
         raise RuntimeError(f"bench failed: {payload}")
     return payload  # cand dict
 
