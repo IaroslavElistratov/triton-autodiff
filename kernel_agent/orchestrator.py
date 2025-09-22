@@ -353,15 +353,16 @@ class KernelOptimizer:
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
         rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore)
 
-        # compute shapes for all dims upfront for logging/breadcrumbs
-        # shapes = [(inp.shape for inp in make_args(i)[0]) for i in sweep]
-        # shapes = []
-        # for _dims in ns.get("SWEEP"):
-        #     _args, _kwargs = make_args(_dims)
-        #     if isinstance(_args, (list, tuple)):
-        #         shapes.append(tuple(t.shape for t in _args))
-        #     else:
-        #         shapes.append((_args.shape, ))
+        # solves the problem of not making any snapshot until a kernel finally passes all tests:
+        # when llm is called, it can messup the kernel (pass rate 1/6 -> 0/6), in which case
+        # rollback.maybe_snapshot_or_restore below will do nothing bc the first thing it will see is (0/6)
+        rollback.snapshot("naive_backward")
+        # without this the rollback logic doesn't count iterations regressed under tolerance;
+        # todo: setting to 1 isn't general -- it's possible that for some kernels my naive grad will
+        # fail (not guarantied that it will always pass one test (plus it also depends on the shapes
+        # in the tests which users have). So alternatively, call gradcheck here followed by
+        # rollback.maybe_snapshot_or_restore(stats) here
+        rollback.best_pass_count = 1
 
 
         if VERBOSE:
