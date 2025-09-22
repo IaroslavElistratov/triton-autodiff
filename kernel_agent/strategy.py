@@ -99,9 +99,9 @@ class PhasedStrategy(BaseStrategy):
             print(f"[kernel-agent] Phase gate: {status} for '{phase_name}'; {action}")
         return ok
 
-    @property
-    def get_header(self):
-        return self.phases[self.i].goal
+    # @property
+    # def get_header(self):
+    #     return self.phases[self.i].goal
 
     def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
         # Emit a concise header describing the allowed scope for this step.

@@ -6,7 +6,6 @@ import os
 # avoids brittle substring scraping of "*** Begin/End Patch" in text
 import json
 from typing import Any, Callable
-import collections
 
 from gpt_oss.evals.types import SamplerResponse
 from openai_harmony import (
@@ -132,7 +131,6 @@ class MinimalLLMPatchProvider:
     temperature: float = 0.0
     max_tokens: int = 1536
     context: int | None = None
-    last_thinking: str = ""
     # Tracks backend stop reason (e.g., "max_tokens") to disambiguate truncation
     # from other failure modes and report errors upstream.
     last_stop_reason: str = ""
@@ -186,9 +184,9 @@ class MinimalLLMPatchProvider:
     def _history_block(self) -> str:
         return ("\n\n".join(self._history)) if self._history else "(none)"
 
-    def _trim_history(self) -> None:
-        if len(self.history) > self.history_cap:
-            self.history = self.history[-self.history_cap:]
+    # def _trim_history(self) -> None:
+    #     if len(self.history) > self.history_cap:
+    #         self.history = self.history[-self.history_cap:]
 
     # todo: use pply_patch.md instead of my custom instructions belo
     def propose_patch(self, *, phase: str,

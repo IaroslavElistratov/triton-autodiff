@@ -302,7 +302,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
 
 
 # Tunable limits (seconds) — configurable via env
-CODE_EXEC_TIMEOUT_S = float(os.environ.get("TB_CODE_TIMEOUT_S", "60"))
+CODE_EXEC_TIMEOUT_S = float(os.environ.get("TB_CODE_TIMEOUT_S", "90"))
 
 def run_with_timeout(fn, timeout_s: float):
     """

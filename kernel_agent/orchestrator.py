@@ -12,7 +12,6 @@ from .strategy import make_strategy, PhasedStrategy
 from .worker import run_compile_child
 
 
-TEMPERATURE = 0.35
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
 
 def _read_bytes(path: str) -> bytes:
@@ -425,7 +424,7 @@ class KernelOptimizer:
             # todo-high: rm; too-high deltas
             def _run_gradcheck_child():
                 return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
-            child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, TEMPERATURE, "gradcheck_error")
+            child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, 0.25, "gradcheck_error")
             if not child_ran_ok:
                 continue
             # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
@@ -471,7 +470,8 @@ class KernelOptimizer:
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=fix_header,
                     state_facts={"grad_summary": grad_stats},
-                    temperature=TEMPERATURE,
+                    # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
+                    temperature=0.25,
                 )
                 # retry correctness in next iteration
                 continue
@@ -483,7 +483,7 @@ class KernelOptimizer:
             # Benchmark in an isolated child process
             def _run_bench_child():
                 return run_bench_child(fwd_fp, overwrite_fp=bwd_fp)
-            child_ran_ok, cand = self.run_with_fix(it, _run_bench_child, TEMPERATURE, "bench_error")
+            child_ran_ok, cand = self.run_with_fix(it, _run_bench_child, temp, "bench_error")
             if not child_ran_ok:
                 continue
 
