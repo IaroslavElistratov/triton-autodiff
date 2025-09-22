@@ -8,13 +8,11 @@ from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy
 from .worker import run_gradcheck_child, run_bench_child
-from .strategy import make_strategy, GLOBAL_GUARDRAILS
+from .strategy import make_strategy
 from .worker import run_compile_child
 
-TEMP_CREATE_OP = 0.25
-TEMP_GRAD_AND_BENCH = 0.35
 
-# Verbose logs default ON (use shared truthy parser)
+TEMPERATURE = 0.35
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
 
 def _read_bytes(path: str) -> bytes:
@@ -42,11 +40,6 @@ class Config:
     # todo: a better way?
     snippet_max_lines: int = 400        # bound context shown to the LLM
 
-
-FIX_HEADER = (
-    "Phase = fix. ONLY restore correctness to pass gradcheck.\n"
-    + GLOBAL_GUARDRAILS
-)
 
 class Rollback:
     """Lock-wins snapshot manager for the backward kernel file.
@@ -154,6 +147,25 @@ class KernelOptimizer:
             No preflight/anchors; no prompt error injection; no generation retry duplication.
             These are brital, instead for patch application errors just realy on the patcher to raise an error.
         """
+
+        # let _llm_request_and_apply be the single point which appends these guardrails
+        # Shared guardrails injected every turn (regular and phased)
+        patch_header = (
+            "\nPatch guardrails:\n"
+            # Tool-only: patches must be delivered via functions.apply_patch. This aligns
+            # model guidance with the sampler/orchestrator behavior and avoids analysis/final scraping.
+            "- Exactly one patch: call functions.apply_patch({patch: ...}) once.\n"
+            # Analysis is allowed for reasoning, but must not contain the tool call.
+            # That's not needed strictly speaking but I think cleaner when model output tool call in the final channel
+            "- Use analysis for planning only (no patcher tool call); call apply_patch once as your final action.\n"
+            "- No rule echoing; diff only.\n"
+            # note: attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
+            # "- ≤120 changed lines per patch.\n"
+            "- Include at least one '-' anchor line per hunk.\n"
+            "- Do NOT change the backward stub's signature.\n"
+            "- Single backward kernel and single stub."
+        )
+
         assert stage in ("fix", "optimize")
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
@@ -163,10 +175,7 @@ class KernelOptimizer:
         bwd_snip = _read_snippet(bwd_fp, self.cfg.snippet_max_lines)
 
         if temperature is not None:
-            try:
-                self.patcher.temperature = float(temperature)
-            except Exception:
-                pass
+            self.patcher.temperature = float(temperature)
 
         # 1) Propose once (provider already does one strict retry on empty/no-op and may raise,
         #    including a specific max_tokens error). Avoid duplicate generation retries here
@@ -182,11 +191,11 @@ class KernelOptimizer:
         # just catches that exception so the loop doesn’t crash
         try:
             patch = self.patcher.propose_patch(
-                phase=header,
+                phase=header + patch_header,
                 bwd_file=bwd_fp,
                 fwd_kernel_snippet=fwd_snip,
                 bwd_kernel_snippet=bwd_snip,
-                state_facts=state_facts or {},
+                state_facts=state_facts,
             )
         except Exception as e:
             msg = str(e)
@@ -194,11 +203,6 @@ class KernelOptimizer:
             self.patcher.remember("llm.propose.error", msg)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] propose error: {msg}")
-            # low = msg.lower()
-            # # If the LLM backend itself tripped a CUDA/device-side assert, this is not LLM-fixable.
-            # # Escalate as a user-facing infrastructure error to stop the loop instead of spamming retries.
-            # if ("device-side assert" in low) or ("cuda error" in low) or ("acceleratorerror" in low):
-            #     raise UserError(f"LLM backend error during propose: {msg}")
             return False
 
         if VERBOSE:
@@ -220,10 +224,12 @@ class KernelOptimizer:
             self.patcher.remember("apply.error", err_msg)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] apply error: {err_msg}")
-            fix_header = header + (
-                "\nRETRY: Your previous patch failed to apply.\n"
-                f"apply_patch error:\n{err_msg}\n"
-                "Produce a corrected patch and call functions.apply_patch again. No prose."
+            fix_header = (
+                header
+                + "\nRETRY: Your previous patch failed to apply.\n"
+                + f"apply_patch error:\n{err_msg}\n"
+                + "Produce a corrected patch and call functions.apply_patch again. No prose.\n"
+                + patch_header
             )
             try:
                 patch = self.patcher.propose_patch(
@@ -271,12 +277,11 @@ class KernelOptimizer:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
         return changed
 
-    # todo-low: more descriptive name run_catch_errs_and_retry
-    #
+    # todo-low: more descriptive name run_catch_errs_and_retry;
     # previously I wrapped create_op in _create_op_with_fix -- which allowed llm to fix it, but lost that functionality after i moved e.g. compile->bwd into child process,
     # so i expose the below method to "run and retry" which takes in a callable, and wraps it in some structure similar to _create_op_with_fix,
     # so that in the orchestrator's loop I can call self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
-    def run_with_fix(self, it, fn, temperature, err_category, header):
+    def run_with_fix(self, it, fn, temperature, err_category):
         try:
             return True, fn()
         # raise only UserError, catch the rest of the errors
@@ -294,9 +299,10 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] {err_category}: {err}")
 
-            _ = self._llm_request_and_apply(
+            self._llm_request_and_apply(
                 it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
-                header=header,
+                # don't provide phase header for fixing exceptions
+                header="Phase = fix. ONLY fix the exception.\n",
                 state_facts={err_category: err}, # , "shapes": shapes
                 temperature=temperature,
             )
@@ -312,9 +318,10 @@ class KernelOptimizer:
                 self.patcher.remember(err_category, err_retry)
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] {err_category} on retry: {err_retry}")
-                _ = self._llm_request_and_apply(
+                self._llm_request_and_apply(
                     it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
-                    header=header,
+                    # don't provide phase header for fixing exceptions
+                    header="Phase = fix. ONLY fix the exception.\n",
                     state_facts={err_category: err_retry}, # , "shapes": shapes
                     temperature=temperature,
                 )
@@ -346,7 +353,7 @@ class KernelOptimizer:
             # for consistency call this in a child process as well (run_compile_child) even though compiler generated bwd doesn't OOB;
             # and if it OOBs a failure here should terminate the program anyway (so the that safety around "run_compile_child" is redundant)
             return run_compile_child(fwd_fp, overwrite_fp=None)
-        child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, TEMP_CREATE_OP, "compile_error", FIX_HEADER)
+        child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, 0.25, "compile_error")
         self.bwd_fp = bwd_fp
         self.fwd_fp = fwd_fp
 
@@ -422,7 +429,7 @@ class KernelOptimizer:
             #
             # prefix every "fix" request with the current phase header. To keep model anchored on the phase goal
             # while it fixes concrete errors. Important esp in Phase-1, since the raised backward is unrolled and SWEEP is multi‑shape
-            header_with_strategy = f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}"
+            # header_with_strategy = f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}"
 
             # Run parity in an isolated child process;
             # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
@@ -431,7 +438,7 @@ class KernelOptimizer:
             # todo-high: rm; too-high deltas
             def _run_gradcheck_child():
                 return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
-            child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, TEMP_GRAD_AND_BENCH, "gradcheck_error", header_with_strategy)
+            child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, TEMPERATURE, "gradcheck_error")
             if not child_ran_ok:
                 continue
             # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
@@ -466,9 +473,9 @@ class KernelOptimizer:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
                 _ = self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=header_with_strategy,
+                    header="Phase = fix. ONLY restore correctness to pass gradcheck.\n",
                     state_facts={"grad_summary": grad_stats},
-                    temperature=TEMP_GRAD_AND_BENCH,
+                    temperature=TEMPERATURE,
                 )
                 # retry correctness in next iteration
                 continue
@@ -480,7 +487,7 @@ class KernelOptimizer:
             # Benchmark in an isolated child process
             def _run_bench_child():
                 return run_bench_child(fwd_fp, overwrite_fp=bwd_fp)
-            child_ran_ok, cand = self.run_with_fix(it, _run_bench_child, TEMP_GRAD_AND_BENCH, "bench_error", header_with_strategy)
+            child_ran_ok, cand = self.run_with_fix(it, _run_bench_child, TEMPERATURE, "bench_error")
             if not child_ran_ok:
                 continue
 
@@ -518,7 +525,7 @@ class KernelOptimizer:
             # comment:
             # i guess i can think of it that the only time phase header and constraints are shown in here
             # and all the previous llm calls were basically fixes in one from or another (e.g. patch fixes, grad-correctness fixes)
-            phase_text, temp = self.strategy.current_phase(parity_ok=parity_ok, last_runtime=cand.get("median_ms"))
+            phase_text, temp = self.strategy.current_phase(parity_ok)
             changed = self._llm_request_and_apply(
                 it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                 header=phase_text,

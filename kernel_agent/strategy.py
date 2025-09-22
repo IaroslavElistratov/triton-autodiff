@@ -18,22 +18,6 @@ class Phase:
     guardrails: str
     temp: float
 
-# Shared guardrails injected every turn (regular and phased).
-GLOBAL_GUARDRAILS = (
-    "Guardrails:\n"
-    # Tool-only: patches must be delivered via functions.apply_patch. This aligns
-    # model guidance with the sampler/orchestrator behavior and avoids analysis/final scraping.
-    "- Exactly one patch: call functions.apply_patch({patch: ...}) once.\n"
-    # Analysis is allowed for reasoning, but must not contain the tool call.
-    # That's not needed strictly speaking but I think cleaner when model output tool call in the final channel
-    "- Use analysis for planning only (no patcher tool call); call apply_patch once as your final action.\n"
-    "- No rule echoing; diff only.\n"
-    # note: attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
-    # "- ≤120 changed lines per patch.\n"
-    "- Include at least one '-' anchor line per hunk.\n"
-    "- Do NOT change the backward stub's signature.\n"
-    "- Single backward kernel and single stub."
-)
 
 # Default phase sequence — light guidance per step; can be replaced/tuned.
 PHASES: Sequence[Phase] = (
@@ -64,9 +48,9 @@ PHASES: Sequence[Phase] = (
 )
 
 class BaseStrategy:
-    def next_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
+    def next_phase(self, parity_ok: bool) -> Tuple[str, float]:
         # Default: a simple optimize header with global guardrails and neutral temperature
-        return "Phase = optimize.\n" + GLOBAL_GUARDRAILS, 0.7
+        return "Phase = optimize.\n", 0.7
 
     def advance(self, changed: bool, parity_ok: bool) -> None:
         # No-op in the base class.
@@ -82,11 +66,10 @@ class RegularStrategy(BaseStrategy):
     def get_header(self):
         return "Phase = optimize. Improve performance without changing numerics."
 
-    def next_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
+    def next_phase(self, parity_ok: bool) -> Tuple[str, float]:
         header = (
             "Phase = optimize. Improve performance without changing numerics.\n"
             " * atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improve the performance. "
-            + GLOBAL_GUARDRAILS
         )
         return header, self._temp
 
@@ -120,14 +103,13 @@ class PhasedStrategy(BaseStrategy):
     def get_header(self):
         return self.phases[self.i].goal
 
-    def current_phase(self, parity_ok: bool, last_runtime: Optional[float]) -> Tuple[str, float]:
+    def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
         # Emit a concise header describing the allowed scope for this step.
         p = self.phases[self.i]
         header = (
             f"Phase = {p.name}. ONLY do: {p.goal}.\n"
             f"Success gates: gradcheck_ok={parity_ok}.\n"
-            + GLOBAL_GUARDRAILS + "\n"
-            f"Guardrails (phase-specific): {p.guardrails}"
+            f"Guardrails (phase-specific): {p.guardrails}\n"
         )
         return header, p.temp
 
