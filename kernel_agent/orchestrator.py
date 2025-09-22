@@ -8,7 +8,7 @@ from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy
 from .worker import run_gradcheck_child, run_bench_child
-from .strategy import make_strategy
+from .strategy import make_strategy, PhasedStrategy
 from .worker import run_compile_child
 
 
@@ -418,19 +418,6 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Running gradient_check (parity)")
 
-
-            # todo-now:
-            # but that's also seems wrong now when i introduce the additional tests and i'm basically here requesting to fix the bench wihtout showing detailed phase guardrealls and other info; also showing the phase header here
-            # it just an artifact from earlier were i had logc where "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet"
-            # but now e.g. for phase 1 the phase's goal (add for loops is exactly what should be shown on the gradhceck fail).
-            # !!! ==> so that "don't proceed with phase goals on gradcheck falier" (which is effectively what i'm doing below by continue'ing if not parity_ok)
-            #   also hacked the header_with_strategy thing. Which is completely wrong, as in, should just use the stratagy header!
-            # !!! ==> it basically all came together bc i left over the old logic of "if gradcheck failed, prompt the model fix gradhceck; and do not continue to the phase goal yet" **while i also added a phase whose goal is to solve exactly that** (passing the gradcheck)
-            #
-            # prefix every "fix" request with the current phase header. To keep model anchored on the phase goal
-            # while it fixes concrete errors. Important esp in Phase-1, since the raised backward is unrolled and SWEEP is multi‑shape
-            # header_with_strategy = f"{self.strategy.get_header.strip()}\n\n{FIX_HEADER}"
-
             # Run parity in an isolated child process;
             # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
             # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
@@ -443,7 +430,6 @@ class KernelOptimizer:
                 continue
             # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
             parity_ok, grad_stats = payload_gradcheck
-            # parity_ok = child_ran_ok and grad_passed
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
@@ -451,6 +437,7 @@ class KernelOptimizer:
             self.patcher.remember("gradcheck", grad_stats)
 
             was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
+            phase_text, temp = self.strategy.current_phase(parity_ok)
 
             # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
             if not parity_ok:
@@ -471,9 +458,18 @@ class KernelOptimizer:
                 # -- the kernel would never change
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
-                _ = self._llm_request_and_apply(
+
+                # Decide the fix prompt header:
+                # - If we are in Phase 1, include the phase header bc Phase 1's explicit goal is to restore
+                #   parity (by re-introducing loops). So add that header to anchor fixes to loop re-introduction.
+                # - Otherwise (regular strategy or later phases), issue a correctness-only header
+                #   to avoid confusing the model with optimization goals while fixing parity.
+                is_phase_0 = isinstance(self.strategy, PhasedStrategy) and self.strategy.i == 0
+                fix_header = (phase_text + "\n" if is_phase_0 else "") + "ONLY restore correctness to pass gradcheck.\n"
+
+                self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header="Phase = fix. ONLY restore correctness to pass gradcheck.\n",
+                    header=fix_header,
                     state_facts={"grad_summary": grad_stats},
                     temperature=TEMPERATURE,
                 )
@@ -525,7 +521,6 @@ class KernelOptimizer:
             # comment:
             # i guess i can think of it that the only time phase header and constraints are shown in here
             # and all the previous llm calls were basically fixes in one from or another (e.g. patch fixes, grad-correctness fixes)
-            phase_text, temp = self.strategy.current_phase(parity_ok)
             changed = self._llm_request_and_apply(
                 it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                 header=phase_text,
