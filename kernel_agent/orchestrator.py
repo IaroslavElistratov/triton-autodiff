@@ -117,6 +117,12 @@ class Rollback:
             self._log(f"parity unchanged: {curr_passed}/{total} == best {self.best_pass_count}")
             return False
 
+
+# Runtime exceptions (gradcheck/bench/compile child fails): handled once per iteration in run_with_fix;
+#   make one LLM fix attempt, do not re-run the child in the same iteration—let the main loop continue.
+# Patch-apply errors: handled only inside _llm_request_and_apply, with one reprompt that includes the patcher error.
+# Generation retries: live only in llm.py.
+
 class KernelOptimizer:
     """
     Deterministic controller:
@@ -276,10 +282,8 @@ class KernelOptimizer:
             print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
         return changed
 
-    # todo-low: more descriptive name run_catch_errs_and_retry;
-    # previously I wrapped create_op in _create_op_with_fix -- which allowed llm to fix it, but lost that functionality after i moved e.g. compile->bwd into child process,
-    # so i expose the below method to "run and retry" which takes in a callable, and wraps it in some structure similar to _create_op_with_fix,
-    # so that in the orchestrator's loop I can call self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
+    # expose the below method to "run and retry" which takes in a callable, so that in the orchestrator's loop I can call
+    # self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
     def run_with_fix(self, it, fn, temperature, err_category):
         try:
             return True, fn()
@@ -298,33 +302,19 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] {err_category}: {err}")
 
+            # One fix attempt for this iteration. Do not re-run fn() here.
             self._llm_request_and_apply(
-                it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
-                # don't provide phase header for fixing exceptions
+                it,
+                "fix",
+                bwd_fp=self.bwd_fp,
+                fwd_fp=self.fwd_fp,
                 header="Phase = fix. ONLY fix the exception.\n",
-                state_facts={err_category: err}, # , "shapes": shapes
+                state_facts={err_category: err},
                 temperature=temperature,
             )
-            # _llm_request_and_apply also catches errors, but only for patch application fails;
 
-            # catch here as well, because this create_op can independently error
-            try:
-                return True, fn()
-            except UserError as ue2:
-                raise ue2
-            except Exception as ce_retry:
-                err_retry = f"{type(ce_retry).__name__}: {ce_retry}"
-                self.patcher.remember(err_category, err_retry)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] {err_category} on retry: {err_retry}")
-                self._llm_request_and_apply(
-                    it, "fix", bwd_fp=self.bwd_fp, fwd_fp=self.fwd_fp,
-                    # don't provide phase header for fixing exceptions
-                    header="Phase = fix. ONLY fix the exception.\n",
-                    state_facts={err_category: err_retry}, # , "shapes": shapes
-                    temperature=temperature,
-                )
-                return False, None
+            # Defer re-test to next iteration.
+            return False, None
 
     def run(self, *,
             fwd_fp: str,
@@ -339,7 +329,8 @@ class KernelOptimizer:
 
         # TTIR from autodiff then raise to Python once; use as seed and target
         # using output of triton-autodiff directly as the initial version of the backward kernel
-        # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodif instead just using output of trtion-autodiff as patcher.kernel_snippet)
+        # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodiff instead
+        # just using output of triton-autodiff as patcher.kernel_snippet)
 
         # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
         # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
