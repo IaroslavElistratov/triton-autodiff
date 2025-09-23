@@ -344,6 +344,8 @@ class MinimalLLMPatchProvider:
             raise RuntimeError("LLM returned no actionable patch")
 
         # Ensure target file line points to requested file (fix any mismatched path)
+        # Normalize the file header so the model doesn't spend
+        # tokens on it and we avoid target-path drift in apply
         patch_text = _ensure_update_file_target(patch_text, bwd_file)
         return patch_text
 

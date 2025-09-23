@@ -141,39 +141,42 @@ class KernelOptimizer:
         self.strategy_name = os.environ.get("KERNEL_AGENT_STRATEGY", "regular")
         self.strategy = make_strategy(self.strategy_name)
 
-    def _llm_request_and_apply(self, it: int, stage: str, *, bwd_fp: str, fwd_fp: str, header: str, state_facts: dict, temperature: float | None = None) -> bool:
-        """Ask for one patch, apply with one retry on apply error, return True if apply succeeded.
-
+    def _llm_request_and_apply(
+        self,
+        it: int,
+        stage: str,
+        *,
+        bwd_fp: str,
+        fwd_fp: str,
+        header: str,
+        state_facts: dict,
+        temperature: float | None = None,
+    ) -> bool:
+        """Propose one patch and apply it with a single apply-error retry. Returns True iff file bytes changed.
         Separation of concerns:
           - llm.propose_patch: ensures a non-empty apply_patch.md block, normalizes target path,
             and distinguishes max_tokens vs generic no-patch. It may raise on generation failure.
           - _llm_request_and_apply (this): applies the patch via patcher, performs one
             apply-repair retry on failure, detects change via before/after bytes, and breadcrumbs errors.
-            No preflight/anchors; no prompt error injection; no generation retry duplication.
-            These are brital, instead for patch application errors just realy on the patcher to raise an error.
+            For patch application errors just rely on the patcher to raise an error.
         """
+        assert stage in ("fix", "optimize")
+        if VERBOSE:
+            print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
         # let _llm_request_and_apply be the single point which appends these guardrails
-        # Shared guardrails injected every turn (regular and phased)
         patch_header = (
             "\nPatch guardrails:\n"
-            # Tool-only: patches must be delivered via functions.apply_patch. This aligns
-            # model guidance with the sampler/orchestrator behavior and avoids analysis/final scraping.
             "- Exactly one patch: call functions.apply_patch({patch: ...}) once.\n"
-            # Analysis is allowed for reasoning, but must not contain the tool call.
-            # That's not needed strictly speaking but I think cleaner when model output tool call in the final channel
+            # that's not needed strictly speaking but I think cleaner when model output tool call in the final channel
             "- Use analysis for planning only (no patcher tool call); call apply_patch once as your final action.\n"
             "- No rule echoing; diff only.\n"
-            # note: attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
+            # attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
             # "- ≤120 changed lines per patch.\n"
             "- Include at least one '-' anchor line per hunk.\n"
             "- Do NOT change the backward stub's signature.\n"
             "- Single backward kernel and single stub."
         )
-
-        assert stage in ("fix", "optimize")
-        if VERBOSE:
-            print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
         # context shown to LLM
         fwd_snip = _read_snippet(fwd_fp, self.cfg.snippet_max_lines)
@@ -182,105 +185,81 @@ class KernelOptimizer:
         if temperature is not None:
             self.patcher.temperature = float(temperature)
 
-        # 1) Propose once (provider already does one strict retry on empty/no-op and may raise,
-        #    including a specific max_tokens error). Avoid duplicate generation retries here
-        #
-        # Provider already did a strict retry and raised/returned accordingly.
-        # Avoid duplicate generation retries here.
-
-        # todo: [cleanup] llm.py should be responsible for everyhting related to patch proposal and its
-        # errors, do not spread that logic across both llm.py and this file. Remove these try/except around
-        # self.patcher.propose_patch and make it the responsibility of llm.py
-        #
+        # llm.py already did a retry and raised/returned accordingly. Avoid duplicate generation retries here.
         # llm.py detects and classifies max-tokens, then raises; this try/catch in the orchestrator
         # just catches that exception so the loop doesn’t crash
-        try:
-            patch = self.patcher.propose_patch(
-                phase=header + patch_header,
-                bwd_file=bwd_fp,
-                fwd_kernel_snippet=fwd_snip,
-                bwd_kernel_snippet=bwd_snip,
-                state_facts=state_facts,
-            )
-        except Exception as e:
-            msg = str(e)
-            # Treat generation limits (max_tokens) and generic proposal errors as non-fatal
-            self.patcher.remember("llm.propose.error", msg)
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] propose error: {msg}")
+        # todo: [cleanup] llm.py should be responsible for everyhting related to patch proposal and its
+        # errors, do not spread that logic across both llm.py and this file. Remove these try/except around
+        # self.patcher.propose_patch and make it responsibility of llm.py
+        def _propose(header: str):
+            try:
+                patch = self.patcher.propose_patch(
+                    phase=header,
+                    bwd_file=bwd_fp,
+                    fwd_kernel_snippet=fwd_snip,
+                    bwd_kernel_snippet=bwd_snip,
+                    state_facts=state_facts,
+                )
+                return patch, None
+            except Exception as err_propose:
+                err_propose = f"{type(err_propose).__name__}: {err_propose}"
+                self.patcher.remember("llm.propose.error", err_propose)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] propose error: {err_propose}")
+                return None, err_propose
+
+        def _apply_once(patch) -> str | None:
+            try:
+                _apply_patch_raw(patch)
+                return None
+            except Exception as err_apply:
+                err_apply = f"{type(err_apply).__name__}: {err_apply}"
+                # rely on the patcher to surface validation errors at apply time;
+                # no preflight checks; the patcher remains the source of truth
+                self.patcher.remember("apply.error", err_apply)
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] apply error: {err_apply}")
+                return err_apply
+
+        # 1) Propose once
+        header1 = header + patch_header
+        patch, err_propose = _propose(header1)
+        # max_tokens
+        if err_propose:
             return False
 
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
 
-        # Normalize the file header so the model doesn't spend tokens on it and
-        # we avoid target-path drift in apply.
-        patch = _ensure_update_file_target(patch, bwd_fp)
-
-        # Detect change on raw bytes
+        # 2) Apply (with one repair attempt on apply error)
         before = _read_bytes(bwd_fp)
-
-        try:
-            _apply_patch_raw(patch)
-        except Exception as e:
-            # 2. Surface exact patcher error and reprompt once with the error attached.
-            # rely on the patcher to surface validation errors at apply time; no preflight checks; the patcher remains the source of truth
-            err_msg = f"{type(e).__name__}: {e}"
-            self.patcher.remember("apply.error", err_msg)
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] apply error: {err_msg}")
+        err_apply = _apply_once(patch)
+        if err_apply:
             fix_header = (
                 header
                 + "\nRETRY: Your previous patch failed to apply.\n"
-                + f"apply_patch error:\n{err_msg}\n"
+                + f"apply_patch error:\n{err_apply}\n"
                 + "Produce a corrected patch and call functions.apply_patch again. No prose.\n"
                 + patch_header
             )
-            try:
-                patch = self.patcher.propose_patch(
-                    phase=fix_header,
-                    bwd_file=bwd_fp,
-                    fwd_kernel_snippet=fwd_snip,
-                    bwd_kernel_snippet=bwd_snip,
-                    state_facts=state_facts or {},
-                )
-            except Exception as e_propose_retry:
-                err_retry = f"{type(e_propose_retry).__name__}: {e_propose_retry}"
-                self.patcher.remember("llm.propose.error.retry", err_retry)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] propose retry error: {err_retry}")
+            patch2, err2_propose = _propose(fix_header)
+            # todo-now: just exit here?
+            if err2_propose:
                 return False
-            patch2 = (patch or "").strip()
-            if not patch2:
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] still empty after apply error reprompt")
+            err2_apply = _apply_once(patch2)
+            if err2_apply:
                 return False
 
-            # todo-high: debatable to cath this, as you can just advance a bunch of iterations with failed patches
-            # retry once on apply error; if the second attempt still fails, do not crash the process—treat as failed iteration;
-            # keep this under its own try/except because the application of the 2nd patch
-            # can independantly fail and it did happen in the past
-            try:
-                # Re-normalize header on retry and apply again.
-                _apply_patch_raw(_ensure_update_file_target(patch2, bwd_fp))
-            except Exception as e2:
-                err2 = f"{type(e2).__name__}: {e2}"
-                self.patcher.remember("apply.error.retry", err2)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] apply retry error: {err2}")
-                # Optimize path: uses the boolean to control phase advancement (no advance on False), in both legacy and phased modes;
-                # Fix paths: (compile/gradcheck/bench errors) intentionally ignore the return bool and proceed to next iteration
-                return False
-
-        # 3) Record + report change. Detect change on raw bytes for simplicity.
+        # 3) Change detection
         after = _read_bytes(bwd_fp)
         changed = (after != before)
         # don't keep patch in the breadcrumbs, because model keeps the summary
         # of the changes in the kernel docstring
-        self.patcher.remember(f"apply.{stage}", ("ok" if changed else "no-change"))
+        self.patcher.remember(f"apply.{stage}", ("patch applied successfully" if changed else "no-change"))
         if VERBOSE:
-            print(f"[kernel-agent][it={it}] {'changed' if changed else 'no change'} in '{stage}'")
+            print(f"[kernel-agent][it={it}] {'patch applied successfully' if changed else 'no change'} in '{stage}'")
         return changed
+
 
     # expose the below method to "run and retry" which takes in a callable, so that in the orchestrator's loop I can call
     # self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
