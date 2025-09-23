@@ -1,6 +1,14 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
+import os
 import math
+
+from ...utils import _env_truthy
+
+
+
+VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
+
 
 def _dims_key(d: Dict[str, Any]) -> str:
     """Return a stable key like 'B=1|H=8|N_CTX=4096' for a dims dict.
@@ -64,6 +72,10 @@ class PerfTracker:
         self._non_improve = 0
         self.stop_reason: Optional[str] = None
 
+    def _log(self, text: str) -> None:
+        if VERBOSE:
+            print(f"[kernel-agent][perf] {text}")
+
     @staticmethod
     def _full_parity(stats: Dict[str, Any]) -> bool:
         """Return True iff all shapes in the sweep passed gradcheck.
@@ -98,7 +110,11 @@ class PerfTracker:
             # tolerate older field name if present
             pk = cand.get("max_tflops")
         if isinstance(pk, (int, float)):
-            self.ever_max_tflops = pk if self.ever_max_tflops is None else max(self.ever_max_tflops, float(pk))
+            prev = self.ever_max_tflops
+            cur = pk if prev is None else max(prev, float(pk))
+            self.ever_max_tflops = cur
+            if prev != cur:
+                self._log(f"ever_max_tflops update: {prev} -> {cur}")
 
         # 3) Enforce full parity before considering performance (correctness first)
         full_parity = self._full_parity(grad_stats)
@@ -118,6 +134,10 @@ class PerfTracker:
                         speedups[k] = r
                         ratios.append(r)
         S_geo = _geomean(ratios) if ratios else None
+        self._log(
+            f"it={it} parity={'yes' if full_parity else 'no'} | shapes={len(order)} | "
+            f"geomean_speedup_vs_best={S_geo if S_geo is not None else 'NA'}"
+        )
 
         # Attach reporting to latest snapshot for visibility in CLI
         self.latest_metrics["speedups_vs_best"] = speedups if self.best_by_shape else {}
@@ -133,6 +153,10 @@ class PerfTracker:
             else:
                 thr = 1.0 + self.min_rel_improvement
                 improved = (S_geo is not None) and (S_geo >= thr)
+                if improved:
+                    self._log(f"accepted: geomean={S_geo} >= threshold={thr} at it={it} | shapes={len(order)}")
+                else:
+                    self._log(f"no accept: geomean={S_geo if S_geo is not None else 'NA'} < threshold={thr}")
 
         if improved:
             # Promote current per‑shape results to the new best
@@ -151,6 +175,9 @@ class PerfTracker:
                 self._non_improve += 1
                 if self._non_improve >= self.patience_perf_stop:
                     self.stop_reason = "patience"
+                    self._log(f"early stop: patience reached (non_improve={self._non_improve}/{self.patience_perf_stop})")
+                else:
+                    self._log(f"non-improve streak: {self._non_improve}/{self.patience_perf_stop}")
 
         return {"full_parity": full_parity, "improved": improved, "geomean": S_geo}
 
@@ -159,3 +186,4 @@ class PerfTracker:
         """Clear the non-improvement streak and any pending patience stop."""
         self._non_improve = 0
         self.stop_reason = None
+        self._log("patience reset")
