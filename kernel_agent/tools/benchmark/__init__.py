@@ -1,3 +1,4 @@
-from .core import bench_op, reduce_bench
+from .core import bench_op
+from .perf_tracker import PerfTracker
 
-__all__ = ["bench_op", "reduce_bench"]
+__all__ = ["bench_op", "PerfTracker"]

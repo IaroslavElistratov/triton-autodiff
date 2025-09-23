@@ -5,11 +5,11 @@ import os, re, json, sys, shutil
 import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
-from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
 from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes, redact_torch_fn
 from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy, PhasedStrategy
 from .worker import run_compile_child
+from .tools.benchmark import PerfTracker
 
 
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
@@ -353,7 +353,6 @@ class KernelOptimizer:
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
         rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore)
-
         # solves the problem of not making any snapshot until a kernel finally passes all tests:
         # when llm is called, it can messup the kernel (pass rate 1/6 -> 0/6), in which case
         # rollback.maybe_snapshot_or_restore below will do nothing bc the first thing it will see is (0/6)
@@ -365,15 +364,15 @@ class KernelOptimizer:
         # rollback.maybe_snapshot_or_restore(stats) here
         rollback.best_pass_count = 1
 
+        tracker = PerfTracker(min_rel_improvement=self.cfg.min_rel_improvement,
+                              patience_perf_stop=self.cfg.patience_perf_stop)
+
 
         if VERBOSE:
             print(f"[kernel-agent] Initial backward path: {bwd_fp}")
 
 
         device = get_user_device_info()
-        # Initialize plateau tracking to avoid unbound locals on early returns
-        best_metrics = None
-        non_improve = 0
         stop_reason = "max_iters"
 
         # optimization loop
@@ -436,15 +435,16 @@ class KernelOptimizer:
             # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
             if not parity_ok:
                 if was_restored:
-                    # avoid showing stale errors to the model after a restore by skipping the fix prompt and
-                    # advancing to re-run gradcheck on the restored kernel next iteration
-                    #
-                    # Restore happened this iteration: skip prompting the model with stale failures
-                    # and immediately re-test on the restored kernel next iteration.
-                    # Also reset perf patience counter so a prior non_improve streak doesn't trip early.
-                    non_improve = 0  # reset perf patience after restore
+                    # reset perf patience counter after rollback
+                    tracker.reset_patience()
+
                     if VERBOSE:
                         print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
+
+                    # avoid showing stale errors to the model after a restore by skipping the fix prompt and
+                    # advancing to re-run gradcheck on the restored kernel next iteration;
+                    # Restore happened this iteration: skip prompting the model with stale failures
+                    # and immediately re-test on the restored kernel next iteration
                     continue
 
                 # when child returns ok (no err was raised) but parity_ok is False (some gradcheck test failed), call the fix prompt, then continue;
@@ -485,26 +485,18 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] bench: {cand}")
 
-            # Simple plateau logic governed by cfg.patience and min_rel_improvement
-            # Only consider performance when parity is full; otherwise ignore perf for acceptance
-            full_parity = bool(grad_stats.get("num_total", 0)) and (int(grad_stats.get("num_passed", 0)) == int(grad_stats.get("num_total", 0)))
-            improved = full_parity and ((best_metrics is None) or (
-                cand["median_ms"] <= (1.0 - self.cfg.min_rel_improvement) * best_metrics["median_ms"]
-            ))
-
-            if improved:
-                best_metrics = cand
-                non_improve = 0
+            # Feed per-sweep reducer output to the tracker:
+            # - latest_metrics: last sweep + per-shape speedups and geomean vs best
+            # - best_metrics: accepted snapshot + ever_max_tflops
+            decision = tracker.update(cand, grad_stats, it=it)
+            if decision["improved"]:
                 # lock perf improvement only under full parity
                 rollback.snapshot("perf-improved (on full parity)")
-            else:
-                non_improve += 1
-                # patience triggers only in full parity mode
-                if full_parity and (non_improve >= self.cfg.patience_perf_stop):
-                    stop_reason = "patience"
-                    if VERBOSE:
-                        print(f"[kernel-agent][it={it}] Early stop: patience reached (non_improve={non_improve})")
-                    break
+            elif tracker.stop_reason:
+                stop_reason = tracker.stop_reason
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Early stop {stop_reason}")
+                break
 
 
             # 3) Optimize step (toggleable to keep loop disentangled from policy)
@@ -544,7 +536,8 @@ class KernelOptimizer:
                 raise ValueError(f"Unreachable, mode should be either 'regular' or 'phased'. Got {self.strategy_name}")
 
         return {
-            "best_metrics": best_metrics,
+            "best_metrics": tracker.best_metrics,
+            "latest_metrics": tracker.latest_metrics,
             "backward_fp": bwd_fp,
             "device_info": device,
             "stop_reason": stop_reason,

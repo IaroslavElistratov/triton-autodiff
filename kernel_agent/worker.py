@@ -187,12 +187,11 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
     try:
         from .utils import compile_kernel
         # autodiff API is imported on demand inside utils.compile_kernel
-        from .tools.benchmark import bench_op, reduce_bench
+        from .tools.benchmark import bench_op
         import torch as _t
 
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
-        recs = bench_op(op, ns, mode="bwd")
-        cand = reduce_bench(recs)
+        cand = bench_op(op, ns, mode="bwd")
         try:
             _t.cuda.synchronize()
         except Exception:

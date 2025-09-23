@@ -60,12 +60,12 @@ def main() -> None:
         # todo:
         get_user_device_info=(lambda: "N/A"),
     )
-    print("Best metrics:", out.get("best_metrics", {}))
+    print("Latest metrics:", out.get("latest_metrics", {}))  # last sweep with per-shape + speedups
+    print("Best metrics:", out.get("best_metrics", {}))      # accepted snapshot + ever_max_tflops
     print("Best backward file:", out["backward_fp"])
     print("Device:", out["device_info"])
-    stop_reason = out.get("stop_reason", "")
-    if stop_reason:
-        print("Stop reason:", stop_reason)
+    if out.get("stop_reason"):
+        print("Stop reason:", out["stop_reason"])
 
 if __name__ == "__main__":
     main()
