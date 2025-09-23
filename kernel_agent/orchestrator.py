@@ -6,7 +6,7 @@ import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
-from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes
+from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes, redact_torch_fn
 from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy, PhasedStrategy
 from .worker import run_compile_child
@@ -183,8 +183,8 @@ class KernelOptimizer:
             "- Single backward kernel and single stub."
         )
 
-        # context shown to LLM
-        fwd_snip = _read_snippet(fwd_fp, self.cfg.snippet_max_lines)
+        # context shown to LLM: redacted forward (torch_fn removed), sliced internally by utils
+        fwd_snip = redact_torch_fn(fwd_fp, self.cfg.snippet_max_lines)
         bwd_snip = _read_snippet(bwd_fp, self.cfg.snippet_max_lines)
 
         if temperature is not None:

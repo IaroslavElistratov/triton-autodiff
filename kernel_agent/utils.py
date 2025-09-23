@@ -342,6 +342,42 @@ def _read_snippet(path: str, max_lines: int) -> str:
         return f"(snippet unavailable: {e})"
 
 
+def redact_torch_fn(path: str, max_lines: int | None = None) -> str:
+    """Remove a top-level `def torch_fn(...):` (with decorators) and return redacted text.
+    - Prompt-only hygiene: runtime untouched. If AST fails, returns original text.
+    - If max_lines is provided, return only the first `max_lines` lines of the redacted text.
+    """
+    try:
+        import ast
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            src = fh.read()
+        tree = ast.parse(src)
+
+        start = end = None
+        for node in getattr(tree, "body", []):
+            if isinstance(node, ast.FunctionDef) and getattr(node, "name", "") == "torch_fn":
+                decos = getattr(node, "decorator_list", []) or []
+                start = min([getattr(d, "lineno", node.lineno) for d in decos] + [node.lineno])
+                end = getattr(node, "end_lineno", None) or node.lineno
+                break
+
+        if start is not None and end is not None:
+            lines = src.splitlines(True)
+            del lines[int(start) - 1:int(end)]
+            src = "".join(lines)
+    except Exception:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                src = fh.read()
+        except Exception:
+            return ""
+
+    # Optional cropping handled here so callers can stay simple
+    if isinstance(max_lines, int) and max_lines > 0:
+        return "".join(src.splitlines(True)[:max_lines])
+    return src
+
+
 # def try_make_slice_payload(text: str) -> Optional[str]:
 #     """
 #     Optional fast path for chunked reads of the generated TTIR file.
