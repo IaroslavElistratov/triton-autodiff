@@ -152,13 +152,18 @@ class KernelOptimizer:
         state_facts: dict,
         temperature: float | None = None,
     ) -> bool:
-        """Propose one patch and apply it with a single apply-error retry. Returns True iff file bytes changed.
+        """Propose exactly one patch; if apply fails, retry once to **fix the same patch**. Returns True iff file bytes changed.
+
         Separation of concerns:
           - llm.propose_patch: ensures a non-empty apply_patch.md block, normalizes target path,
             and distinguishes max_tokens vs generic no-patch. It may raise on generation failure.
           - _llm_request_and_apply (this): applies the patch via patcher, performs one
             apply-repair retry on failure, detects change via before/after bytes, and breadcrumbs errors.
             For patch application errors just rely on the patcher to raise an error.
+
+        Proposes exactly one patch; if its apply fails, it tries to salvage **the same patch**
+        once. The next outer iteration always makes a fresh proposal (no hidden carry‑over).
+        This separation keeps state clean and rollback simple.
         """
         assert stage in ("fix", "optimize")
         if VERBOSE:
@@ -234,16 +239,27 @@ class KernelOptimizer:
         # 2) Apply (with one repair attempt on apply error)
         before = _read_bytes(bwd_fp)
         err_apply = _apply_once(patch)
+
+        # Perform one immediate apply-error retry inside _llm_request_and_apply;
+        # if that also fails, return False and let the outer loop advance.
+        # This salvages potentially a good patch using the exact apply error once, and keeps next
+        # iteration a clean fresh proposal with no hidden carry-over.
+        # comment:
+        # Can semantically think that _llm_request_and_apply proposes a single patch and on re-try
+        # attempts to fix **the same patch** (instead of proposing a separate independent patch)
+
         if err_apply:
-            fix_header = (
+            retry_header = (
                 header
-                + "\nRETRY: Your previous patch failed to apply.\n"
-                + f"apply_patch error:\n{err_apply}\n"
-                + "Produce a corrected patch and call functions.apply_patch again. No prose.\n"
+                + "\nRETRY: Your previous patch failed to apply. "
+                "Fix the SAME diff below; do not start a new redesign; keep intent identical. "
+                "Adjust anchors/context only if needed.\n"
+                f"apply_patch error:\n{err_apply}\n"
+                f"Previous patch (verbatim):\n{str(patch).strip()}\n"
+                "Produce a corrected patch and call functions.apply_patch again. No prose.\n"
                 + patch_header
             )
-            patch2, err2_propose = _propose(fix_header)
-            # todo-now: just exit here?
+            patch2, err2_propose = _propose(retry_header)
             if err2_propose:
                 return False
             err2_apply = _apply_once(patch2)
