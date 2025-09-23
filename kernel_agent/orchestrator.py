@@ -47,12 +47,16 @@ class Rollback:
     - Restores from that snapshot on plateau/regress (e.g., patience stop)
     - Tracks best parity coverage across iterations
     """
-    def __init__(self, backward_fp: str, patience_parity_restore: int = 0) -> None:
+    def __init__(self, backward_fp: str, patience_parity_restore: int = 0, *, strategy) -> None:
         self.backward_fp = backward_fp
         self.lock_fp = f"{backward_fp}.lock"
         self.best_pass_count: int = 0
         self._parity_regress_streak: int = 0
         self._patience_parity_restore: int = int(max(0, patience_parity_restore))
+        # Strategy reference (used to persist/restore phase index)
+        self._strategy = strategy
+        # Track the strategy phase index saved alongside the lock snapshot
+        self._saved_phase_index: int | None = None
         self._log(
             f"init: patience_parity_restore={self._patience_parity_restore} | lock={self.lock_fp}"
         )
@@ -72,15 +76,27 @@ class Rollback:
             if note:
                 msg += f" ({note})"
             self._log(msg)
+            # Remember the strategy phase index at snapshot time for later restore
+            if self._strategy.name == "phased":
+                self._saved_phase_index = self._strategy.i
         except Exception as e:
             self._log(f"warning: snapshot failed: {type(e).__name__}: {e}")
 
     def _restore(self) -> None:
-        """Restore kernel from the last snapshot, if present."""
+        """Restore kernel from the last snapshot, if present, and optionally
+        restore the strategy phase to the value saved at snapshot time.
+        Keeping strategy rewinding here ensures kernel bytes and strategy phase
+        remain aligned when a restore occurs.
+        """
         try:
             if os.path.isfile(self.lock_fp):
                 shutil.copyfile(self.lock_fp, self.backward_fp)
                 self._log(f"restore: {self.lock_fp} -> {self.backward_fp}")
+                # If we saved a phase index, restore it now so policy state matches the restored kernel
+                if self._strategy.name == "phased":
+                    self._strategy.set_phase_index(self._saved_phase_index)
+                    if VERBOSE:
+                        print(f"[kernel-agent][rollback] strategy phase restored to i={self._saved_phase_index}")
         except Exception as e:
             self._log(f"warning: restore failed: {type(e).__name__}: {e}")
 
@@ -152,7 +168,8 @@ class KernelOptimizer:
         state_facts: dict,
         temperature: float | None = None,
     ) -> bool:
-        """Propose exactly one patch; if apply fails, retry once to **fix the same patch**. Returns True iff file bytes changed.
+        """Propose exactly one patch; if apply fails, retry once to **fix the same patch**.
+        Consistent with "one LLM turn -> one attempt". Returns True iff file bytes changed.
 
         Separation of concerns:
           - llm.propose_patch: ensures a non-empty apply_patch.md block, normalizes target path,
@@ -352,7 +369,7 @@ class KernelOptimizer:
         self.fwd_fp = fwd_fp
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
-        rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore)
+        rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore, strategy=self.strategy)
         # solves the problem of not making any snapshot until a kernel finally passes all tests:
         # when llm is called, it can messup the kernel (pass rate 1/6 -> 0/6), in which case
         # rollback.maybe_snapshot_or_restore below will do nothing bc the first thing it will see is (0/6)
@@ -437,7 +454,6 @@ class KernelOptimizer:
                 if was_restored:
                     # reset perf patience counter after rollback
                     tracker.reset_patience()
-
                     if VERBOSE:
                         print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
 
@@ -490,7 +506,7 @@ class KernelOptimizer:
             # - best_metrics: accepted snapshot + ever_max_tflops
             decision = tracker.update(cand, grad_stats, it=it)
             if decision["improved"]:
-                # lock perf improvement only under full parity
+                # lock perf improvement only under full parity; persist strategy phase index
                 rollback.snapshot("perf-improved (on full parity)")
             elif tracker.stop_reason:
                 stop_reason = tracker.stop_reason
@@ -516,6 +532,9 @@ class KernelOptimizer:
             )
             if not changed:
                 continue
+
+            # todo: test all guardrails because a recent model patch can violate older (previously passing) guardrails,
+            # if add this don't need the phase save and restore on rollback functionality
 
             if self.strategy_name == "regular":
                 # at this point both ok_gracheck and ok_bench and changed are all true

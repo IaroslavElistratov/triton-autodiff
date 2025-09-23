@@ -58,6 +58,7 @@ class BaseStrategy:
 
 class RegularStrategy(BaseStrategy):
     def __init__(self, temp: float = 0.7) -> None:
+        self.name = "regular"
         self._temp = temp
 
     # added this method to be compatible with PhasedStrategy.get_header
@@ -66,7 +67,7 @@ class RegularStrategy(BaseStrategy):
     def get_header(self):
         return "Phase = optimize. Improve performance without changing numerics."
 
-    def next_phase(self, parity_ok: bool) -> Tuple[str, float]:
+    def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
         header = (
             "Phase = optimize. Improve performance without changing numerics.\n"
             " * atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improve the performance. "
@@ -75,6 +76,7 @@ class RegularStrategy(BaseStrategy):
 
 class PhasedStrategy(BaseStrategy):
     def __init__(self, phases: Sequence[Phase] = PHASES) -> None:
+        self.name = "phased"
         self.phases = list(phases)
         self.i = 0
 
@@ -117,6 +119,12 @@ class PhasedStrategy(BaseStrategy):
         # Advance to the next phase only on a successful, gradcheck-passing change.
         if changed and parity_ok and self.i < len(self.phases) - 1:
             self.i += 1
+
+    def set_phase_index(self, i: int) -> None:
+        """Force strategy index to a given phase (used on rollback restore)."""
+        self.i = i
+        if VERBOSE:
+            print(f"[kernel-agent] Strategy phase restored to i={i}")
 
 def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
     # Factory: allows toggling strategy with an env flag without touching the loop.
