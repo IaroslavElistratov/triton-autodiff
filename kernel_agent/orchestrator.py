@@ -6,7 +6,7 @@ import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .llm import _ensure_update_file_target  # normalize target header so model needn't guess file path
-from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy
+from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes
 from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy, PhasedStrategy
 from .worker import run_compile_child
@@ -214,10 +214,19 @@ class KernelOptimizer:
                 return None, err_propose
 
         def _apply_once(patch) -> str | None:
+            # the OSS patcher (gpt_oss.tools.apply_patch) calls apply_commit(...) -> write_file(...), which
+            # opens the target with text mode "wt" and writes directly (no transaction/rollback). If an
+            # exception occurs mid‑write, the file can be left truncated or partially written
+            existed_before, prev_bytes = save_file_bytes(bwd_fp)
             try:
                 _apply_patch_raw(patch)
                 return None
             except Exception as err_apply:
+                # restore to pre‑apply bytes to avoid leaving a partial file when apply fails midway
+                restore_err = restore_file_bytes(bwd_fp, existed_before, prev_bytes)
+                if restore_err and VERBOSE:
+                    print(f"[kernel-agent][it={it}] restore error: {type(restore_err).__name__}: {restore_err}")
+
                 err_apply = f"{type(err_apply).__name__}: {err_apply}"
                 # rely on the patcher to surface validation errors at apply time;
                 # no preflight checks; the patcher remains the source of truth

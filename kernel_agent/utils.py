@@ -407,6 +407,38 @@ def _read_snippet(path: str, max_lines: int) -> str:
 
 
 
+def save_file_bytes(path: str) -> tuple[bool, bytes]:
+    """Capture existence and raw bytes of a file for potential rollback.
+
+    Returns (existed_before, bytes). On read errors returns empty bytes.
+    """
+    existed = os.path.isfile(path)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except Exception:
+        data = b""
+    return existed, data
+
+
+def restore_file_bytes(path: str, existed_before: bool, prev_bytes: bytes) -> Exception | None:
+    """Best-effort restore of a file's previous bytes after a failed write.
+
+    - If the file existed before, rewrites previous bytes.
+    - If it did not exist before, removes any newly created file.
+    Returns an Exception on restore failure, else None.
+    """
+    try:
+        if existed_before:
+            with open(path, "wb") as fh:
+                fh.write(prev_bytes)
+        else:
+            if os.path.exists(path):
+                os.remove(path)
+        return None
+    except Exception as e:
+        return e
+
 def _env_truthy(name: str, default: str = "0") -> bool:
     """Parse boolean-like env flags from environment."""
     val = os.environ.get(name, default)
