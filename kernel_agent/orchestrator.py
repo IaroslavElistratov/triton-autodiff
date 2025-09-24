@@ -533,7 +533,8 @@ class KernelOptimizer:
             if not changed:
                 continue
 
-            # todo: test all guardrails because a recent model patch can violate older (previously passing) guardrails,
+            # todo-high:
+            # test all guardrails because a recent model patch can violate older (previously passing) guardrails,
             # if add this don't need the phase save and restore on rollback functionality
 
             if self.strategy_name == "regular":

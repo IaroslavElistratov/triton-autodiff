@@ -252,14 +252,13 @@ def make_args(dims, device="cuda", dtype=torch.float16):
     # return (q, k, v, dims["causal"], dims["sm_scale"]), {}
     return (q, k, v), {}
 
-# optional
 def flops(dims, mode):
+    """ optional"""
     B, H, N, D = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
     total = 2.0 * (2.0 * B * H * N * N * D)  # forward+backward baseline
     if dims.get("causal", False):
         total *= 0.5
     return total
-
 
 
 def setup():

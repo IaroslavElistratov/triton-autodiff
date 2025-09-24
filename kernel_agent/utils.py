@@ -342,39 +342,89 @@ def _read_snippet(path: str, max_lines: int) -> str:
         return f"(snippet unavailable: {e})"
 
 
+FN_NAMES_TO_STRIP = {"torch_fn", "make_args", "setup", "flops"}
+
+
+# todo: instead of removing unwanted code, maybe change instead
+# to select only the desired code (kernel, stub) -- seems cleaner
+
 def redact_torch_fn(path: str, max_lines: int | None = None) -> str:
-    """Remove a top-level `def torch_fn(...):` (with decorators) and return redacted text.
-    - Prompt-only hygiene: runtime untouched. If AST fails, returns original text.
-    - If max_lines is provided, return only the first `max_lines` lines of the redacted text.
+    """Redact prompt-only helpers from the forward source for LLM.
+
+    Removes these top-level items (module scope only):
+      - def torch_fn(...): (with decorators)
+      - def make_args(...):, def setup(...):, def flops(...):
+      - Any assignment to SWEEP (Assign, AnnAssign, AugAssign)
+
+    Runtime source remains untouched (this function only returns text). If AST
+    parsing fails, the original text is returned. When max_lines is provided,
+    the result is cropped to the first max_lines lines.
     """
+    import ast
     try:
-        import ast
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             src = fh.read()
-        tree = ast.parse(src)
-
-        start = end = None
-        for node in getattr(tree, "body", []):
-            if isinstance(node, ast.FunctionDef) and getattr(node, "name", "") == "torch_fn":
-                decos = getattr(node, "decorator_list", []) or []
-                start = min([getattr(d, "lineno", node.lineno) for d in decos] + [node.lineno])
-                end = getattr(node, "end_lineno", None) or node.lineno
-                break
-
-        if start is not None and end is not None:
-            lines = src.splitlines(True)
-            del lines[int(start) - 1:int(end)]
-            src = "".join(lines)
     except Exception:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                src = fh.read()
-        except Exception:
-            return ""
+        return ""
 
-    # Optional cropping handled here so callers can stay simple
+    # Collect spans (1-based inclusive line ranges) to delete
+    spans: list[tuple[int, int]] = []
+
+    # Parse AST; if syntax is invalid, keep the text unchanged
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        tree = None
+
+    if tree is not None:
+        for node in getattr(tree, "body", []):
+            # Strip selected top-level functions (with decorators)
+            if isinstance(node, ast.FunctionDef) and getattr(node, "name", "") in FN_NAMES_TO_STRIP:
+                decos = getattr(node, "decorator_list", []) or []
+                start_line = min([getattr(d, "lineno", node.lineno) for d in decos] + [node.lineno])
+                end_line = getattr(node, "end_lineno", None) or node.lineno
+                spans.append((int(start_line), int(end_line)))
+                continue
+
+            # Strip top-level SWEEP assignments (Assign / AnnAssign / AugAssign)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                # Normalize targets to a list of top-level names
+                names: list[str] = []
+                if isinstance(node, ast.Assign):
+                    for tgt in getattr(node, "targets", []) or []:
+                        if isinstance(tgt, ast.Name):
+                            names.append(getattr(tgt, "id", ""))
+                else:
+                    tgt = getattr(node, "target", None)
+                    if isinstance(tgt, ast.Name):
+                        names.append(getattr(tgt, "id", ""))
+                if "SWEEP" in names:
+                    start_line = getattr(node, "lineno", None)
+                    end_line = getattr(node, "end_lineno", None) or start_line
+                    if start_line is not None:
+                        spans.append((int(start_line), int(end_line)))
+
+        if spans:
+            # Delete from bottom to top to keep line indices stable
+            lines = src.splitlines(True)
+            for start_line, end_line in sorted(spans, key=lambda t: t[0], reverse=True):
+                start_line = max(1, int(start_line))
+                end_line = max(start_line, int(end_line))
+                del lines[start_line - 1:end_line]
+            src = "".join(lines)
+
     if isinstance(max_lines, int) and max_lines > 0:
-        return "".join(src.splitlines(True)[:max_lines])
+        # When cropping is requested, first reduce to the first `max_lines` lines
+        # but do not alter internal formatting beyond that.
+        src = "".join(src.splitlines(True)[:max_lines])
+
+    # Normalize trailing newlines at EOF:
+    # - Remove only newline characters to avoid extra blank lines
+    # - If non-empty, one final newline
+    # This keeps internal spacing intact while removing only the suffix clutter.
+    src = src.rstrip("\n\r")
+    if src:
+        src = src + "\n"
     return src
 
 

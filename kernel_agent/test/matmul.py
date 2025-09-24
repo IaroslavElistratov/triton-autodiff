@@ -144,7 +144,7 @@ def setup():
   c = stub(a, b)
 
 
-# optional, for benchmarking
 def flops(dims, mode):
+    """optional, for benchmarking"""
     M, N, K = dims["M"], dims["N"], dims["K"]
     return 2.0 * M * N * K
