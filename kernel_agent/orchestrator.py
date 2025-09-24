@@ -186,20 +186,6 @@ class KernelOptimizer:
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
-        # let _llm_request_and_apply be the single point which appends these guardrails
-        patch_header = (
-            "\nPatch guardrails:\n"
-            "- Exactly one patch: call functions.apply_patch({patch: ...}) once.\n"
-            # that's not needed strictly speaking but I think cleaner when model output tool call in the final channel
-            "- Use analysis for planning only (no patcher tool call); call apply_patch once as your final action.\n"
-            "- No rule echoing; diff only.\n"
-            # attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
-            # "- ≤120 changed lines per patch.\n"
-            "- Include at least one '-' anchor line per hunk.\n"
-            "- Do NOT change the backward stub's signature.\n"
-            "- Single backward kernel and single stub."
-        )
-
         # context shown to LLM: redacted forward (torch_fn removed), sliced internally by utils
         fwd_snip = redact_torch_fn(fwd_fp, self.cfg.snippet_max_lines)
         bwd_snip = _read_snippet(bwd_fp, self.cfg.snippet_max_lines)
@@ -253,8 +239,7 @@ class KernelOptimizer:
                 return err_apply
 
         # 1) Propose once
-        header1 = header + patch_header
-        patch, err_propose = _propose(header1)
+        patch, err_propose = _propose(header)
         # max_tokens
         if err_propose:
             return False
@@ -283,7 +268,6 @@ class KernelOptimizer:
                 f"apply_patch error:\n{err_apply}\n"
                 f"Previous patch (verbatim):\n{str(patch).strip()}\n"
                 "Produce a corrected patch and call functions.apply_patch again. No prose.\n"
-                + patch_header
             )
             patch2, err2_propose = _propose(retry_header)
             if err2_propose:
@@ -475,7 +459,7 @@ class KernelOptimizer:
                 # - Otherwise (regular strategy or later phases), issue a correctness-only header
                 #   to avoid confusing the model with optimization goals while fixing parity.
                 is_phase_0 = isinstance(self.strategy, PhasedStrategy) and self.strategy.i == 0
-                fix_header = (phase_text + "\n" if is_phase_0 else "") + "ONLY restore correctness to pass gradcheck.\n"
+                fix_header = (phase_text + "\n" if is_phase_0 else "") + "Restore correctness to pass gradcheck.\n"
 
                 self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,

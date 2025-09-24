@@ -21,7 +21,8 @@ class Phase:
 
 # Default phase sequence — light guidance per step; can be replaced/tuned.
 PHASES: Sequence[Phase] = (
-    Phase("1 / Re-introduce loops", "Re-introduce loops. Add tail masks where appropriate. Keep atomics.", "Only loop structure and pointer math.", 0.25),
+    # Add tail masks where appropriate. 
+    Phase("1 / Re-introduce loops", "Re-introduce loops. Keep atomics.", "Only loop structure and pointer math.", 0.25),
     Phase(
         "2 / Atomics->private",
         # "Do NOT blindly swap atomics for direct store, remove atomics while preserving numerics semantics: privatize accumulation per CTA and write once per output tile. Potentially, adjust grid/tiling or add an explicit reduction; do not loop over the wrong axis. No other unrelated kernel changes.",

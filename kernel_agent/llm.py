@@ -86,18 +86,17 @@ def _ensure_update_file_target(patch_text: str, target_file: str) -> str:
         lines.insert(insert_at, f"*** Update File: {target_file}")
     return "\n".join(lines)
 
-
-# Canonical, tool-only contract shown to the model.
-# Why: enforcing a single functions.apply_patch({patch: ...}) call gives
+# let llm.py be the single point which appends these guardrails
+# enforcing a single functions.apply_patch({patch: ...}) call gives
 # protocol-level boundaries (no "*** End Patch" loops; no early <|end|> cuts),
 # and lets the host take control immediately after the tool payload arrives.
-_APPLY_PATCH_SPEC = """
+PATCH_SPEC = """
 Contract: Call the function tool functions.apply_patch once with arguments {"patch": "<one apply_patch.md block>"}. No prose.
 You may use the analysis channel for planning, but do not include the patcher tool call in analysis.
 
-Rules:
+Patch guardrails:
 - Emit exactly one tool call: functions.apply_patch({"patch": "..."}).
-- Use analysis for reasoning; do not place the patcher tool call in analysis.
+- Use analysis for reasoning; do not place the patcher tool call in analysis; call apply_patch once as your final action.
 - Do not include any of: "*** Update File:", "*** Add File:", "*** Delete File:", or "*** Move to:".
 - Do NOT include file name in your patch -- the system will add it automatically
 - At least one '-' line per hunk to anchor to real lines (no pure insert-only hunks).
@@ -106,15 +105,14 @@ Rules:
   - '-' for removed text (from the current file)
   - '+' for inserted text
 - Do not include any text outside the patch block.
-
+- Do NOT change the backward stub's signature.
 
 Use this exact envelope:
 *** Begin Patch
-@@ [optional hunk header]
+@@ [hunk header]
 - old line from the current file
 + new line to write
 *** End Patch
-
 
 Minimal example:
 *** Begin Patch
@@ -122,6 +120,16 @@ Minimal example:
 -    x = old_value
 +    x = new_value
 *** End Patch
+"""
+# attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
+# "- ≤120 changed lines per patch.\n"
+
+
+MEM_SPEC = """
+MEMORY REQUIREMENT:
+- Rewrite the backward kernel's docstring to briefly note this iteration (<= 15 lines; no code/diffs).
+- Focus on: what you changed; what previously failed and why; and what key takeaways worth remembering for the next iteration.
+- Do this in the SAME patch as your code edits. Do NOT submit a docstring-only patch.
 """
 
 
@@ -188,56 +196,57 @@ class MinimalLLMPatchProvider:
     #     if len(self.history) > self.history_cap:
     #         self.history = self.history[-self.history_cap:]
 
-    # todo: use pply_patch.md instead of my custom instructions belo
     def propose_patch(self, *, phase: str,
                       fwd_kernel_snippet: str,
                       bwd_file: str, bwd_kernel_snippet: str,
                       state_facts=None) -> str:
-                    #   bench_summary: str, profile_hint: str) -> str:
 
-        # system prompt
-        base = (
+        system = (
+            "\n### Workflow context\n"
             "You are a Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step.\n"
-            "Do not propose large overly-eager kernel rewrites. You will have multiple turns to refine the backward kernel, so don't try to output final solution in one shot.\n"
+            "You will have multiple turns to refine the backward kernel.\n" # , so do not propose large overly-eager kernel rewrites.
             "You will be provided a python kernel `backward(*inputs, *grads)` which computes per-input gradients.\n"
             "Use this backward kernel provided to you as the starting point and make edits to improve its performance.\n"
-            "You can rewrite backward kernel from scratch; but preserve function names and pointer/mask semantics.\n"
             # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference.\n"
 
+            "\n### Allowed edits\n"
+            # "You must modify backward kernel; but preserve function names and pointer/mask semantics.\n"
             "The backward file contains BOTH the backward Triton kernel and a generated backward stub; you can (and likely should) edit both.\n"
             "Do NOT change the backward stub's signature, you can edit body of the stub but not its signature.\n"
             "You can edit the backward kernel signature and its body (but not stub's signature). Do not rename or move the file.\n"
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs.\n"
+            "You can edit _mk_block_ptr when it's present.\n"
 
-            # todo: show this only in the 1st phase
-        # initial_kernel_details = (
-            "More details about the initial backward kernel:\n"
-            " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
-            " * recomputing intermediate activations from the forward pass: variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
-            " * single-iteration unroll: the provided backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened). You should re-introduce back the for-loops in the backward kernel, as it'll generalize the backward kernel to multi-tiled shapes.\n"
-            # "  * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
-            # "  * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
-        # )
+            # todo: show this only in the 1st iter?
+            "\n### Initial backward kernel details\n"
+            # " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
+            "* variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
+            "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened). You should re-introduce back the for-loops in the backward kernel, as it'll generalize the backward kernel to multi-tiled shapes.\n"
+            # " * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
+            # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
 
-        # tail = (
-            "In each turn, you can call functions.apply_patch({patch: ...}) at most once, and only as your final action for that turn.\n"
-            "Before calling it, form a brief high-level plan of your changes in your private reasoning and rehearse the patch.\n"
+            "\n### Patch requirements\n"
+            "In each turn, you must call functions.apply_patch({patch: ...}) at most once, and only as your final action for that turn.\n"
+            "Before calling it, form a high-level plan of your changes in your private reasoning and rehearse the patch.\n"
             "When you call functions.apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Include the *** Begin Patch / *** End Patch envelope inside the patch argument; do not echo the rule list.\n"
             "Use the analysis channel for planning (no functions.apply_patch in analysis). Then, as your final action, call the function tool functions.apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}. No prose.\n"
 
+            "\n### Docstring requirements\n"
             # not "what to try next;" -- because this will be dictated by Strategy, model should not decide that
             "Maintain a concise iteration note (<= 15 lines; no code/diffs; no future plans) in the backward Triton kernel's docstring. That note should contain a concise but informative note to your future self about this iteration.\n"
             "Whenever you modify the backward kernel code you MUST rewrite/update this docstring in the same patch as your code edits, focusing on key takeaways worth remembering for the next iteration (e.g. what changed, what failed and why, etc.).\n"
             "This docstring update is always required alongside your code edits. Do not submit a docstring-only patch.\n"
 
+            "\n### Minor\n"
             # observed error cases:
             # "Reply with substantive code changes.\n"
             # "Assume contiguous inputs.; When appropriate, use tail masks to support ragged tiles.\n"
-            "If gradient summary is OK assume the kernel and stub compute gradients correctly -- do not second guess it.\n"
-            "Remember that the backward_kernel is called from the backward_stub. So when you e.g. add/replace/remove arguments in the backward_kernel function definition, always make sure that you also updated the place (in the backward_stub) where this backward_kernel is called from.\n"
-            "If you change the backward_kernel signature, don't forget to update the kernel's call-site in the backward_stub and vice versa. Always keep the backward_kernel's call-site (in backward_stub) and the backward_kernel's signature in sync.\n"
-            "Under no circumstance replace triton kernel with pytorch operations.\n"
-            "Inside triton kernel you must use functions under tl.* namespace not triton.* namespace (e.g. tl.cdiv not triton.cdiv).\n"
+            "- If gradient summary is OK assume the backward kernel and stub compute gradients correctly -- do not second guess it.\n"
+            "- Always keep the backward_kernel's call-site (in backward_stub) and the backward_kernel's signature in sync.\n"
+            "   If you change the backward_kernel signature, don't forget to update the kernel's call-site in the backward_stub and vice versa.\n"
+            "   Remember that the backward_kernel is called from the backward_stub. So when you e.g. add/replace/remove arguments in the backward_kernel function definition, always make sure that you also updated the place (in the backward_stub) where this backward_kernel is called from.\n"
+            "- Under no circumstance replace triton kernel with pytorch operations.\n"
+            "- Inside kernel use `tl.*` APIs, not `triton.*`\n"
         )
 
         # # Include initial kernel details only when not phased, or when phased and in Phase 1.
@@ -246,18 +255,11 @@ class MinimalLLMPatchProvider:
         # include_initial_details = (not is_phased) or (is_phased and phase_text.startswith("phase = 1"))
         # initial_kernel_details = initial_kernel_details if include_initial_details else ""
         # system = base + initial_kernel_details + tail
-        system = base
 
         # user prompt
-        spec_text = _APPLY_PATCH_SPEC
         facts_lines = "\n".join(f"{k}={v}" for k, v in (state_facts or {}).items())
         user = (
-            spec_text
-            + f"\n\n{phase}\n"
-            + "MEMORY REQUIREMENT:\n"
-            + " - Rewrite the backward kernel's docstring to briefly note this iteration (<= 15 lines; no code/diffs).\n"
-            + " - Focus on: what you changed; what previously failed and why; and what key takeaways worth remembering for the next iteration.\n"
-            + " - Do this in the SAME patch as your code edits. Do NOT submit a docstring-only patch.\n\n"
+            f"\n{phase}\n"
             # todo-high: maybe don't manually save it but let llm an option to write a note for the next iteration and work done in the current iteration
             + f"Context from previous iterations:\n{self._history_block()}\n\n"
             + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
@@ -265,6 +267,8 @@ class MinimalLLMPatchProvider:
             + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
             # optional: gradcheck, profiler hint, bench -- info is carried in state_facts below
             + (f"State:\n{facts_lines}\n" if facts_lines else "")
+            + PATCH_SPEC
+            + MEM_SPEC
         )
 
         if VERBOSE:
