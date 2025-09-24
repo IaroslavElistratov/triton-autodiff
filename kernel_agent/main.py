@@ -4,7 +4,8 @@
 # kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/ --file-path kernel_agent/test/matmul.py --reasoning-effort medium --mode phased > kernel_agent/LOGS/out.txt
 # kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --file-path kernel_agent/test/attention.py --reasoning-effort medium --mode phased > kernel_agent/LOGS/out.txt
 
-# kernel-agent --backend openai --file-path kernel_agent/test/attention.py --mode phased > kernel_agent/LOGS/out.txt
+# kernel-agent --backend openai --openai-model gpt-5-mini --file-path kernel_agent/test/matmul.py --mode phased > kernel_agent/LOGS/out.txt
+# kernel-agent --backend openai --openai-model gpt-5 --file-path kernel_agent/test/attention.py --mode phased > kernel_agent/LOGS/out.txt
 
 from __future__ import annotations
 import argparse

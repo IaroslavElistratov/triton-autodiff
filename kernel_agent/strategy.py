@@ -21,7 +21,15 @@ class Phase:
 
 # Default phase sequence — light guidance per step; can be replaced/tuned.
 PHASES: Sequence[Phase] = (
-    # Add tail masks where appropriate. 
+    Phase(
+        "0 / Readability",
+        "Refactor the Triton kernel for readability only. Preserve exact math and memory semantics: same function/helper names and signatures, @triton.jit, program_id axis mapping, strides/indexing algebra, tile sizes, reduction axes and order, IO dtypes, memory‑access order, and every tl.atomic_* call. No new control flow, helpers, or reordering across data dependencies. High‑impact edits only: rename opaque temporaries to semantic names; hoist and reuse base offsets/casts; compute base block pointers once; replace magic numbers with named constants; split long expressions and factor repeats; group into sections (indexing -> pointers -> loads -> forward compute -> grads -> atomics); remove dead intermediates; keep dtype/cast boundaries unchanged. If uncertain, keep the original. Output only the cleaned code.",
+        # "Rewrite the Triton kernel for readability only. Preserve behavior exactly: keep function/helper signatures, @triton.jit, program_id usage, strides/indexing algebra, tile sizes, reduction axes and their order, dtypes and cast points, and all tl.atomic_* calls and their placement. Allowed edits (prioritize high impact): rename variables to semantic names; hoist constants and base offset products; factor repeated subexpressions; collapse gratuitous reshape/broadcast/cast churn without moving cast boundaries; split long expressions into named steps; group code into clear sections (indices -> pointers -> loads -> forward compute -> grads -> atomics); remove dead intermediates; add minimal docstring/comments. No new control flow or functions, no reordering across data dependencies, no moving loads/stores or math across deps, no constant changes. Output only the cleaned code."
+        # "Improve Readability without changing semantics. For example you can: rename variables; split long expressions; hoist constants; reorder independent statements; delete dead code; add comments/docstring. No math or memory-access semantics change.",
+        "Stub & kernel signatures unchanged; no new Python loops; no change in tl.atomic_* usage.",
+        0.15,
+    ),
+    # Add tail masks where appropriate.
     Phase("1 / Re-introduce loops", "Re-introduce loops. Keep atomics.", "Only loop structure and pointer math.", 0.25),
     Phase(
         "2 / Atomics->private",
@@ -89,9 +97,10 @@ class PhasedStrategy(BaseStrategy):
         Other phases -> currently no extra checks
         """
         checks = {
-            0: guardrails_check_phase1,
-            1: guardrails_check_phase2,
-            2: guardrails_check_phase3,
+            0: guardrails_check_phase0,
+            1: guardrails_check_phase1,
+            2: guardrails_check_phase2,
+            3: guardrails_check_phase3,
         }
         fn = checks.get(self.i)
         ok = fn(backward_fp)
@@ -135,7 +144,22 @@ def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
 
 # Phase-specific guardrail checks
 
-
+# todo-now: the guarrails for this should be "gradcheck passes on single shape". And actaully gradrails for phase 1 is also IMPLCITILY assuuming passing all the shapes -- but currently this logic is hidden in the loop strcuture
+#   ==> i think better to refactor and paass gradcheck stats here to the gurarails check as well -- so that guradrails_ checks below can decdie wearther ot  incrrmer or not based on weather that e.g. 1 shaep passeed; or all shaeps passed
+# todo: assert no change in counts of tl.load, tl.store, tl.atomic_, and forbid edits to stub/kernel signatures
+def guardrails_check_phase0(backward_fp: str) -> bool:
+    try:
+        with open(backward_fp, "r", encoding="utf-8", errors="ignore") as f:
+            for ln in f:
+                s = ln.lstrip()
+                if not s or s.startswith("#"):
+                    continue
+                # Forbid introducing new loops in Phase-0 (readability only)
+                if (s.startswith("for ") or s.startswith("while ")) and s.rstrip().endswith(":") and (len(ln) - len(s) > 0):
+                    return False
+        return True
+    except OSError:
+        return False
 
 def guardrails_check_phase1(backward_fp: str) -> bool:
     """

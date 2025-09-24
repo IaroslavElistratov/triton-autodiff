@@ -381,6 +381,14 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] Begin iteration")
 
+            # todo: move this inside PhasedStrategy
+            # Phase-0: throttle SWEEP to the first shape in children
+            is_readability_phase = self.strategy.name == "phased" and self.strategy.i == 0
+            if is_readability_phase:
+                os.environ["KERNEL_AGENT_SWEEP_LIMIT"] = "1"
+            else:
+                os.environ.pop("KERNEL_AGENT_SWEEP_LIMIT", None)
+
             # only first shape on it==0, then all shapes;
             # running parity and bench across all entries after attempt 0 makes "loops re‑introduced"
             # observable and blocks phase advance until the same kernel passes on every shape;
@@ -458,8 +466,8 @@ class KernelOptimizer:
                 #   parity (by re-introducing loops). So add that header to anchor fixes to loop re-introduction.
                 # - Otherwise (regular strategy or later phases), issue a correctness-only header
                 #   to avoid confusing the model with optimization goals while fixing parity.
-                is_phase_0 = isinstance(self.strategy, PhasedStrategy) and self.strategy.i == 0
-                fix_header = (phase_text + "\n" if is_phase_0 else "") + "Restore correctness to pass gradcheck.\n"
+                is_loop_phase = self.strategy.name == "phased" and self.strategy.i == 1
+                fix_header = (phase_text + "\n" if is_loop_phase else "") + "ONLY restore correctness to pass gradcheck.\n"
 
                 self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,

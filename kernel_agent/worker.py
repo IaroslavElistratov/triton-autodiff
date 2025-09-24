@@ -125,8 +125,15 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         import torch as _t
 
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        # Phase-0 throttling: optionally limit SWEEP to the first shape via env.
+        # None -- a sentinel meaning "all shapes"
+        limit = os.environ.get("KERNEL_AGENT_SWEEP_LIMIT")
+        sidecar = dict(ns)
+        if limit is not None and isinstance(sidecar.get("SWEEP"), (list, tuple)):
+            limit = int(limit)
+            sidecar["SWEEP"] = list(sidecar["SWEEP"])[:limit]
         ok, stats = check_op_backward_parity_sweep(
-            ref_fwd=ns["torch_fn"], my_op=op, sidecar=ns, outputs="auto",
+            ref_fwd=ns["torch_fn"], my_op=op, sidecar=sidecar, outputs="auto",
             # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
             # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
             atol=0.07, rtol=0.02
@@ -191,7 +198,13 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         import torch as _t
 
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
-        cand = bench_op(op, ns, mode="bwd")
+        # Phase-0 throttling: optionally limit SWEEP to the first shape via env.
+        limit = os.environ.get("KERNEL_AGENT_SWEEP_LIMIT")
+        sidecar = dict(ns)
+        if limit is not None and isinstance(sidecar.get("SWEEP"), (list, tuple)):
+            limit = int(limit)
+            sidecar["SWEEP"] = list(sidecar["SWEEP"])[:limit]
+        cand = bench_op(op, sidecar, mode="bwd")
         try:
             _t.cuda.synchronize()
         except Exception:
