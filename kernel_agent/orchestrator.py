@@ -159,6 +159,7 @@ class KernelOptimizer:
         self.strategy_name = os.environ.get("KERNEL_AGENT_STRATEGY", "regular")
         self.strategy = make_strategy(self.strategy_name)
 
+    # todo-now: don't ignore this fn's return status
     def _llm_request_and_apply(
         self,
         it: int,

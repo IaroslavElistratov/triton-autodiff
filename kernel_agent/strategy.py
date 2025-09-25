@@ -23,14 +23,34 @@ class Phase:
 PHASES: Sequence[Phase] = (
     Phase(
         "0 / Readability",
-        "Refactor the Triton kernel for readability only. Preserve exact math and memory semantics: same function/helper names and signatures, @triton.jit, program_id axis mapping, strides/indexing algebra, tile sizes, reduction axes and order, IO dtypes, memory‑access order, and every tl.atomic_* call. No new control flow, helpers, or reordering across data dependencies. High‑impact edits only: rename opaque temporaries to semantic names; hoist and reuse base offsets/casts; compute base block pointers once; replace magic numbers with named constants; split long expressions and factor repeats; group into sections (indexing -> pointers -> loads -> forward compute -> grads -> atomics); remove dead intermediates; keep dtype/cast boundaries unchanged. If uncertain, keep the original. Output only the cleaned code.",
-        # "Rewrite the Triton kernel for readability only. Preserve behavior exactly: keep function/helper signatures, @triton.jit, program_id usage, strides/indexing algebra, tile sizes, reduction axes and their order, dtypes and cast points, and all tl.atomic_* calls and their placement. Allowed edits (prioritize high impact): rename variables to semantic names; hoist constants and base offset products; factor repeated subexpressions; collapse gratuitous reshape/broadcast/cast churn without moving cast boundaries; split long expressions into named steps; group code into clear sections (indices -> pointers -> loads -> forward compute -> grads -> atomics); remove dead intermediates; add minimal docstring/comments. No new control flow or functions, no reordering across data dependencies, no moving loads/stores or math across deps, no constant changes. Output only the cleaned code."
-        # "Improve Readability without changing semantics. For example you can: rename variables; split long expressions; hoist constants; reorder independent statements; delete dead code; add comments/docstring. No math or memory-access semantics change.",
+
+        # Prioritize high‑impact edits:
+        # split long expressions into named steps and factor repeated subexpressions;
+        # group code into ordered sections with one‑line headers: indexing -> block pointers -> loads -> forward compute -> grads -> atomics;
+        # compute and reuse base block pointers once per tensor;
+        # rename opaque temporaries with consistent semantic names;
+        # hoist and reuse casts and repeated offset products into named base offsets;
+        # remove dead or unused intermediates;
+        # replace magic numbers with named tl.constexpr or locals and comment intent (BM, BN, SCALE=0.7213475108146667, NEG_INF);
+        # collapse trivial reshape/broadcast churn only when semantics are identical; drop redundant tl.cast only where it cannot meaningfully change precision;
+        # keep accumulation dtypes and cast boundaries exactly as in the input;
+        # you can modify _mk_block_ptr for readability as well.
+        # add minimal docstring/comments
+        #
+        # No new Python loops, no control flow changes, no API changes, no moving ops across data dependencies, no reordering of reductions.
+
+        "Refactor the Triton kernel for readability only. Preserve exact math and memory semantics: same function/helper names and signatures, @triton.jit, program_id axis mapping, strides/indexing algebra, tile sizes, reduction axes and order, IO dtypes, memory‑access order, and every tl.atomic_* call. No new control flow, helpers, or reordering across data dependencies. High‑impact edits only: rename opaque temporaries to semantic names; hoist and reuse base offsets/casts; compute base block pointers once; replace magic numbers with named constants; split long expressions and factor repeats; group into sections (indexing -> pointers -> loads -> forward compute -> grads -> atomics); remove dead intermediates; keep dtype/cast boundaries unchanged. If uncertain, keep the original. Output the cleaned code.",
+        # "Improve Readability without changing semantics. E.g. you can: rename variables; split long expressions; hoist constants; reorder independent statements; delete dead code; add comments/docstring. No math or memory-access semantics change.",
         "Stub & kernel signatures unchanged; no new Python loops; no change in tl.atomic_* usage.",
         0.15,
     ),
     # Add tail masks where appropriate.
-    Phase("1 / Re-introduce loops", "Re-introduce loops. Keep atomics.", "Only loop structure and pointer math.", 0.25),
+    Phase("1 / Re-introduce loops",
+          "The initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened). You should re-introduce back the for-loops in the backward kernel, as it'll generalize the backward kernel to multi-tiled shapes and allow to pass the gradcheck.\n",
+          "Re-introduce loops. Keep atomics. Keep pointer math.",
+          0.25,
+    ),
+
     Phase(
         "2 / Atomics->private",
         # "Do NOT blindly swap atomics for direct store, remove atomics while preserving numerics semantics: privatize accumulation per CTA and write once per output tile. Potentially, adjust grid/tiling or add an explicit reduction; do not loop over the wrong axis. No other unrelated kernel changes.",

@@ -205,8 +205,8 @@ class MinimalLLMPatchProvider:
             "\n### Workflow context\n"
             "You are a Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step.\n"
             "You will have multiple turns to refine the backward kernel.\n" # , so do not propose large overly-eager kernel rewrites.
-            "You will be provided a python kernel `backward(*inputs, *grads)` which computes per-input gradients.\n"
-            "Use this backward kernel provided to you as the starting point and make edits to improve its performance.\n"
+            "You will be provided a backward kernel which computes per-input gradients, use it as the starting point and make edits to improve its performance.\n"
+            "You must adhere to user's Phase-specific goals and guardrails.\n"
             # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference.\n"
 
             "\n### Allowed edits\n"
@@ -218,10 +218,11 @@ class MinimalLLMPatchProvider:
             "You can edit _mk_block_ptr when it's present.\n"
 
             # todo: show this only in the 1st iter?
+            # comment: do not instruct to e.g. "for loops" or "remove atomics" -- this is handled in Phase[s]. Below is just general info only
             "\n### Initial backward kernel details\n"
             # " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
             "* variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
-            "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened). You should re-introduce back the for-loops in the backward kernel, as it'll generalize the backward kernel to multi-tiled shapes.\n"
+            "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened).\n"
             # " * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
             # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
 
