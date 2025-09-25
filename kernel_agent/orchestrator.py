@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import os, re, json, sys, shutil
+import os, re, json, sys
 
 import torch
 

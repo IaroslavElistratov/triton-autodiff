@@ -174,6 +174,7 @@ class PhasedStrategy(BaseStrategy):
         assert self.pending_advance_from == self.i, "Unreachable"
 
         _is_full_parity, grad_stats = payload_gradcheck
+        next_phase_name = self.phases[self.i+1].name
 
         # parity guardrails
         passed = int(grad_stats.get("num_passed", 0))
@@ -193,11 +194,9 @@ class PhasedStrategy(BaseStrategy):
 
         if VERBOSE:
             ok = code_gate and parity_gate
-            # -1 bc just advanced above
-            phase_name = self.phases[self.i-1].name
             status = "guardrails satisfied" if ok else "guardrails NOT satisfied"
             action = "advancing to next phase" if ok else "holding at current phase"
-            print(f"[kernel-agent] Phase gate: {status} for '{phase_name}'; {action}")
+            print(f"[kernel-agent] Phase gate: {status} for '{next_phase_name}'; {action}")
 
 
 def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:

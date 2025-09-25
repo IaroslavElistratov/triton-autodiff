@@ -1,3 +1,6 @@
+import os
+import shutil
+
 from .utils import _env_truthy
 
 
@@ -15,7 +18,7 @@ class Rollback:
         self.lock_fp = f"{backward_fp}.lock"
         self.best_pass_count: int = 0
         self._parity_regress_streak: int = 0
-        self._patience_parity_restore: int = int(max(0, patience_parity_restore))
+        self._patience_parity_restore: int = patience_parity_restore
         # Strategy reference (used to persist/restore phase index)
         self._strategy = strategy
         # Track the strategy phase index saved alongside the lock snapshot
@@ -77,6 +80,14 @@ class Rollback:
         # - If more shapes pass (but not all), snapshot this incremental improvement.
         # - If equal, leave the current file as-is.
         curr_passed, total = int(stats.get("num_passed", 0)), int(stats.get("num_total", 0))
+
+        # lock phase 0 -> phase 1 even if same number of gradcheck passed shapes
+        # (bc phase 1 is more readable kernel, so worth locking)
+        is_higher_phase = (self._saved_phase_index is not None) and (self._strategy.i > self._saved_phase_index)
+        same_count_but_higher_phase = (curr_passed == self.best_pass_count) and is_higher_phase
+
+        # note: not counting _parity_regress_streak when curr_passed == self.best_pass_count -- potentially should?
+
         if curr_passed < self.best_pass_count:
             self._parity_regress_streak += 1
             self._log(
@@ -87,9 +98,9 @@ class Rollback:
                 self._restore()
                 self._parity_regress_streak = 0
                 return True
-        elif curr_passed > self.best_pass_count:
-            self.best_pass_count = curr_passed
+        elif (curr_passed > self.best_pass_count) or same_count_but_higher_phase:
             prev = self.best_pass_count
+            self.best_pass_count = curr_passed
             self._log(f"parity improve: best {prev} -> {self.best_pass_count} of {total} -> snapshot")
             self.snapshot(f"parity {curr_passed}/{total}")
             self._parity_regress_streak = 0

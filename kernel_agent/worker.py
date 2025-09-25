@@ -51,6 +51,7 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         _op, bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
         # Ensure any pending device work (e.g., preflight backward) is observed before exit,
         # so device-side asserts surface in this child, not later in the parent.
+        # todo: but that seems to be device-wide
         _t.cuda.synchronize()
         q.put(bwd_fp)
         q.close(); q.join_thread()
