@@ -61,7 +61,7 @@ class BaseStrategy:
         # Default: a simple optimize header with global guardrails and neutral temperature
         return "Phase = optimize.\n", 0.7
 
-    def advance(self, changed: bool, parity_ok: bool) -> None:
+    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
         # No-op in the base class.
         pass
 
@@ -88,9 +88,39 @@ class PhasedStrategy(BaseStrategy):
         self.name = "phased"
         self.phases = list(phases)
         self.i = 0
+        # Deferred phase-advance request recorded when an optimize patch is applied.
+        # Only advance at the beginning of the NEXT iteration after seeing gradcheck
+        # for the post-optimize kernel. This keeps prompts in the old phase until the
+        # patch proves itself on the subsequent gradcheck (avoids advancing on stale
+        # pre-optimize parity and misguiding the next LLM turn)
+        self.pending_advance_from: int | None = None
 
-    def verify_guardrails(self, backward_fp: str) -> bool:
+    # @property
+    # def get_header(self):
+    #     return self.phases[self.i].goal
+
+    def set_phase_index(self, i: int) -> None:
+        """Force strategy index to a given phase (used on rollback restore)."""
+        self.i = i
+        if VERBOSE:
+            print(f"[kernel-agent] Strategy phase restored to i={i}")
+
+    def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
+        # emit a concise header describing the allowed scope for this step.
+        p = self.phases[self.i]
+        header = (
+            f"Phase = {p.name}. Phase Goals = {p.goal}.\n"
+            f"Success Gates: gradcheck_ok={parity_ok}.\n"
+            f"Phase Guardrails: {p.guardrails}\n"
+        )
+        return header, p.temp
+
+    def _verify_guardrails(self, backward_fp: str) -> bool:
         """Return True if current phase-specific guardrails are satisfied.
+
+        comment:
+        **Assumption: guardrails run after the LLM patch was applied for the current phase.**
+        'pending_advance_from' ensures that this is the case.
 
         Phase 1 -> require reintroduced loops (guardrails_check_phase1)
         Phase 2 -> require atomics removed (guardrails_check_phase2)
@@ -102,39 +132,53 @@ class PhasedStrategy(BaseStrategy):
             2: guardrails_check_phase2,
             3: guardrails_check_phase3,
         }
+        # todo-high:
+        # test all guardrails because a recent model patch can violate older (previously passing) guardrails,
+        # if add this don't need the phase save and restore on rollback functionality
         fn = checks.get(self.i)
         ok = fn(backward_fp)
+        return ok
+
+    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
+        """Advance one phase only after post-optimize gradcheck proves the patch.
+        - Uses parity from the current iteration (post-optimize kernel)
+        - Require phase-specific code guardrails and parity guardrails
+        """
+
+        if self.pending_advance_from is None:
+            if VERBOSE:
+                print(f"[kernel-agent] Phase maybe_advance was called but pending_advance_from is None. Not advancing.")
+            return
+
+        # cannot be not None and not self.i
+        assert self.pending_advance_from == self.i, "Unreachable"
+
+        _is_full_parity, grad_stats = payload_gradcheck
+
+        # parity guardrails
+        passed = int(grad_stats.get("num_passed", 0))
+        total  = int(grad_stats.get("num_total", 0))
+
+        # Phase-specific parity thresholds for advancement
+        # Phase-0: allow advance if >=1 shape passes; later phases require full sweep.
+        parity_gate = (passed >= 1) if self.i == 0 else (total > 0 and passed == total)
+
+        # code guardrails must also hold for the current phase
+        code_gate = self._verify_guardrails(bwd_fp)
+
+        if code_gate and parity_gate:
+            self.i += 1
+        # clear request either way
+        self.pending_advance_from = None
+
         if VERBOSE:
-            phase_name = self.phases[self.i].name
+            ok = code_gate and parity_gate
+            # -1 bc just advanced above
+            phase_name = self.phases[self.i-1].name
             status = "guardrails satisfied" if ok else "guardrails NOT satisfied"
             action = "advancing to next phase" if ok else "holding at current phase"
             print(f"[kernel-agent] Phase gate: {status} for '{phase_name}'; {action}")
-        return ok
 
-    # @property
-    # def get_header(self):
-    #     return self.phases[self.i].goal
-
-    def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
-        # Emit a concise header describing the allowed scope for this step.
-        p = self.phases[self.i]
-        header = (
-            f"Phase = {p.name}. ONLY do: {p.goal}.\n"
-            f"Success gates: gradcheck_ok={parity_ok}.\n"
-            f"Guardrails (phase-specific): {p.guardrails}\n"
-        )
-        return header, p.temp
-
-    def advance(self, changed: bool, parity_ok: bool) -> None:
-        # Advance to the next phase only on a successful, gradcheck-passing change.
-        if changed and parity_ok and self.i < len(self.phases) - 1:
-            self.i += 1
-
-    def set_phase_index(self, i: int) -> None:
-        """Force strategy index to a given phase (used on rollback restore)."""
-        self.i = i
-        if VERBOSE:
-            print(f"[kernel-agent] Strategy phase restored to i={i}")
 
 def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
     # Factory: allows toggling strategy with an env flag without touching the loop.

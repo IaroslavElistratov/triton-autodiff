@@ -94,6 +94,8 @@ class Rollback:
                 self._log(f"restore: {self.lock_fp} -> {self.backward_fp}")
                 # If we saved a phase index, restore it now so policy state matches the restored kernel
                 if self._strategy.name == "phased":
+                    # Drop any pending phase advance request (stale kernel)
+                    self._strategy.pending_advance_from = None
                     self._strategy.set_phase_index(self._saved_phase_index)
                     if VERBOSE:
                         print(f"[kernel-agent][rollback] strategy phase restored to i={self._saved_phase_index}")
@@ -244,9 +246,6 @@ class KernelOptimizer:
         if err_propose:
             return False
 
-        if VERBOSE:
-            print(f"[kernel-agent][it={it}] LLM patch preview:\n{str(patch)[:800]}")
-
         # 2) Apply (with one repair attempt on apply error)
         before = _read_bytes(bwd_fp)
         err_apply = _apply_once(patch)
@@ -394,15 +393,6 @@ class KernelOptimizer:
             # observable and blocks phase advance until the same kernel passes on every shape;
             # the raised naive backward is unrolled and shape‑specialized; it will fail on varied
             # shapes until loops are restored
-            #
-            # failed patch apply on attempt 0 "continue"s to attempt 1 and triggers full-SWEEP anyway,
-            # the model will see the failures with dims included in the stats and fix accordingly
-
-            # todo-now: handle that logic where i run the first iteartion only on the 1st shape, i broke this logic whenre moved gradchekc and bench calls to children
-            # sidecar = ns
-            # if it == 0:
-            #     sidecar = dict(ns)
-            #     sidecar["SWEEP"] = ns["SWEEP"][:1]
 
             if VERBOSE:
                 print(f"[kernel-agent][it={it}]") #  Inputs shapes={shapes}"
@@ -435,10 +425,21 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
-            # Breadcrumb: minimal
+            # minimal breadcrumb
             self.patcher.remember("gradcheck", grad_stats)
 
             was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
+
+            # Deferred phase advance gate: if last iteration applied a patch, only advance
+            # now (before computing the phase header) if the current kernel passes the
+            # per-phase parity threshold. This ensures we do not move to the next phase until
+            # the patch (which as applied, with the current phase header, in the previous iteration)
+            # is validated by gradcheck.
+            # Solves advancing on stale parity and prompting with the wrong phase.
+            # Do not advance immediately after _llm_request_and_apply (in the previous iteration),
+            # using parity from the previous kernel, it misalignes prompts and flips SWEEP early.
+            self.strategy.maybe_advance(bwd_fp, payload_gradcheck)
+
             phase_text, temp = self.strategy.current_phase(parity_ok)
 
             # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
@@ -525,27 +526,15 @@ class KernelOptimizer:
             if not changed:
                 continue
 
-            # todo-high:
-            # test all guardrails because a recent model patch can violate older (previously passing) guardrails,
-            # if add this don't need the phase save and restore on rollback functionality
+            # NOTE: any gradcheck stats are now stale (right after the patch was applied above)
 
-            if self.strategy_name == "regular":
-                # at this point both ok_gracheck and ok_bench and changed are all true
-                self.strategy.advance(changed=changed, parity_ok=parity_ok)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] End iteration")
+            # defers the actual phase increment until i see fresh gradcheck/bench in the next loop
+            # (on the post-optimize kernel). Record a pending request only if a patch landed.
+            # The actual advance will occur at the start of the next iteration when gradcheck passes the per-phase gate
+            self.strategy.pending_advance_from = self.strategy.i
 
-            elif self.strategy_name == "phased":
-                # at this point both ok_gracheck and ok_bench and changed are all true
-                # so just check for verify_guardrails
-                advance_changed = self.strategy.verify_guardrails(bwd_fp)
-                self.strategy.advance(changed=advance_changed, parity_ok=parity_ok)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] End iteration")
-
-            else:
-                print(self.strategy_name)
-                raise ValueError(f"Unreachable, mode should be either 'regular' or 'phased'. Got {self.strategy_name}")
+            if VERBOSE:
+                print(f"[kernel-agent][it={it}] End iteration")
 
         return {
             "best_metrics": tracker.best_metrics,
