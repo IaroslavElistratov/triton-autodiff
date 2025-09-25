@@ -21,15 +21,6 @@ def _read_bytes(path: str) -> bytes:
     except Exception:
         return b""
 
-
-def _file_mtime_ns(p: str) -> int | None:
-    try:
-        return os.stat(p).st_mtime_ns
-    except Exception:
-        return None
-
-
-
 @dataclass
 class Config:
     max_iters: int = 6

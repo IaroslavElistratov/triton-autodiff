@@ -217,85 +217,10 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     if not callable(op):
         raise UserError("Expected a top-level stub(...) to call the kernel.")
 
-
-
-    # answer-now:
-    # don't the below anymore, instead just directly run gracheck / bench in the child -- if it oob's then no problem.
-    # the blow was needed easier when i tried to do a canary compile_kernel in the child to try to guard oob's before the main process runs
-    # but now since gracheck and bench both run in child -- that logic below seems isn't needed anyore
-    #
-    # # Preemptively run backward to be certain that both fwd and bwd well formed;
-    # # run one small forward + backward to surface syntax/import/JIT issues early.
-    # # Previously, errors would only show up during the first actual backward (e.g., gradcheck),
-    # # which could terminate the process late (since nothing will catch an exeption at that time).
-    # # This preflight keeps the same semantics but fails here where the errors are being caught (as part
-    # # of compile_kernel and not later, when StubOverrideDCK.backward will be called unguarded e.g.
-    # # during gradcheck, where a raised exception will crash the program)
-    # is_worker = os.environ.get("KERNEL_AGENT_WORKER") in {"gradcheck", "bench"}
-    # sweep = ns.get("SWEEP")
-    # make_args = ns.get("make_args")
-    # if is_worker and isinstance(sweep, (list, tuple)) and sweep and callable(make_args):
-    #     def _preflight_backward():
-    #         import torch
-    #         for dims in sweep:
-    #             # Obtain exemplar inputs using the user-provided helper
-    #             args, kwargs = make_args(dims)
-    #             kwargs = dict(kwargs or {})
-
-    #             # Enable grads for floating-point tensors only (matches typical autograd expectations)
-    #             pos_args = list(args or [])
-    #             for i, v in enumerate(pos_args):
-    #                 if isinstance(v, torch.Tensor) and v.is_floating_point():
-    #                     pos_args[i] = v.detach().requires_grad_(True)
-    #             for k, v in kwargs.items():
-    #                 if isinstance(v, torch.Tensor) and v.is_floating_point():
-    #                     kwargs[k] = v.detach().requires_grad_(True)
-
-    #             # Forward once via the fused op (stub)
-    #             y = op(*pos_args, **kwargs)
-    #             ys = y if isinstance(y, (tuple, list)) else (y,)
-    #             ys = tuple(t for t in ys if isinstance(t, torch.Tensor))
-    #             if not ys:
-    #                 continue  # nothing to differentiate
-
-    #             # Reduce outputs to a scalar to avoid constructing explicit upstreams.
-    #             # This mirrors gradcheck behavior without needing grad_outputs.
-    #             scalar = None
-    #             for t in ys:
-    #                 scalar = (t.sum() if scalar is None else scalar + t.sum())
-
-    #             # Collect grad-requiring inputs (positional + keyword)
-    #             grad_ins = []
-    #             for v in pos_args:
-    #                 if isinstance(v, torch.Tensor) and v.requires_grad:
-    #                     grad_ins.append(v)
-    #             for v in kwargs.values():
-    #                 if isinstance(v, torch.Tensor) and v.requires_grad:
-    #                     grad_ins.append(v)
-    #             if grad_ins and scalar is not None:
-    #                 torch.autograd.grad(scalar, tuple(grad_ins), allow_unused=True)
-
-    #     try:
-    #         # todo: run check_op_backward_parity_sweep here to make it closer to what the parent will run
-    #         # Use the same timeout guard as other compile-time steps
-    #         run_with_timeout(_preflight_backward, CODE_EXEC_TIMEOUT_S)
-    #         # todo: but taht seems to be device-wide
-    #         # forces any pending async device faults from the preflight thread to surface immediately in the child, so they get converted into a CompileError before returning to the parent
-    #         torch.cuda.synchronize()
-    #     except BaseException as e:
-    #         # Surface early as a structured CompileError so orchestrator can recover
-    #         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-    #         msg = str(e)
-    #         err = {
-    #             "phase": "jit_backward",
-    #             "error_type": type(e).__name__,
-    #             "error_message": msg,
-    #             # "fwd_file": file_path,
-    #             "bwd_file": bwd_fp,
-    #             "traceback": tb,
-    #             "context_snippet": _read_snippet(bwd_fp, 200) if isinstance(bwd_fp, str) else "",
-    #         }
-    #         raise CompileError(err) from e
+    # don't run pre-flight bwd here anymore, instead just directly run gradcheck / bench
+    # in the child -- if it oob's then no problem. Preemptively running backward was needed here when
+    # i tried to do a canary compile_kernel in the child to try to guard oob's before the main
+    # process runs but now since gracheck and bench both run in child -- isn't needed anymore.
 
     return op, bwd_fp, ns
 
