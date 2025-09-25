@@ -433,52 +433,70 @@ class _GenerateSampler:
         # OpenAI Responses API path
         if self.backend == "openai":
             client = self._oa_client
-            model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL")
-
-            # OpenAI Responses path: send system as `instructions`, user as `input`.
-            instructions = next((m.get("content", "") for m in message_list if m.get("role") == "system"), "")
-            user_input   = next((m.get("content", "") for m in message_list if m.get("role") == "user"), "")
-
-            # Define exactly one custom function tool at the top level (Responses tools schema).
-            # Forcing tool use: with a single tool, tool_choice="required" deterministically calls it.
+            model = self._oa_model
             tools = [{
                 "type": "function",
                 "name": "apply_patch",
                 "description": "Apply a single apply_patch.md diff",
                 "parameters": {
                     "type": "object",
-                    "properties": {"patch": {"type": "string"}},
+                    "properties": {
+                        "patch": {
+                            "type": "string",
+                            "description": "*** Begin Patch ... *** End Patch"
+                        }
+                    },
                     "required": ["patch"],
-                    "additionalProperties": False,
+                    # disallow extra args; only 'patch' allowed
+                    "additionalProperties": False
                 },
+                # enforce JSON schema for tool args (may be ignored by some SDKs)
+                "strict": True
             }]
 
-            # One non‑stream call. Forces a single tool call. Use Responses param names.
+            # these models don't support temperature arg
+            is_reasoning = model.startswith("gpt-5") or model.startswith("o")
+            temperature_kw = {} if is_reasoning else {"temperature": self.temperature}
+
             resp = client.responses.create(
                 model=model,
-                instructions=(instructions or None),
-                input=user_input,
+                instructions=system_text,
+                input=user_text,
                 tools=tools,
                 tool_choice="required",
+                reasoning={
+                    "effort": self.reasoning_effort,
+                    # todo:
+                    # "summary": "detailed"
+                },
                 max_output_tokens=self.max_tokens,
+                **temperature_kw,
             )
 
-            # Extract the function_call -> arguments -> patch.
-            # Responses returns custom calls as items with type == "function_call".
             patch_text = ""
+            reasoning_summary = ""
+
             try:
                 for item in (getattr(resp, "output", []) or []):
+                    t = getattr(item, "type", None)
+
+                    if t == "reasoning":
+                        for part in getattr(item, "summary", []) or []:
+                            if getattr(part, "type", "") == "summary_text":
+                                reasoning_summary += part.get("text", "")
+
                     # Responses returns custom function calls as function_call items
-                    if getattr(item, "type", None) == "function_call" and getattr(item, "name", None) == "apply_patch":
+                    elif t == "function_call" and getattr(item, "name", "") == "apply_patch":
                         raw_args = getattr(item, "arguments", "") or ""
                         try:
                             obj = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                            patch_text = (obj.get("patch", "") if isinstance(obj, dict) else str(obj)) or ""
+                            patch_text = (obj.get("patch", "") if isinstance(obj, dict) else str(raw_args)) or ""
                         except Exception:
                             patch_text = str(raw_args) or ""
                         break
+
                 if not patch_text:
-                    # Last‑ditch: parse free text if the model didn’t emit a tool item
+                    # Fallback if the model emitted plain text instead of a tool call
                     patch_text = extract_patch(getattr(resp, "output_text", "") or "") or ""
             except Exception:
                 patch_text = ""
@@ -490,11 +508,19 @@ class _GenerateSampler:
                 else:
                     patch_text = pt
 
+            if VERBOSE and reasoning_summary:
+                print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
+
             finish = "produced_patch" if patch_text else "no_patch"
             return SamplerResponse(
-                response_text=(patch_text or ""),
+                response_text=patch_text,
                 actual_queried_message_list=message_list,
-                response_metadata={"tool": ("functions.apply_patch" if patch_text else ""), "stop_reason": finish},
+                response_metadata={
+                    "tool": ("functions.apply_patch" if patch_text else ""),
+                    "stop_reason": finish,
+                    "usage": getattr(resp, "usage", None),
+                    "reasoning_summary": reasoning_summary,
+                },
             )
 
 
@@ -502,7 +528,7 @@ class _GenerateSampler:
         sys_msg = Message.from_role_and_content(
             Role.SYSTEM,
             SystemContent.new().with_reasoning_effort(
-                REASONING_EFFORT.get(self.reasoning_effort, ReasoningEffort.LOW)
+                REASONING_EFFORT[self.reasoning_effort]
             ),
         )
         # Attaches Developer/tool block only when developer instructions are provided
