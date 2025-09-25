@@ -459,7 +459,9 @@ class _GenerateSampler:
             temperature_kw = {} if is_reasoning else {"temperature": self.temperature}
 
             # carry forward model state between turns (server-side)
-            response_id_kw = {"previous_response_id": _prev} if self._prev_response_id else {}
+            # use getattr to avoid AttributeError before the first response
+            _prev = getattr(self, "_prev_response_id", None)
+            response_id_kw = {"previous_response_id": _prev} if _prev else {}
 
             resp = client.responses.create(
                 model=model,
@@ -477,11 +479,20 @@ class _GenerateSampler:
                 **response_id_kw,
             )
 
-            # remember this response for the next turn
-            self._prev_response_id = resp.id
+            # _prev_response_id (response id)
+            # The id of an entire model turn (the whole response).
+            # You pass it as previous_response_id on the next call so the server reuses that turn’s hidden state/reasoning.
+            # Set it after the turn is complete/finalized.
+            # last_call_id (function call id)
+            # The id of one specific function_call inside that turn (apply_patch).
+            # You must reference it once to submit the tool’s output and finalize the pending function call.
+            # Lifetime: Temporary. Use it to submit the output, then you can discard it.
+
+            # defer setting _prev_response_id until after we finalize the tool call
 
             patch_text = ""
             reasoning_summary = ""
+            last_call_id = None  # capture tool call id to acknowledge the function_call
 
             try:
                 for item in (getattr(resp, "output", []) or []):
@@ -494,6 +505,8 @@ class _GenerateSampler:
 
                     # Responses returns custom function calls as function_call items
                     elif t == "function_call" and getattr(item, "name", "") == "apply_patch":
+                        # capture the specific tool call id to finalize this turn
+                        last_call_id = item.call_id
                         raw_args = getattr(item, "arguments", "") or ""
                         try:
                             obj = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
@@ -518,6 +531,27 @@ class _GenerateSampler:
             if VERBOSE and reasoning_summary:
                 print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
 
+            # finalize via a follow-up responses.create so the server clears the pending tool call, then chain to the acknowledged id.
+            # Pending: The model ended the turn with a function_call. The server marks the turn as “requires tool output.” If you pass previous_response_id to this pending turn, the server blocks with “No tool output found…” because it’s still waiting for your tool’s result.
+            # Finalized: You submit the tool’s result (function_call_output via submit_tool_outputs or a follow-up create). That completes the turn. Now previous_response_id can safely point to this completed turn, and the model’s hidden reasoning artifacts are available for the next call.
+            if last_call_id:
+                # Finalize the pending tool call with a concise result; this closes the turn
+                # so the next chained call can see hidden reasoning and outputs.
+                ack = client.responses.create(
+                    model=model,
+                    previous_response_id=resp.id,
+                    input=[{
+                        "type": "function_call_output",
+                        "call_id": last_call_id,
+                        # todo-now: feed actual tool output
+                        "output": "patch_applied",
+                    }],
+                )
+                self._prev_response_id = ack.id
+            else:
+                # no tool call -> chain to this response id
+                self._prev_response_id = resp.id
+
             finish = "produced_patch" if patch_text else "no_patch"
             return SamplerResponse(
                 response_text=patch_text,
@@ -525,7 +559,7 @@ class _GenerateSampler:
                 response_metadata={
                     "tool": ("functions.apply_patch" if patch_text else ""),
                     "stop_reason": finish,
-                    "usage": getattr(resp, "usage", None),
+                    "usage": resp.usage,
                     "reasoning_summary": reasoning_summary,
                     # expose raw response id to assist with debugging/analytics/chaining
                     "response_id": resp.id,
