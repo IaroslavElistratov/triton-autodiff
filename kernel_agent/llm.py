@@ -458,6 +458,9 @@ class _GenerateSampler:
             is_reasoning = model.startswith("gpt-5") or model.startswith("o")
             temperature_kw = {} if is_reasoning else {"temperature": self.temperature}
 
+            # carry forward model state between turns (server-side)
+            response_id_kw = {"previous_response_id": _prev} if self._prev_response_id else {}
+
             resp = client.responses.create(
                 model=model,
                 instructions=system_text,
@@ -471,7 +474,11 @@ class _GenerateSampler:
                 },
                 max_output_tokens=self.max_tokens,
                 **temperature_kw,
+                **response_id_kw,
             )
+
+            # remember this response for the next turn
+            self._prev_response_id = resp.id
 
             patch_text = ""
             reasoning_summary = ""
@@ -520,6 +527,8 @@ class _GenerateSampler:
                     "stop_reason": finish,
                     "usage": getattr(resp, "usage", None),
                     "reasoning_summary": reasoning_summary,
+                    # expose raw response id to assist with debugging/analytics/chaining
+                    "response_id": resp.id,
                 },
             )
 
