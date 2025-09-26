@@ -160,9 +160,18 @@ class MinimalLLMPatchProvider:
         # Stored as small text snippets. Not a chat transcript.
         self._history: list[str] = []
 
+    # called by the orchestrator
     def finalize_last_tool_call(self, output: str) -> None:
-        """Stash tool output; next OpenAI turn will inline-ack before the new prompt."""
-        self._sampler._pending_tool_output = output
+        """Stash tool output; next OpenAI turn will inline-ack before the new prompt.
+
+        Provider only provides the output; the sampler manages Responses API plumbing.
+        OpenAI-only behavior: other backends do not use Responses API function_call_output.
+        """
+        backend = str(os.environ.get("KERNEL_AGENT_BACKEND", "triton")).lower()
+        if backend != "openai":
+            return
+        # Delegate to sampler; it handles ChainState details
+        self._sampler._chain.stash_output(output)
 
     # Allow per-phase temperature overrides (optional)
     def set_phase_temperature(self, mapping: dict[str, float]) -> None:
@@ -379,17 +388,8 @@ class _GenerateSampler:
         self.encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         self.generator: Any | None = None
         self._init_backend()
-
-        ### Track pending OpenAI call ids so we can send the real tool output later.
-
-        # the prior **response.id**. To be passed as `previous_response_id` when send the tool output next turn
-        # Lifetime: until that tool call is acknowledged
-        self._pending_response_id: str | None = None
-        # the specific **function_call.call_id** inside that response. Must be included it in the `{"type":"function_call_output", "call_id": ...}` item prepended next turn
-        # Lifetime:  until that tool call is acknowledged
-        self._pending_call_id: str | None = None
-        # If not None, the actual string the model will see as the tool result
-        self._pending_tool_output: str | None = None
+        # Responses API chaining state (OpenAI backend only)
+        self._chain = ChainState()
 
     def _init_backend(self) -> None:
         match self.backend:
@@ -473,42 +473,8 @@ class _GenerateSampler:
             is_reasoning = model.startswith("gpt-5") or model.startswith("o")
             temperature_kw = {} if is_reasoning else {"temperature": self.temperature}
 
-            # carry forward model state between turns (server-side)
-            # use getattr to avoid AttributeError before the first response
-            _prev = getattr(self, "_prev_response_id", None)
-            response_id_kw = {"previous_response_id": _prev} if _prev else {}
-
-            # Model ended the turn with a function_call on the previous iteration. Server marks
-            # the turn as "requires tool output." If pass previous_response_id to this pending turn, the
-            # server blocks with "No tool output found" bc it’s still waiting for the tool’s result.
-            # Thus the logic for adding function_call_output below
-
-            # If have a pending tool output from the previous turn, finalize it inline
-            # before sending the new user input. This both closes the previous tool call
-            # and starts the next turn in a single request.
-            _used_inline_ack = False
-            if self._pending_response_id and self._pending_call_id:
-                _used_inline_ack = True
-                input_payload = [
-                    # Finalize the pending tool call with a result; this closes the turn
-                    # so the next chained call can see hidden reasoning and tool outputs.
-                    {
-                        "type": "function_call_output",
-                        "call_id": self._pending_call_id,
-                        "output": self._pending_tool_output,
-                    },
-                    {
-                        "type": "message",
-                        "role": "user",
-                        # input_text item is only valid inside a message item. So using a message
-                        # wrapper for the user turn. Otherwise BadRequestError: Error code: 400
-                        "content": [{"type": "input_text", "text": user_text}],
-                    }
-                ]
-                prev_kw = {"previous_response_id": self._pending_response_id}
-            else:
-                input_payload = user_text
-                prev_kw = response_id_kw
+            # Build request input applying inline tool-acknowledge if pending exists
+            input_payload, prev_kw, used_inline_ack = self._chain.build_input(user_text)
 
             resp = client.responses.create(
                 model=model,
@@ -526,24 +492,12 @@ class _GenerateSampler:
                 **prev_kw,
             )
 
-            # After a successful inline acknowledge (ack), clear the pending-ack state
-            # Don’t clear pending state before the API call. If that call fails lose the
-            # pending tool output and break chaining. Set a flag, call the API, then clear
-            if _used_inline_ack:
-                self._pending_tool_output = None
-                self._pending_response_id = None
-                self._pending_call_id = None
-
-            # _prev_response_id (response id)
-            # The id of an entire model turn (the whole response).
-            # You pass it as previous_response_id on the next call so the server reuses that turn’s hidden state/reasoning.
-            # Set it after the turn is complete/finalized.
-            # last_call_id (function call id)
-            # The id of one specific function_call inside that turn (apply_patch).
-            # You must reference it once to submit the tool’s output and finalize the pending function call.
-            # Lifetime: Temporary. Use it to submit the output, then you can discard it.
-
-            # defer setting _prev_response_id until after we finalize the tool call
+            # note this is needed: bc "client.responses.create" above can throw and my orchestrator catches this potential failure,
+            # so preserve pending state on failure and clear it only after a successful call. Thus "used_inline_ack" variable
+            #
+            # After a successful inline acknowledge (ack), clear the pending-ack state.
+            # Don’t clear pending state before the API call to avoid losing data on failure.
+            self._chain.clear_if_used(used_inline_ack)
 
             patch_text = ""
             reasoning_summary = ""
@@ -602,15 +556,8 @@ class _GenerateSampler:
                 except Exception:
                     pass
 
-            # Remember pending response/call so the next turn can finalize inline.
-            if last_call_id:
-                self._pending_response_id = resp.id
-                self._pending_call_id = last_call_id
-            else:
-                # No pending call: safe to chain immediately
-                self._pending_response_id = None
-                self._pending_call_id = None
-                self._prev_response_id = resp.id
+            # Update chain state so the next turn can finalize inline
+            self._chain.on_response(resp.id, last_call_id)
 
             finish = "produced_patch" if patch_text else "no_patch"
             return SamplerResponse(
@@ -724,3 +671,114 @@ class _GenerateSampler:
                 "stop_reason": ("produced_patch" if patch_text else ("max_tokens" if hit_limit else "no_patch")),
             },
         )
+
+
+
+
+####### llm api backends #######
+
+
+
+# 1) open-ai
+
+@dataclass
+class PendingTool:
+    """Holds a single pending tool call that must be finalized on the next turn.
+
+    - response_id: the OpenAI Responses turn id (id of an the whole response) where the function_call was emitted
+        pass it as previous_response_id on the next call so the server reuses that turn’s hidden state/reasoning.
+    - call_id:     the specific function_call.id (inside that response) to acknowledge
+        must reference it once to submit the tool’s output and finalize the pending function call.
+    - output:      the tool's actual output to return to the model
+    """
+    response_id: str | None = None
+    call_id: str | None = None
+    output: str | None = None
+
+
+# comment:
+# basically, with previous_response_id, the prior response must be finalized. If that prior turn ended with a function_call,
+# the API requires to provide the tool’s output to close the loop. Otherwise the server refuses to chain and raises see "No tool output found".
+# So finalize by including a {"type":"function_call_output"} item in the next request. 
+
+@dataclass
+class ChainState:
+    """Encapsulates chaining state for OpenAI Responses API.
+
+    prev_response_id stores only finalized response ids.
+    pending stores a function call awaiting output; its output is supplied inline
+    on the next create() call, in the same request as the new user message.
+    """
+    prev_response_id: str | None = None
+    pending: PendingTool | None = None
+
+    def build_input(self, user_text: str) -> tuple[object, dict, bool]:
+        """Construct input payload and prev kw for responses.create.
+
+        Returns (input_payload, prev_kw, used_inline_ack).
+        If we have a pending tool with output, we prepend function_call_output and
+        set previous_response_id to that pending turn id. Otherwise we pass through
+        a typed user message and chain using the last finalized prev_response_id.
+        """
+
+        # If model ended the turn with a function_call on the previous iteration. Server marks
+        # the turn as "requires tool output." If pass previous_response_id to this pending turn, the
+        # server blocks with "No tool output found" bc it’s still waiting for the tool’s result.
+        # Thus the logic for adding function_call_output below
+
+        # If have a pending tool output from the previous turn, finalize it inline
+        # before sending the new user input. This both closes the previous tool call
+        # and starts the next turn in a single request.
+
+        # When pending exists, it always has response_id and call_id, so
+        # only require that output is present to finalize inline.
+        if self.pending and (self.pending.output is not None):
+            input_payload = [
+                {
+                    # Finalize the pending tool call with a result; this closes the turn
+                    # so the next chained call can see hidden reasoning and tool outputs.
+                    "type": "function_call_output",
+                    "call_id": self.pending.call_id,
+                    "output": self.pending.output,
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    # input_text item is only valid inside a message item. So using a message
+                    # wrapper for the user turn. Otherwise BadRequestError: Error code: 400
+                    "content": [{"type": "input_text", "text": user_text}],
+                },
+            ]
+            prev_kw = {"previous_response_id": self.pending.response_id}
+            return input_payload, prev_kw, True
+        # No pending ack: regular chaining to the last finalized turn (if any).
+        # For schema consistency, always send typed items (wrap user text in a message).
+        prev_kw = {"previous_response_id": self.prev_response_id} if self.prev_response_id else {}
+        input_payload = [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": user_text}],
+        }]
+        return input_payload, prev_kw, False
+
+    def clear_if_used(self, used_inline_ack: bool) -> None:
+        """Clear pending ack only after a successful API call that used it."""
+        if used_inline_ack:
+            self.pending = None
+
+    def on_response(self, response_id: str, call_id: str | None) -> None:
+        """Update chain state based on model output.
+
+        - If a new function_call was emitted, record it as pending.
+        - Otherwise, the turn is finalized; record as prev_response_id for next call.
+        """
+        if call_id:
+            self.pending = PendingTool(response_id=response_id, call_id=call_id, output=None)
+        else:
+            self.pending = None
+            self.prev_response_id = response_id
+
+    def stash_output(self, text: str) -> None:
+        """Stash tool output to be inlined on the next request, if pending exists."""
+        if self.pending:
+            self.pending.output = text
