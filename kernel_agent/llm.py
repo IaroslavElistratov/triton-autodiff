@@ -447,133 +447,7 @@ class _GenerateSampler:
 
         # OpenAI Responses API path
         if self.backend == "openai":
-            client = self._oa_client
-            model = self._oa_model
-            tools = [{
-                "type": "function",
-                "name": "apply_patch",
-                "description": "Apply a single apply_patch.md diff",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "patch": {
-                            "type": "string",
-                            "description": "*** Begin Patch ... *** End Patch"
-                        }
-                    },
-                    "required": ["patch"],
-                    # disallow extra args; only 'patch' allowed
-                    "additionalProperties": False
-                },
-                # enforce JSON schema for tool args (may be ignored by some SDKs)
-                "strict": True
-            }]
-
-            # these models don't support temperature arg
-            is_reasoning = model.startswith("gpt-5") or model.startswith("o")
-            temperature_kw = {} if is_reasoning else {"temperature": self.temperature}
-
-            # Build request input applying inline tool-acknowledge if pending exists
-            input_payload, prev_kw, used_inline_ack = self._chain.build_input(user_text)
-
-            resp = client.responses.create(
-                model=model,
-                instructions=system_text,
-                input=input_payload,
-                tools=tools,
-                tool_choice="required",
-                reasoning={
-                    "effort": self.reasoning_effort,
-                    # todo:
-                    # "summary": "auto",
-                },
-                max_output_tokens=self.max_tokens,
-                **temperature_kw,
-                **prev_kw,
-            )
-
-            # note this is needed: bc "client.responses.create" above can throw and my orchestrator catches this potential failure,
-            # so preserve pending state on failure and clear it only after a successful call. Thus "used_inline_ack" variable
-            #
-            # After a successful inline acknowledge (ack), clear the pending-ack state.
-            # Don’t clear pending state before the API call to avoid losing data on failure.
-            self._chain.clear_if_used(used_inline_ack)
-
-            patch_text = ""
-            reasoning_summary = ""
-            # capture tool call id to acknowledge the function_call
-            last_call_id = None
-
-            try:
-                for item in (getattr(resp, "output", []) or []):
-                    t = getattr(item, "type", None)
-
-                    if t == "reasoning":
-                        for part in getattr(item, "summary", []):
-                            if getattr(part, "type", "") == "summary_text":
-                                reasoning_summary += part.get("text", "")
-
-                    # Responses returns custom function calls as function_call items
-                    elif t == "function_call" and getattr(item, "name", "") == "apply_patch":
-                        # capture the specific tool call id to finalize this turn
-                        last_call_id = item.call_id
-                        raw_args = getattr(item, "arguments", "") or ""
-                        try:
-                            obj = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                            patch_text = (obj.get("patch", "") if isinstance(obj, dict) else str(raw_args)) or ""
-                        except Exception:
-                            patch_text = str(raw_args) or ""
-                        break
-
-                if not patch_text:
-                    # Fallback if the model emitted plain text instead of a tool call
-                    patch_text = extract_patch(getattr(resp, "output_text", "") or "") or ""
-            except Exception:
-                patch_text = ""
-
-            if patch_text:
-                pt = patch_text.strip()
-                if BEGIN_PATCH not in pt and END_PATCH not in pt:
-                    patch_text = f"{BEGIN_PATCH}\n{pt}\n{END_PATCH}"
-                else:
-                    patch_text = pt
-
-            if VERBOSE and reasoning_summary:
-                print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
-
-            if VERBOSE:
-                try:
-                    usage_dict = resp.model_dump()["usage"]
-                    input_tokens = usage_dict["input_tokens"]
-                    output_tokens = usage_dict["output_tokens"]
-                    total_tokens = usage_dict["total_tokens"]
-                    input_cached = usage_dict["input_tokens_details"]["cached_tokens"]
-                    reasoning_tokens = usage_dict["output_tokens_details"]["reasoning_tokens"]
-                    print(
-                        f"=== Token usage === input={input_tokens} (cached={input_cached}) "
-                        f"output={output_tokens} total={total_tokens} reasoning_tokens={reasoning_tokens}"
-                    )
-                except Exception:
-                    pass
-
-            # Update chain state so the next turn can finalize inline
-            self._chain.on_response(resp.id, last_call_id)
-
-            finish = "produced_patch" if patch_text else "no_patch"
-            return SamplerResponse(
-                response_text=patch_text,
-                actual_queried_message_list=message_list,
-                response_metadata={
-                    "tool": ("functions.apply_patch" if patch_text else ""),
-                    "stop_reason": finish,
-                    "usage": resp.usage,
-                    "reasoning_summary": reasoning_summary,
-                    # expose raw response id to assist with debugging/analytics/chaining
-                    "response_id": resp.id,
-                    # expose call id so callers can finalize later if desired
-                    "tool_call_id": last_call_id,
-                },
-            )
+            return call_openai_api(self, system_text, user_text, message_list)
 
 
         # System + Developer (advertise the tool) + User
@@ -782,3 +656,135 @@ class ChainState:
         """Stash tool output to be inlined on the next request, if pending exists."""
         if self.pending:
             self.pending.output = text
+
+
+
+def call_openai_api(sampler, system_text: str, user_text: str, message_list: list[dict[str, str]]):
+    # Free function helper for the OpenAI path; 'sampler' is the _GenerateSampler instance.
+    client = sampler._oa_client
+    model = sampler._oa_model
+    tools = [{
+        "type": "function",
+        "name": "apply_patch",
+        "description": "Apply a single apply_patch.md diff",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "*** Begin Patch ... *** End Patch"
+                }
+            },
+            "required": ["patch"],
+            # disallow extra args; only 'patch' allowed
+            "additionalProperties": False
+        },
+        # enforce JSON schema for tool args (may be ignored by some SDKs)
+        "strict": True
+    }]
+
+    # these models don't support temperature arg
+    is_reasoning = model.startswith("gpt-5") or model.startswith("o")
+    temperature_kw = {} if is_reasoning else {"temperature": sampler.temperature}
+
+    # Build request input applying inline tool-acknowledge if pending exists
+    input_payload, prev_kw, used_inline_ack = sampler._chain.build_input(user_text)
+
+    resp = client.responses.create(
+        model=model,
+        instructions=system_text,
+        input=input_payload,
+        tools=tools,
+        tool_choice="required",
+        reasoning={
+            "effort": sampler.reasoning_effort,
+            # todo:
+            # "summary": "auto",
+        },
+        max_output_tokens=sampler.max_tokens,
+        **temperature_kw,
+        **prev_kw,
+    )
+
+    # note this is needed: bc "client.responses.create" above can throw and my orchestrator catches this potential failure,
+    # so preserve pending state on failure and clear it only after a successful call. Thus "used_inline_ack" variable
+    #
+    # After a successful inline acknowledge (ack), clear the pending-ack state.
+    # Don’t clear pending state before the API call to avoid losing data on failure.
+    sampler._chain.clear_if_used(used_inline_ack)
+
+    patch_text = ""
+    reasoning_summary = ""
+    # capture tool call id to acknowledge the function_call
+    last_call_id = None
+
+    try:
+        for item in (getattr(resp, "output", []) or []):
+            t = getattr(item, "type", None)
+
+            if t == "reasoning":
+                for part in getattr(item, "summary", []):
+                    if getattr(part, "type", "") == "summary_text":
+                        reasoning_summary += part.get("text", "")
+
+            # Responses returns custom function calls as function_call items
+            elif t == "function_call" and getattr(item, "name", "") == "apply_patch":
+                # capture the specific tool call id to finalize this turn
+                last_call_id = item.call_id
+                raw_args = getattr(item, "arguments", "") or ""
+                try:
+                    obj = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    patch_text = (obj.get("patch", "") if isinstance(obj, dict) else str(raw_args)) or ""
+                except Exception:
+                    patch_text = str(raw_args) or ""
+                break
+
+        if not patch_text:
+            # Fallback if the model emitted plain text instead of a tool call
+            patch_text = extract_patch(getattr(resp, "output_text", "") or "") or ""
+    except Exception:
+        patch_text = ""
+
+    if patch_text:
+        pt = patch_text.strip()
+        if BEGIN_PATCH not in pt and END_PATCH not in pt:
+            patch_text = f"{BEGIN_PATCH}\n{pt}\n{END_PATCH}"
+        else:
+            patch_text = pt
+
+    if VERBOSE and reasoning_summary:
+        print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
+
+    if VERBOSE:
+        try:
+            usage_dict = resp.model_dump()["usage"]
+            input_tokens = usage_dict["input_tokens"]
+            output_tokens = usage_dict["output_tokens"]
+            total_tokens = usage_dict["total_tokens"]
+            input_cached = usage_dict["input_tokens_details"]["cached_tokens"]
+            reasoning_tokens = usage_dict["output_tokens_details"]["reasoning_tokens"]
+            print(
+                f"=== Token usage === input={input_tokens} (cached={input_cached}) "
+                f"output={output_tokens} total={total_tokens} reasoning_tokens={reasoning_tokens}"
+            )
+        except Exception:
+            pass
+
+    # Update chain state so the next turn can finalize inline
+    sampler._chain.on_response(resp.id, last_call_id)
+
+    finish = "produced_patch" if patch_text else "no_patch"
+    return SamplerResponse(
+        response_text=patch_text,
+        actual_queried_message_list=message_list,
+        response_metadata={
+            "tool": ("functions.apply_patch" if patch_text else ""),
+            "stop_reason": finish,
+            "usage": resp.usage,
+            "reasoning_summary": reasoning_summary,
+            # expose raw response id to assist with debugging/analytics/chaining
+            "response_id": resp.id,
+            # expose call id so callers can finalize later if desired
+            "tool_call_id": last_call_id,
+        },
+    )
