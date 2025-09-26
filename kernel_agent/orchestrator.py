@@ -257,7 +257,12 @@ class KernelOptimizer:
         self.fwd_fp = fwd_fp
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
-        rollback = Rollback(bwd_fp, self.cfg.patience_parity_restore, strategy=self.strategy)
+        rollback = Rollback(
+            bwd_fp,
+            self.cfg.patience_parity_restore,
+            strategy=self.strategy,
+            chain=self.patcher._sampler._chain,
+        )
         # solves the problem of not making any snapshot until a kernel finally passes all tests:
         # when llm is called, it can messup the kernel (pass rate 1/6 -> 0/6), in which case
         # rollback.maybe_snapshot_or_restore below will do nothing bc the first thing it will see is (0/6)

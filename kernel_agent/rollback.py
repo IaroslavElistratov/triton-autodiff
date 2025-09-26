@@ -13,7 +13,7 @@ class Rollback:
     - Restores from that snapshot on plateau/regress (e.g., patience stop)
     - Tracks best parity coverage across iterations
     """
-    def __init__(self, backward_fp: str, patience_parity_restore: int = 0, *, strategy) -> None:
+    def __init__(self, backward_fp: str, patience_parity_restore: int = 0, *, strategy, chain) -> None:
         self.backward_fp = backward_fp
         self.lock_fp = f"{backward_fp}.lock"
         self.best_pass_count: int = 0
@@ -26,6 +26,12 @@ class Rollback:
         self._log(
             f"init: patience_parity_restore={self._patience_parity_restore} | lock={self.lock_fp}"
         )
+
+        ### handle previous_response_id
+        # Track the OpenAI Responses chain state (prev_response_id) alongside the lock snapshot
+        self._saved_prev_response_id: str | None = None
+        # ChainState, allows to call get_prev_response_id
+        self._chain = chain
 
     def _log(self, text: str) -> None:
         if VERBOSE:
@@ -45,6 +51,15 @@ class Rollback:
             # Remember the strategy phase index at snapshot time for later restore
             if self._strategy.name == "phased":
                 self._saved_phase_index = self._strategy.i
+            # don't snapshot any pending tool call ("PendingTool") -- which is unfinalized function_call
+            # that must be acknowledged on very next API request via function_call_output.
+            # Because i snapshot code after the tool has been already applied, no need
+            # to snapshot ephemeral pending call/output;
+            # Also capture the current prev_response_id via chain -- anchors the server-side
+            # convo to this finalized turn so a future restore can chain from the same
+            # hidden state (avoids stale context)
+            if os.environ.get("KERNEL_AGENT_BACKEND") == "openai" and self._chain is not None:
+                self._saved_prev_response_id = self._chain.get_prev_anchor()
         except Exception as e:
             self._log(f"warning: snapshot failed: {type(e).__name__}: {e}")
 
@@ -65,6 +80,10 @@ class Rollback:
                     self._strategy.set_phase_index(self._saved_phase_index)
                     if VERBOSE:
                         print(f"[kernel-agent][rollback] strategy phase restored to i={self._saved_phase_index}")
+                # clears any pending and sets prev_response_id to the saved anchor so the
+                # next turn starts clean, avoiding stale function_call_output acks against the wrong turn.
+                if os.environ.get("KERNEL_AGENT_BACKEND") == "openai" and self._chain is not None:
+                    self._chain.restore_anchor(self._saved_prev_response_id)
         except Exception as e:
             self._log(f"warning: restore failed: {type(e).__name__}: {e}")
 

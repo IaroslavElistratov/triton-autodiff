@@ -167,7 +167,7 @@ class MinimalLLMPatchProvider:
         Provider only provides the output; the sampler manages Responses API plumbing.
         OpenAI-only behavior: other backends do not use Responses API function_call_output.
         """
-        backend = str(os.environ.get("KERNEL_AGENT_BACKEND", "triton")).lower()
+        backend = os.environ.get("KERNEL_AGENT_BACKEND")
         if backend != "openai":
             return
         # Delegate to sampler; it handles ChainState details
@@ -411,7 +411,7 @@ class _GenerateSampler:
                 # Keep a persistent API client to avoid re-initializing per call.
                 self.generator = None
                 # Resolve model once from a single project-specific env.
-                self._oa_model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL", "gpt-5-mini")
+                self._oa_model = os.environ.get("KERNEL_AGENT_OPENAI_MODEL")
                 # Lazy import keeps OpenAI optional unless backend=openai.
                 from openai import OpenAI  # type: ignore
                 # Use default constructor; it reads OPENAI_API_KEY from env.
@@ -656,6 +656,16 @@ class ChainState:
         """Stash tool output to be inlined on the next request, if pending exists."""
         if self.pending:
             self.pending.output = text
+
+    ### Snapshot/restore helpers for Responses chaining ###
+
+    def get_prev_anchor(self) -> str | None:
+        return self.prev_response_id
+
+    def restore_anchor(self, prev_id: str | None) -> None:
+        # Restores must re-anchor to a finalized turn: drop any pending ack
+        self.pending = None
+        self.prev_response_id = prev_id
 
 
 
