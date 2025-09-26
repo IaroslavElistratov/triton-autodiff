@@ -119,22 +119,31 @@ class KernelOptimizer:
             # opens the target with text mode "wt" and writes directly (no transaction/rollback). If an
             # exception occurs mid‑write, the file can be left truncated or partially written
             existed_before, prev_bytes = save_file_bytes(bwd_fp)
+            err_apply: str | None = None
             try:
                 _apply_patch_raw(patch)
-                return None
-            except Exception as err_apply:
+            # don't shadow err_apply
+            except Exception as exc:
                 # restore to pre‑apply bytes to avoid leaving a partial file when apply fails midway
                 restore_err = restore_file_bytes(bwd_fp, existed_before, prev_bytes)
                 if restore_err and VERBOSE:
                     print(f"[kernel-agent][it={it}] restore error: {type(restore_err).__name__}: {restore_err}")
 
-                err_apply = f"{type(err_apply).__name__}: {err_apply}"
+                err_apply = f"{type(exc).__name__}: {exc}"
                 # rely on the patcher to surface validation errors at apply time;
                 # no preflight checks; the patcher remains the source of truth
                 self.patcher.remember("apply.error", err_apply)
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] apply error: {err_apply}")
-                return err_apply
+            finally:
+                # stash the result for inline finalize on the next LLM call
+                self.patcher.finalize_last_tool_call(json.dumps({
+                    "tool": "apply_patch",
+                    "stage": stage,
+                    "status": ("error" if err_apply else "applied"),
+                    "error": err_apply,
+                }))
+            return err_apply
 
         # 1) Propose once
         patch, err_propose = _propose(header)
@@ -145,12 +154,6 @@ class KernelOptimizer:
         # 2) Apply (with one repair attempt on apply error)
         before = _read_bytes(bwd_fp)
         err_apply = _apply_once(patch)
-        self.patcher.finalize_last_tool_call(json.dumps({
-            "tool": "apply_patch",
-            "stage": stage,
-            "status": "error" if err_apply else "applied",
-            "error": err_apply,
-        }))
 
         # Perform one immediate apply-error retry inside _llm_request_and_apply;
         # if that also fails, return False and let the outer loop advance.
@@ -174,12 +177,6 @@ class KernelOptimizer:
             if err2_propose:
                 return False
             err2_apply = _apply_once(patch2)
-            self.patcher.finalize_last_tool_call(json.dumps({
-                "tool": "apply_patch",
-                "stage": stage,
-                "status": "error" if err2_apply else "applied",
-                "error": err2_apply,
-            }))
             if err2_apply:
                 return False
 
