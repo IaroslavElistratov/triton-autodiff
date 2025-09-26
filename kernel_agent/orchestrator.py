@@ -145,6 +145,12 @@ class KernelOptimizer:
         # 2) Apply (with one repair attempt on apply error)
         before = _read_bytes(bwd_fp)
         err_apply = _apply_once(patch)
+        self.patcher.finalize_last_tool_call(json.dumps({
+            "tool": "apply_patch",
+            "stage": stage,
+            "status": "error" if err_apply else "applied",
+            "error": err_apply,
+        }))
 
         # Perform one immediate apply-error retry inside _llm_request_and_apply;
         # if that also fails, return False and let the outer loop advance.
@@ -168,6 +174,12 @@ class KernelOptimizer:
             if err2_propose:
                 return False
             err2_apply = _apply_once(patch2)
+            self.patcher.finalize_last_tool_call(json.dumps({
+                "tool": "apply_patch",
+                "stage": stage,
+                "status": "error" if err2_apply else "applied",
+                "error": err2_apply,
+            }))
             if err2_apply:
                 return False
 

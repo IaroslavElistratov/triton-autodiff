@@ -160,6 +160,10 @@ class MinimalLLMPatchProvider:
         # Stored as small text snippets. Not a chat transcript.
         self._history: list[str] = []
 
+    def finalize_last_tool_call(self, output: str) -> None:
+        """Stash tool output; next OpenAI turn will inline-ack before the new prompt."""
+        self._sampler._pending_tool_output = output
+
     # Allow per-phase temperature overrides (optional)
     def set_phase_temperature(self, mapping: dict[str, float]) -> None:
         self._phase_temp = getattr(self, "_phase_temp", {})
@@ -376,6 +380,17 @@ class _GenerateSampler:
         self.generator: Any | None = None
         self._init_backend()
 
+        ### Track pending OpenAI call ids so we can send the real tool output later.
+
+        # the prior **response.id**. To be passed as `previous_response_id` when send the tool output next turn
+        # Lifetime: until that tool call is acknowledged
+        self._pending_response_id: str | None = None
+        # the specific **function_call.call_id** inside that response. Must be included it in the `{"type":"function_call_output", "call_id": ...}` item prepended next turn
+        # Lifetime:  until that tool call is acknowledged
+        self._pending_call_id: str | None = None
+        # If not None, the actual string the model will see as the tool result
+        self._pending_tool_output: str | None = None
+
     def _init_backend(self) -> None:
         match self.backend:
             case "torch":
@@ -463,21 +478,61 @@ class _GenerateSampler:
             _prev = getattr(self, "_prev_response_id", None)
             response_id_kw = {"previous_response_id": _prev} if _prev else {}
 
+            # Model ended the turn with a function_call on the previous iteration. Server marks
+            # the turn as "requires tool output." If pass previous_response_id to this pending turn, the
+            # server blocks with "No tool output found" bc it’s still waiting for the tool’s result.
+            # Thus the logic for adding function_call_output below
+
+            # If have a pending tool output from the previous turn, finalize it inline
+            # before sending the new user input. This both closes the previous tool call
+            # and starts the next turn in a single request.
+            _used_inline_ack = False
+            if self._pending_response_id and self._pending_call_id:
+                _used_inline_ack = True
+                input_payload = [
+                    # Finalize the pending tool call with a result; this closes the turn
+                    # so the next chained call can see hidden reasoning and tool outputs.
+                    {
+                        "type": "function_call_output",
+                        "call_id": self._pending_call_id,
+                        "output": self._pending_tool_output,
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        # input_text item is only valid inside a message item. So using a message
+                        # wrapper for the user turn. Otherwise BadRequestError: Error code: 400
+                        "content": [{"type": "input_text", "text": user_text}],
+                    }
+                ]
+                prev_kw = {"previous_response_id": self._pending_response_id}
+            else:
+                input_payload = user_text
+                prev_kw = response_id_kw
+
             resp = client.responses.create(
                 model=model,
                 instructions=system_text,
-                input=user_text,
+                input=input_payload,
                 tools=tools,
                 tool_choice="required",
                 reasoning={
                     "effort": self.reasoning_effort,
                     # todo:
-                    # "summary": "detailed"
+                    # "summary": "auto",
                 },
                 max_output_tokens=self.max_tokens,
                 **temperature_kw,
-                **response_id_kw,
+                **prev_kw,
             )
+
+            # After a successful inline acknowledge (ack), clear the pending-ack state
+            # Don’t clear pending state before the API call. If that call fails lose the
+            # pending tool output and break chaining. Set a flag, call the API, then clear
+            if _used_inline_ack:
+                self._pending_tool_output = None
+                self._pending_response_id = None
+                self._pending_call_id = None
 
             # _prev_response_id (response id)
             # The id of an entire model turn (the whole response).
@@ -492,14 +547,15 @@ class _GenerateSampler:
 
             patch_text = ""
             reasoning_summary = ""
-            last_call_id = None  # capture tool call id to acknowledge the function_call
+            # capture tool call id to acknowledge the function_call
+            last_call_id = None
 
             try:
                 for item in (getattr(resp, "output", []) or []):
                     t = getattr(item, "type", None)
 
                     if t == "reasoning":
-                        for part in getattr(item, "summary", []) or []:
+                        for part in getattr(item, "summary", []):
                             if getattr(part, "type", "") == "summary_text":
                                 reasoning_summary += part.get("text", "")
 
@@ -531,25 +587,29 @@ class _GenerateSampler:
             if VERBOSE and reasoning_summary:
                 print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
 
-            # finalize via a follow-up responses.create so the server clears the pending tool call, then chain to the acknowledged id.
-            # Pending: The model ended the turn with a function_call. The server marks the turn as “requires tool output.” If you pass previous_response_id to this pending turn, the server blocks with “No tool output found…” because it’s still waiting for your tool’s result.
-            # Finalized: You submit the tool’s result (function_call_output via submit_tool_outputs or a follow-up create). That completes the turn. Now previous_response_id can safely point to this completed turn, and the model’s hidden reasoning artifacts are available for the next call.
+            if VERBOSE:
+                try:
+                    usage_dict = resp.model_dump()["usage"]
+                    input_tokens = usage_dict["input_tokens"]
+                    output_tokens = usage_dict["output_tokens"]
+                    total_tokens = usage_dict["total_tokens"]
+                    input_cached = usage_dict["input_tokens_details"]["cached_tokens"]
+                    reasoning_tokens = usage_dict["output_tokens_details"]["reasoning_tokens"]
+                    print(
+                        f"=== Token usage === input={input_tokens} (cached={input_cached}) "
+                        f"output={output_tokens} total={total_tokens} reasoning_tokens={reasoning_tokens}"
+                    )
+                except Exception:
+                    pass
+
+            # Remember pending response/call so the next turn can finalize inline.
             if last_call_id:
-                # Finalize the pending tool call with a concise result; this closes the turn
-                # so the next chained call can see hidden reasoning and outputs.
-                ack = client.responses.create(
-                    model=model,
-                    previous_response_id=resp.id,
-                    input=[{
-                        "type": "function_call_output",
-                        "call_id": last_call_id,
-                        # todo-now: feed actual tool output
-                        "output": "patch_applied",
-                    }],
-                )
-                self._prev_response_id = ack.id
+                self._pending_response_id = resp.id
+                self._pending_call_id = last_call_id
             else:
-                # no tool call -> chain to this response id
+                # No pending call: safe to chain immediately
+                self._pending_response_id = None
+                self._pending_call_id = None
                 self._prev_response_id = resp.id
 
             finish = "produced_patch" if patch_text else "no_patch"
@@ -563,6 +623,8 @@ class _GenerateSampler:
                     "reasoning_summary": reasoning_summary,
                     # expose raw response id to assist with debugging/analytics/chaining
                     "response_id": resp.id,
+                    # expose call id so callers can finalize later if desired
+                    "tool_call_id": last_call_id,
                 },
             )
 
