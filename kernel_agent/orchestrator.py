@@ -84,10 +84,6 @@ class KernelOptimizer:
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
-        # context shown to LLM: redacted forward (torch_fn removed), sliced internally by utils
-        fwd_snip = redact_torch_fn(fwd_fp, self.cfg.snippet_max_lines)
-        bwd_snip = _read_snippet(bwd_fp, self.cfg.snippet_max_lines)
-
         if temperature is not None:
             self.patcher.temperature = float(temperature)
 
@@ -101,17 +97,18 @@ class KernelOptimizer:
             try:
                 patch = self.patcher.propose_patch(
                     phase=header,
-                    bwd_file=bwd_fp,
-                    fwd_kernel_snippet=fwd_snip,
-                    bwd_kernel_snippet=bwd_snip,
+                    fwd_fp=fwd_fp,
+                    bwd_fp=bwd_fp,
                     state_facts=state_facts,
                 )
                 return patch, None
             except Exception as err_propose:
+                # import traceback
                 err_propose = f"{type(err_propose).__name__}: {err_propose}"
                 self.patcher.remember("llm.propose.error", err_propose)
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] propose error: {err_propose}")
+                    # print(f"[kernel-agent][it={it}] Full traceback:\n{traceback.format_exc()}")
                 return None, err_propose
 
         def _apply_once(patch) -> str | None:
@@ -248,13 +245,16 @@ class KernelOptimizer:
             print(f"[kernel-agent] Forward file: {fwd_fp}")
             print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
 
+        # Set fwd_fp early so run_with_fix can use it if it needs to call _llm_request_and_apply
+        self.fwd_fp = fwd_fp
+        self.bwd_fp = None  # Will be set after run_create_op succeeds
+
         def run_create_op():
             # for consistency call this in a child process as well (run_compile_child) even though compiler generated bwd doesn't OOB;
             # and if it OOBs a failure here should terminate the program anyway (so the that safety around "run_compile_child" is redundant)
             return run_compile_child(fwd_fp, overwrite_fp=None)
         child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, 0.25, "compile_error")
         self.bwd_fp = bwd_fp
-        self.fwd_fp = fwd_fp
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
         rollback = Rollback(

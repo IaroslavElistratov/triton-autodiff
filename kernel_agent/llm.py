@@ -27,7 +27,8 @@ from openai_harmony import (
 )
 
 
-from .utils import _env_truthy
+from .utils import _env_truthy, redact_torch_fn, _read_snippet
+from .rag import build_rag_block
 
 
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
@@ -139,6 +140,7 @@ class MinimalLLMPatchProvider:
     temperature: float = 0.0
     max_tokens: int = 1536
     context: int | None = None
+    snippet_max_lines: int = 400  # Max lines shown to LLM for fwd/bwd snippets
     # Tracks backend stop reason (e.g., "max_tokens") to disambiguate truncation
     # from other failure modes and report errors upstream.
     last_stop_reason: str = ""
@@ -159,6 +161,8 @@ class MinimalLLMPatchProvider:
         # Minimal per-run context to give the model continuity across iterations.
         # Stored as small text snippets. Not a chat transcript.
         self._history: list[str] = []
+        # RAG cache: forward kernel doesn't change during a run
+        self._rag_cache: str | None = None
 
     # called by the orchestrator
     def finalize_last_tool_call(self, output: str) -> None:
@@ -210,8 +214,8 @@ class MinimalLLMPatchProvider:
     #         self.history = self.history[-self.history_cap:]
 
     def propose_patch(self, *, phase: str,
-                      fwd_kernel_snippet: str,
-                      bwd_file: str, bwd_kernel_snippet: str,
+                      fwd_fp: str,
+                      bwd_fp: str,
                       state_facts=None) -> str:
 
         system = (
@@ -270,6 +274,39 @@ class MinimalLLMPatchProvider:
         # initial_kernel_details = initial_kernel_details if include_initial_details else ""
         # system = base + initial_kernel_details + tail
 
+
+        # Create snippets (context shown to LLM: redacted forward, sliced backward)
+        fwd_kernel_snippet = redact_torch_fn(fwd_fp, self.snippet_max_lines)
+        bwd_kernel_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
+
+        # Optional RAG block: append compact retrieved references to the phase header
+        # Cache the RAG block since forward kernel doesn't change during a run
+        if self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG", "0"):
+            try:
+                from pathlib import Path
+                index_path = Path(__file__).parent / "kernel_embeddings.pkl"
+                top_k = int(os.environ.get("KERNEL_AGENT_RAG_TOPK", "2"))
+                min_sim = float(os.environ.get("KERNEL_AGENT_RAG_MIN_SIM", "0.80"))
+                # 8k chars (~2k tokens at 4 chars/token)
+                # some attention bwd are 56k tokens
+                token_budget_chars = 60000
+                # Use full redacted forward (no line cap) to maximize retrieval quality
+                fwd_source_full = redact_torch_fn(fwd_fp, None)
+                self._rag_cache = build_rag_block(
+                    index_path=str(index_path),
+                    fwd_source=fwd_source_full,
+                    top_k=top_k,
+                    min_sim=min_sim,
+                    token_budget_chars=token_budget_chars,
+                    debug=VERBOSE
+                )
+            except Exception as e:
+                self._rag_cache = ""
+                if VERBOSE:
+                    print(f"[kernel-agent] RAG retrieval failed: {type(e).__name__}: {e}")
+
+        rag_block = self._rag_cache or ""
+
         # user prompt
         facts_lines = "\n".join(f"{k}={v}" for k, v in (state_facts or {}).items())
         user = (
@@ -279,6 +316,7 @@ class MinimalLLMPatchProvider:
             + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
             # path is not shown to the model; the workflow injects the target file name
             + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
+            + rag_block
             # optional: gradcheck, profiler hint, bench -- info is carried in state_facts below
             + (f"State:\n{facts_lines}\n" if facts_lines else "")
             + PATCH_SPEC
@@ -364,7 +402,7 @@ class MinimalLLMPatchProvider:
         # Ensure target file line points to requested file (fix any mismatched path)
         # Normalize the file header so the model doesn't spend
         # tokens on it and we avoid target-path drift in apply
-        patch_text = _ensure_update_file_target(patch_text, bwd_file)
+        patch_text = _ensure_update_file_target(patch_text, bwd_fp)
         return patch_text
 
 
