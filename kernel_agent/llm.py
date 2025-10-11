@@ -708,8 +708,7 @@ def call_openai_api(sampler, system_text: str, user_text: str, message_list: lis
         tool_choice="required",
         reasoning={
             "effort": sampler.reasoning_effort,
-            # todo:
-            # "summary": "auto",
+            "summary": "auto", # "detailed"
         },
         max_output_tokens=sampler.max_tokens,
         **temperature_kw,
@@ -732,10 +731,12 @@ def call_openai_api(sampler, system_text: str, user_text: str, message_list: lis
         for item in (getattr(resp, "output", []) or []):
             t = getattr(item, "type", None)
 
-            if t == "reasoning":
-                for part in getattr(item, "summary", []):
-                    if getattr(part, "type", "") == "summary_text":
-                        reasoning_summary += part.get("text", "")
+            if getattr(item, "type", None) == "reasoning":
+                for seg in (getattr(item, "summary", []) or []):
+                    if getattr(seg, "type", "") == "summary_text":
+                        txt = getattr(seg, "text", "")
+                        if txt:
+                            reasoning_summary += txt
 
             # Responses returns custom function calls as function_call items
             elif t == "function_call" and getattr(item, "name", "") == "apply_patch":
@@ -762,23 +763,21 @@ def call_openai_api(sampler, system_text: str, user_text: str, message_list: lis
         else:
             patch_text = pt
 
-    if VERBOSE and reasoning_summary:
-        print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
-
     if VERBOSE:
-        try:
-            usage_dict = resp.model_dump()["usage"]
-            input_tokens = usage_dict["input_tokens"]
-            output_tokens = usage_dict["output_tokens"]
-            total_tokens = usage_dict["total_tokens"]
-            input_cached = usage_dict["input_tokens_details"]["cached_tokens"]
-            reasoning_tokens = usage_dict["output_tokens_details"]["reasoning_tokens"]
-            print(
-                f"=== Token usage === input={input_tokens} (cached={input_cached}) "
-                f"output={output_tokens} total={total_tokens} reasoning_tokens={reasoning_tokens}"
-            )
-        except Exception:
-            pass
+
+        if reasoning_summary:
+            print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
+
+        usage_dict = resp.model_dump()["usage"]
+        input_tokens = usage_dict["input_tokens"]
+        output_tokens = usage_dict["output_tokens"]
+        total_tokens = usage_dict["total_tokens"]
+        input_cached = usage_dict["input_tokens_details"]["cached_tokens"]
+        reasoning_tokens = usage_dict["output_tokens_details"]["reasoning_tokens"]
+        print(
+            f"=== Token usage === input={input_tokens} (cached={input_cached}) "
+            f"output={output_tokens} total={total_tokens} reasoning_tokens={reasoning_tokens}"
+        )
 
     # Update chain state so the next turn can finalize inline
     sampler._chain.on_response(resp.id, last_call_id)
