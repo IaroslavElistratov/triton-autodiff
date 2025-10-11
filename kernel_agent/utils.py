@@ -9,34 +9,6 @@ from typing import Any
 import torch
 from triton.runtime.jit import JITFunction
 
-# def _norm_bench(x) -> dict[str, float]:
-#     """Normalize benchmark() result to {'throughput': float} if possible."""
-#     if isinstance(x, (int, float)):
-#         return {"throughput": float(x)}
-#     if isinstance(x, dict):
-#         out = {}
-#         for k, v in x.items():
-#             if isinstance(v, (int, float)):
-#                 out[k.lower()] = float(v)
-#         return out
-#     # last resort: loose parse from string
-#     try:
-#         return {"throughput": float(str(x).strip().split()[0])}
-#     except Exception:
-#         return {}
-
-# def _better(new: dict[str, float], best: dict[str, float] | None, min_rel: float) -> bool:
-#     """Strict improvement gate (relative throughput)."""
-#     if not new: return False
-#     if best is None or "throughput" not in best: return "throughput" in new
-#     if "throughput" not in new: return False
-#     base = best["throughput"]
-#     return new["throughput"] >= base * (1.0 + min_rel)
-
-# def _summ_bench(m: dict[str, float] | None) -> str:
-#     if not m: return "no bench yet"
-#     return ", ".join(f"{k}={v:.4g}" for k, v in m.items() if isinstance(v, (int, float)))
-
 
 # todo:
 # Normalize repetitive wrappers from child/parent to keep the message concise.
