@@ -28,7 +28,7 @@ def main() -> None:
     ap.add_argument("--checkpoint", metavar="FILE", type=str, help="Path to the SafeTensors checkpoint (ignored when --backend openai)")
     ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="medium", choices=["high", "medium", "low"], help="Reasoning effort")
 
-    ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=32768, help="Max context length (tokens; ignored when --backend openai)")
+    ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=262144, help="Max context length (tokens; ignored when --backend openai)")
     ap.add_argument("--mode", type=str, default="regular", choices=["regular", "phased"], help="Optimization strategy mode")
 
     # RAG configuration (optional; default off). When enabled, appends a compact block with
@@ -59,7 +59,7 @@ def main() -> None:
                  min_rel_improvement=args.min_rel_impr)
     llm = MinimalLLMPatchProvider(
         temperature=0.7,
-        max_tokens=32768,
+        max_tokens=262144,
         reasoning_effort=args.reasoning_effort,
         context=args.context,
         snippet_max_lines=cfg.snippet_max_lines,
