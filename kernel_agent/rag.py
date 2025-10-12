@@ -211,24 +211,35 @@ def build_rag_block(
     lines.append("- Edit ONLY my backward file; preserve stub/kernel signatures; no unrelated refactors.\n")
 
     for fp in ranked:
-        fwd_prev_lines = (documents.get(fp, "").splitlines()[:4])
-        bwd_snip = _truncate(backward_docs.get(fp, ""), per_example_chars)
-        lines.append(f"\nExample: {fp}")
-        if fwd_prev_lines:
-            lines.append("Forward (preview):")
-            lines.extend(f"  {ln}" for ln in fwd_prev_lines)
+        # fwd_full = documents.get(fp, "")
+        bwd_full = backward_docs.get(fp, "")
+        bwd_snip = _truncate(bwd_full, per_example_chars)
+
+        if VERBOSE:
+            print(f"[kernel-agent][RAG DEBUG] {fp}: bwd_full={len(bwd_full)} chars, bwd_snip={len(bwd_snip)} chars, per_example_chars={per_example_chars}")
+
         if bwd_snip:
             lines.append("Backward (reference):")
             lines.append(bwd_snip)
+        else:
+            if VERBOSE:
+                print(f"[kernel-agent][RAG DEBUG] WARNING: bwd_snip is empty for {fp}!")
 
     lines.append("\nAdaptation checklist for MY backward:")
     lines.append("- Match argument order, dtypes, tl.constexpr, grid mapping (program_id axes).")
     lines.append("- Match pointer math/strides, masks/tail handling, loop bounds/steps.")
     lines.append("- Keep accumulation dtype and cast boundaries consistent with my forward.")
-    lines.append("- Keep tl.atomic_* unless current phase explicitly removes them.")
+    # lines.append("- Keep tl.atomic_* unless current phase explicitly removes them.")
 
     out = "\n".join(lines)
-    return _truncate(out, token_budget_chars)
+    truncated = _truncate(out, token_budget_chars)
+
+    if VERBOSE:
+        print(f"[kernel-agent][RAG DEBUG] Block length before truncate: {len(out)}")
+        print(f"[kernel-agent][RAG DEBUG] Block length after truncate: {len(truncated)}")
+        print(f"[kernel-agent][RAG DEBUG] Token budget: {token_budget_chars}")
+
+    return truncated
 
 
 
