@@ -72,6 +72,11 @@ def main() -> None:
         os.environ["KERNEL_AGENT_RAG_TOPK"] = str(int(args.rag_topk))
         os.environ["KERNEL_AGENT_RAG_MIN_SIM"] = str(float(args.rag_min_sim))
 
+        # RAG prompt augmentation: only add reference examples when using compiler init
+        # RAG-only init should NOT add RAG prompts (would duplicate the working kernel)
+        if args.compiler:
+            os.environ["KERNEL_AGENT_RAG_PROMPTS"] = "1"
+
     # Determine initialization method:
     # - use_compiler: True when --compiler flag is set
     # - use_rag: True when --rag flag is set

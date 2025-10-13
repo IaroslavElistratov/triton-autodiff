@@ -281,7 +281,9 @@ class MinimalLLMPatchProvider:
 
         # Optional RAG block: append compact retrieved references to the phase header
         # Cache the RAG block since forward kernel doesn't change during a run
-        if self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG", "0"):
+        # Only add when KERNEL_AGENT_RAG_PROMPTS is set (--rag --compiler)
+        # RAG-only init skips this to avoid duplicating the working kernel in context
+        if self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG_PROMPTS", "0"):
             try:
                 from pathlib import Path
                 index_path = Path(__file__).parent / "kernel_embeddings.pkl"
