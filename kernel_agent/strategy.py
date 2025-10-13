@@ -85,6 +85,39 @@ class BaseStrategy:
         # No-op in the base class.
         pass
 
+    def workflow_section(self) -> str:
+        """Return workflow context for system prompt.
+
+        Describes the agent's role, workflow, and high-level goal.
+        Override in subclasses for strategy-specific workflow descriptions.
+        """
+        return (
+            "\n### Workflow context\n"
+            "You are a Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step.\n"
+            "You will have multiple turns to refine the backward kernel.\n" # , so do not propose large overly-eager kernel rewrites.
+            "You will be provided a backward kernel which computes per-input gradients, use it as the starting point and make edits to improve its performance.\n"
+            "You must adhere to user's Phase-specific goals and guardrails.\n"
+            # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference.\n"
+        )
+
+    def kernel_details_section(self) -> str:
+        """Return initial kernel details for system prompt.
+
+        Describes characteristics of the starting backward kernel that are specific
+        to how it was generated (compiler vs RAG vs other methods).
+        Override in subclasses or return empty string if not applicable.
+        """
+        return (
+            # todo: show this only in the 1st iter?
+            # comment: do not instruct to e.g. "for loops" or "remove atomics" -- this is handled in Phase[s]. Below is just general info only
+            "\n### Initial backward kernel details\n"
+            # " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
+            "* variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
+            "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened).\n"
+            # " * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
+            # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
+        )
+
 class RegularStrategy(BaseStrategy):
     def __init__(self, temp: float = 0.7) -> None:
         self.name = "regular"
@@ -213,6 +246,21 @@ class RAGAdaptationStrategy(BaseStrategy):
         # No phase advance since there's only one phase
         self.pending_advance_from = None
 
+    def workflow_section(self) -> str:
+        """Return RAG-specific workflow context emphasizing adaptation over optimization."""
+        return (
+            "\n### Workflow context\n"
+            "You are a Triton kernel adapter. You are called to adapt a retrieved backward kernel to work with a specific forward kernel.\n"
+            "Workflow: RAG retrieval -> [adapt -> gradcheck] repeats until gradcheck passes on all shapes.\n"
+            "The retrieved backward was written for a DIFFERENT forward kernel and needs adaptation to compute correct gradients for THIS forward.\n"
+            "Your goal is correctness (pass gradcheck), not optimization. The retrieved kernel is already optimized.\n"
+            "You will have multiple turns to refine the adaptation. Adhere to Phase-specific adaptation goals.\n"
+        )
+
+    def kernel_details_section(self) -> str:
+        """RAG kernels don't have compiler-specific characteristics, return empty."""
+        return ""
+
     def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
         """Return adaptation phase instructions and temperature."""
         # Use lower temperature for adaptation (precision critical)
@@ -220,25 +268,30 @@ class RAGAdaptationStrategy(BaseStrategy):
         temp = 0.25 if not parity_ok else 0.5
 
         header = (
-            "Phase = Adapt Retrieved Kernel.\n"
-            "The backward kernel was retrieved from a similar forward kernel.\n"
-            "CRITICAL: Adapt it to match THIS EXACT forward kernel:\n"
+            "Phase = Adapt Retrieved Backward Kernel\n"
             "\n"
-            "Required adaptations (check ALL):\n"
-            "- Function signatures: match stub and kernel names, argument order, dtypes\n"
-            "- Grid mapping: adjust program_id axes to match forward's parallelization\n"
-            "- Tensor indexing: fix strides, offsets, pointer arithmetic for your tensors\n"
-            "- Boundary handling: update masks and tail conditions for your shapes\n"
-            "- Loop bounds: align ranges, steps, block sizes with forward's tiling\n"
-            "- Atomics footprint: preserve location and semantics if present\n"
+            "Task: Adapt retrieved backward to compute correct gradients for THIS forward kernel.\n"
+            # "No algorithm changes.\n"
+            "The retrieved backward was written for a DIFFERENT forward kernel - its signatures,\n"
+            "argument order, and indexing will NOT match yours. Perform adaptation to\n"
+            "establish correspondence between retrieved backward and MY forward:\n"
             "\n"
-            "Do NOT change:\n"
-            "- Mathematical operations or algorithms\n"
-            "- Optimization patterns that are working (tiling, coalescing)\n"
-            "- Memory access patterns unless required for correctness\n"
+            "Adaptations required (not exhaustive):\n"
+            "- Function signatures: Match kernel/stub names to MY forward's naming convention\n"
+            "- Argument order: Backward must accept forward's inputs in SAME order forward defines them\n"
+            "  (Critical: gradcheck expects specific signature - wrong order = immediate failure)\n"
+            "- Dtypes: Match MY forward's input/output dtypes exactly\n"
+            "- Indexing: Fix strides, offsets, pointer arithmetic for MY tensor shapes\n"
+            "  (Access patterns may differ - backward can read/write in different order than forward)\n"
+            "- Boundaries: Update masks and tail handling for MY tensor shapes\n"
             "\n"
-            f"Success Gates: gradcheck_ok={parity_ok} (testing all shapes)\n"
-            "Output only minimal edits needed for full parity. No refactoring.\n"
+            "Preserve from retrieved backward:\n"
+            "- Algorithmic structure (retrieved backward computes correct gradients for similar -- but NOT exactly our -- fwd kernel, so need adapt operations to compute correct gradients for our fwd kernel specifically)\n"
+            "- Atomics (if present - preserve location and accumulation semantics)\n"
+            "- Parallelization strategy (grid/loop structure may differ from forward - that's expected)\n"
+            "\n"
+            f"Success Gates: gradcheck_ok={parity_ok} (must pass on all SWEEP shapes)\n"
+            "Focus on structural correspondence with MY forward, not optimization.\n"
         )
         return header, temp
 

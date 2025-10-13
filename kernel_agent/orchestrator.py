@@ -102,6 +102,7 @@ class KernelOptimizer:
             try:
                 patch = self.patcher.propose_patch(
                     phase=header,
+                    strategy=self.strategy,
                     fwd_fp=fwd_fp,
                     bwd_fp=bwd_fp,
                     state_facts=state_facts,
@@ -470,12 +471,14 @@ class KernelOptimizer:
                     print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
 
                 # Decide the fix prompt header:
-                # - If we are in Phase 1, include the phase header bc Phase 1's explicit goal is to restore
-                #   parity (by re-introducing loops). So add that header to anchor fixes to loop re-introduction.
-                # - Otherwise (regular strategy or later phases), issue a correctness-only header
-                #   to avoid confusing the model with optimization goals while fixing parity.
+                # - Phase 1 (loops): include phase header since the explicit goal is parity via loop re-introduction
+                # - RAG adaptation: include phase header since adaptation is the core goal
+                # - Otherwise (regular strategy or other phases): issue correctness-only header to avoid confusing
+                #   the model with optimization goals while fixing parity
                 is_loop_phase = self.strategy.name == "phased" and self.strategy.i == 1
-                fix_header = (phase_text + "\n" if is_loop_phase else "") + "ONLY restore correctness to pass gradcheck.\n"
+                is_rag_adaptation = self.strategy.name == "rag_adaptation"
+                include_phase = is_loop_phase or is_rag_adaptation
+                fix_header = (phase_text + "\n" if include_phase else "") + "ONLY restore correctness to pass gradcheck.\n"
 
                 self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,

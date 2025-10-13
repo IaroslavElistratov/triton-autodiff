@@ -214,19 +214,18 @@ class MinimalLLMPatchProvider:
     #         self.history = self.history[-self.history_cap:]
 
     def propose_patch(self, *, phase: str,
+                      strategy,
                       fwd_fp: str,
                       bwd_fp: str,
                       state_facts=None) -> str:
 
+        # Compose system prompt from strategy-specific sections + generic sections
+        # Strategy provides: workflow_section(), kernel_details_section()
+        # Generic sections: allowed edits, patch requirements, docstring requirements, minor notes
         system = (
-            "\n### Workflow context\n"
-            "You are a Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step.\n"
-            "You will have multiple turns to refine the backward kernel.\n" # , so do not propose large overly-eager kernel rewrites.
-            "You will be provided a backward kernel which computes per-input gradients, use it as the starting point and make edits to improve its performance.\n"
-            "You must adhere to user's Phase-specific goals and guardrails.\n"
-            # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference.\n"
+            strategy.workflow_section()
 
-            "\n### Allowed edits\n"
+            + "\n### Allowed edits\n"
             # "You must modify backward kernel; but preserve function names and pointer/mask semantics.\n"
             "The backward file contains BOTH the backward Triton kernel and a generated backward stub; you can (and likely should) edit both.\n"
             "Do NOT change the backward stub's signature, you can edit body of the stub but not its signature.\n"
@@ -234,16 +233,10 @@ class MinimalLLMPatchProvider:
             "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs.\n"
             "You can edit _mk_block_ptr when it's present.\n"
 
-            # todo: show this only in the 1st iter?
-            # comment: do not instruct to e.g. "for loops" or "remove atomics" -- this is handled in Phase[s]. Below is just general info only
-            "\n### Initial backward kernel details\n"
-            # " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
-            "* variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
-            "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened).\n"
-            # " * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
-            # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
+            # Strategy-specific kernel details (compiler: unrolled/fwd_bwd prefixes; RAG: empty)
+            + strategy.kernel_details_section()
 
-            "\n### Patch requirements\n"
+            + "\n### Patch requirements\n"
             "In each turn, you must call functions.apply_patch({patch: ...}) at most once, and only as your final action for that turn.\n"
             "Before calling it, form a high-level plan of your changes in your private reasoning and rehearse the patch.\n"
             "When you call functions.apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Include the *** Begin Patch / *** End Patch envelope inside the patch argument; do not echo the rule list.\n"
