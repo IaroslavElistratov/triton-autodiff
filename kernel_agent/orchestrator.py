@@ -1,6 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import os, re, json, sys
+import hashlib
+from pathlib import Path
 
 import torch
 
@@ -10,6 +12,7 @@ from .worker import run_gradcheck_child, run_bench_child, run_compile_child
 from .strategy import make_strategy, PhasedStrategy
 from .rollback import Rollback
 from .tools.benchmark import PerfTracker
+from .rag import _load_index, _embed_query, _cosine
 
 
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
@@ -29,6 +32,8 @@ class Config:
     min_rel_improvement: float = 0.10   # require >= +10% throughput to accept
     # todo: a better way?
     snippet_max_lines: int = 400        # bound context shown to the LLM
+    use_compiler: bool = True           # use MLIR compiler to generate initial backward
+    use_rag: bool = False           # use RAG retrieval for initial backward (when compiler is False)
 
 
 # Runtime exceptions (gradcheck/bench/compile child fails): handled once per iteration in run_with_fix;
@@ -233,28 +238,97 @@ class KernelOptimizer:
             raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
 
-        # TTIR from autodiff then raise to Python once; use as seed and target
-        # using output of triton-autodiff directly as the initial version of the backward kernel
-        # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodiff instead
-        # just using output of triton-autodiff as patcher.kernel_snippet)
-
-        # directly re-use api.py as otherwise i'd need to re-impl all the below funcs which i need
-        # raise_to_triton_lang, load_raised_jit, wrap_bwd_kernel, DifferentiatedCompiledKernel, helper, autodiff
+        # Initialize backward kernel using either compiler or RAG retrieval
+        # TODO: (future) Consider seed abstraction (--seed {auto,rag,compiler,user,none})
+        # where "auto" tries RAG first with fallback to compiler, "user" allows custom
+        # initial kernel, and "none" starts from scratch. Current dual-boolean approach
+        # works but seed abstraction would be cleaner and more extensible.
         if VERBOSE:
             print("[kernel-agent] Starting run")
             print(f"[kernel-agent] Forward file: {fwd_fp}")
-            print("[kernel-agent] Compiling and tracing user kernel via create_op(...) (seed backward)")
 
         # Set fwd_fp early so run_with_fix can use it if it needs to call _llm_request_and_apply
         self.fwd_fp = fwd_fp
-        self.bwd_fp = None  # Will be set after run_create_op succeeds
+        self.bwd_fp = None  # Will be set after initialization
 
-        def run_create_op():
-            # for consistency call this in a child process as well (run_compile_child) even though compiler generated bwd doesn't OOB;
-            # and if it OOBs a failure here should terminate the program anyway (so the that safety around "run_compile_child" is redundant)
-            return run_compile_child(fwd_fp, overwrite_fp=None)
-        child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, 0.25, "compile_error")
-        self.bwd_fp = bwd_fp
+        # Backward kernel initialization: select method based on flags
+        # - --rag alone: Use RAG to retrieve similar backward as starting point
+        # - --compiler alone: Use MLIR compiler to generate backward
+        # - --rag --compiler: Use compiler for initialization; RAG provides prompt augmentation only
+        #   (retrieved backward is shown to LLM as reference via KERNEL_AGENT_RAG_PROMPTS in llm.py,
+        #    but compiler-generated backward is used as the actual starting kernel for optimization)
+        if self.cfg.use_rag and not self.cfg.use_compiler:
+            # RAG initialization: retrieve most similar backward kernel
+            if VERBOSE:
+                print("[kernel-agent] Using RAG to retrieve initial backward kernel")
+                print("[kernel-agent] Strategy: RAGAdaptationStrategy (single adaptation phase)")
+
+            # Get the forward source for embedding
+            fwd_source = redact_torch_fn(fwd_fp, None)
+            if not fwd_source or not fwd_source.strip():
+                raise ValueError(f"Forward kernel file is empty or could not be read: {fwd_fp}")
+
+            # Retrieve most similar backward kernel using existing rag.py internal functions
+            index_path = Path(__file__).parent / "kernel_embeddings.pkl"
+            min_sim = float(os.environ.get("KERNEL_AGENT_RAG_MIN_SIM", "0.75"))
+
+            # Load index and embed query (same logic as build_rag_block)
+            try:
+                embeddings, documents, backward_docs, file_list, openai_model = _load_index(str(index_path))
+                query_embedding = _embed_query(fwd_source, model=openai_model)
+            except Exception as e:
+                raise ValueError(f"Failed to load RAG index or embed query: {e}")
+
+            # Find best match above threshold
+            best_match = None
+            best_similarity = -1.0
+            best_content = None
+            for fp in file_list:
+                sim = _cosine(query_embedding, embeddings[fp])
+                if sim >= min_sim and sim > best_similarity:
+                    content = backward_docs.get(fp, "")
+                    if content:  # Only consider if backward exists
+                        best_match = fp
+                        best_similarity = sim
+                        best_content = content
+
+            if not best_match:
+                raise ValueError(f"No similar kernels found in RAG index (similarity >= {min_sim:.2f}). "
+                               "Try lowering --rag-min-sim or use --compiler instead.")
+
+            # Save retrieved kernel to generated directory
+            digest = hashlib.sha256(fwd_source.encode()).hexdigest()[:10]
+            gen_dir = f"generated/{digest}"
+            os.makedirs(gen_dir, exist_ok=True)
+            bwd_fp = f"{gen_dir}/raised.py"
+
+            with open(bwd_fp, "w") as f:
+                f.write(best_content)
+
+            if VERBOSE:
+                print(f"[kernel-agent] Retrieved backward from '{best_match}' (similarity: {best_similarity:.3f})")
+                print(f"[kernel-agent] Saved to: {bwd_fp}")
+
+            self.bwd_fp = bwd_fp
+
+        elif self.cfg.use_compiler:
+            # TTIR from autodiff then raise to Python once; use as seed and target
+            # using output of triton-autodiff directly as the initial version of the backward kernel
+            # to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodiff instead
+            # just using output of triton-autodiff as patcher.kernel_snippet)
+            if VERBOSE:
+                print("[kernel-agent] Using MLIR compiler to generate initial backward kernel")
+
+            def run_create_op():
+                # for consistency call this in a child process as well (run_compile_child) even though compiler generated bwd doesn't OOB;
+                # and if it OOBs a failure here should terminate the program anyway (so the that safety around "run_compile_child" is redundant)
+                return run_compile_child(fwd_fp, overwrite_fp=None)
+            child_ran_ok, bwd_fp = self.run_with_fix(None, run_create_op, 0.25, "compile_error")
+            self.bwd_fp = bwd_fp
+
+        else:
+            # Should not reach here due to validation in main.py
+            raise ValueError("No initialization method specified (need --compiler or --rag)")
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
         rollback = Rollback(
@@ -267,19 +341,33 @@ class KernelOptimizer:
         # when llm is called, it can messup the kernel (pass rate 1/6 -> 0/6), in which case
         # rollback.maybe_snapshot_or_restore below will do nothing bc the first thing it will see is (0/6)
         rollback.snapshot("naive_backward")
-        # without this the rollback logic doesn't count iterations regressed under tolerance;
-        # todo: setting to 1 isn't general -- it's possible that for some kernels my naive grad will
-        # fail (not guarantied that it will always pass one test (plus it also depends on the shapes
-        # in the tests which users have). So alternatively, call gradcheck here followed by
-        # rollback.maybe_snapshot_or_restore(stats) here
-        rollback.best_pass_count = 1
 
-        tracker = PerfTracker(min_rel_improvement=self.cfg.min_rel_improvement,
+        # Set initial best_pass_count based on initialization method
+        # Compiler-generated kernels: assume at least 1 test passes (unrolled kernel typically works for single shape)
+        # RAG-retrieved kernels: don't assume anything - kernel might not even compile for this forward
+        if self.cfg.use_rag and not self.cfg.use_compiler:
+            # RAG-only initialization - retrieved kernel may need adaptation before it passes tests
+            rollback.best_pass_count = 0
+        else:
+            # Compiler initialization (with or without RAG prompt augmentation)
+            rollback.best_pass_count = 1
+
+        # For RAG-initialized kernels, accept baseline performance (>= 1.0) since they're already optimized
+        # For compiler-generated kernels, require the configured improvement threshold
+        rag_init = self.cfg.use_rag and not self.cfg.use_compiler
+        # for rag_init: after parity, accept any change that doesn't regress performance
+        #  - retrieved kernels are already optimized, unlikely to improve significantly
+        #  - bar of 10% improvement (default min_rel_improvement) would reject all changes
+        min_improvement = 0.0 if rag_init else self.cfg.min_rel_improvement
+        tracker = PerfTracker(min_rel_improvement=min_improvement,
                               patience_perf_stop=self.cfg.patience_perf_stop)
-
 
         if VERBOSE:
             print(f"[kernel-agent] Initial backward path: {bwd_fp}")
+            if rag_init:
+                print(f"[kernel-agent] Using accept-eq policy: will accept >= 1.0x speedup (baseline performance)")
+            else:
+                print(f"[kernel-agent] Requiring {self.cfg.min_rel_improvement:.0%} improvement for acceptance")
 
 
         device = get_user_device_info()
@@ -291,7 +379,8 @@ class KernelOptimizer:
                 print(f"[kernel-agent][it={it}] Begin iteration")
 
             # todo: move this inside PhasedStrategy
-            # Phase-0: throttle SWEEP to the first shape in children
+            # Phase-0: throttle SWEEP to the first shape in children;
+            # RAGAdaptationStrategy never throttles since it has name="rag_adaptation"
             is_readability_phase = self.strategy.name == "phased" and self.strategy.i == 0
             if is_readability_phase:
                 os.environ["KERNEL_AGENT_SWEEP_LIMIT"] = "1"
@@ -351,6 +440,14 @@ class KernelOptimizer:
             self.strategy.maybe_advance(bwd_fp, payload_gradcheck)
 
             phase_text, temp = self.strategy.current_phase(parity_ok)
+
+            # RAG-only mode: stop immediately after parity is achieved
+            # Retrieved kernels are already optimized - once adapted to pass gradcheck, no further optimization needed
+            if parity_ok and rag_init:
+                stop_reason = "rag_parity_achieved"
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes")
+                break
 
             # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
             if not parity_ok:

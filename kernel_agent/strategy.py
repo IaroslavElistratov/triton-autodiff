@@ -199,9 +199,69 @@ class PhasedStrategy(BaseStrategy):
             print(f"[kernel-agent] Phase gate: {status} for '{next_phase_name}'; {action}")
 
 
+class RAGAdaptationStrategy(BaseStrategy):
+    """Single-phase strategy for RAG-initialized kernels.
+
+    Unlike compiler-generated kernels that need multi-phase refinement (readability,
+    loops, atomics, coalesce), RAG-retrieved kernels are already optimized and just
+    need adaptation to the specific forward kernel.
+    """
+    def __init__(self):
+        self.name = "rag_adaptation"
+        # todo-low: cleanup (rm for this phase)
+        self.i = 0  # for compatibility with rollback system
+        # No phase advance since there's only one phase
+        self.pending_advance_from = None
+
+    def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
+        """Return adaptation phase instructions and temperature."""
+        # Use lower temperature for adaptation (precision critical)
+        # Higher temp after baseline acceptance for optional optimization
+        temp = 0.25 if not parity_ok else 0.5
+
+        header = (
+            "Phase = Adapt Retrieved Kernel.\n"
+            "The backward kernel was retrieved from a similar forward kernel.\n"
+            "CRITICAL: Adapt it to match THIS EXACT forward kernel:\n"
+            "\n"
+            "Required adaptations (check ALL):\n"
+            "- Function signatures: match stub and kernel names, argument order, dtypes\n"
+            "- Grid mapping: adjust program_id axes to match forward's parallelization\n"
+            "- Tensor indexing: fix strides, offsets, pointer arithmetic for your tensors\n"
+            "- Boundary handling: update masks and tail conditions for your shapes\n"
+            "- Loop bounds: align ranges, steps, block sizes with forward's tiling\n"
+            "- Atomics footprint: preserve location and semantics if present\n"
+            "\n"
+            "Do NOT change:\n"
+            "- Mathematical operations or algorithms\n"
+            "- Optimization patterns that are working (tiling, coalescing)\n"
+            "- Memory access patterns unless required for correctness\n"
+            "\n"
+            f"Success Gates: gradcheck_ok={parity_ok} (testing all shapes)\n"
+            "Output only minimal edits needed for full parity. No refactoring.\n"
+        )
+        return header, temp
+
+    # todo-low: cleanup (rm for this phase)
+    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
+        """No-op for single-phase strategy."""
+        pass
+
+    def set_phase_index(self, i: int) -> None:
+        """For compatibility with rollback - always stays at phase 0."""
+        if i != 0 and VERBOSE:
+            print(f"[kernel-agent] RAGAdaptationStrategy only has one phase (attempted to set i={i})")
+        self.i = 0
+
+
 def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
     # Factory: allows toggling strategy with an env flag without touching the loop.
-    return PhasedStrategy() if mode == "phased" else RegularStrategy(default_temp)
+    if mode == "phased":
+        return PhasedStrategy()
+    elif mode == "rag_adaptation":
+        return RAGAdaptationStrategy()
+    else:
+        return RegularStrategy(default_temp)
 
 
 
