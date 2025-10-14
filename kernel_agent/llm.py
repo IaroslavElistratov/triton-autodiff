@@ -106,7 +106,6 @@ Patch guardrails:
   - '-' for removed text (from the current file)
   - '+' for inserted text
 - Do not include any text outside the patch block.
-- Do NOT change the backward stub's signature.
 
 Use this exact envelope:
 *** Begin Patch
@@ -122,6 +121,7 @@ Minimal example:
 +    x = new_value
 *** End Patch
 """
+# Do NOT change the backward stub's signature.
 # attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
 # "- ≤120 changed lines per patch.\n"
 
@@ -220,18 +220,14 @@ class MinimalLLMPatchProvider:
                       state_facts=None) -> str:
 
         # Compose system prompt from strategy-specific sections + generic sections
-        # Strategy provides: workflow_section(), kernel_details_section()
-        # Generic sections: allowed edits, patch requirements, docstring requirements, minor notes
+        # Strategy provides: workflow_section(), allowed_edits_section(), kernel_details_section()
+        # Generic sections: patch requirements, docstring requirements, minor notes
         system = (
             strategy.workflow_section()
 
             + "\n### Allowed edits\n"
-            # "You must modify backward kernel; but preserve function names and pointer/mask semantics.\n"
-            "The backward file contains BOTH the backward Triton kernel and a generated backward stub; you can (and likely should) edit both.\n"
-            "Do NOT change the backward stub's signature, you can edit body of the stub but not its signature.\n"
-            "You can edit the backward kernel signature and its body (but not stub's signature). Do not rename or move the file.\n"
-            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs.\n"
-            "You can edit _mk_block_ptr when it's present.\n"
+            # Strategy-specific allowed edits (compiler: preserve stub signature; RAG: adapt stub signature)
+            + strategy.allowed_edits_section()
 
             # Strategy-specific kernel details (compiler: unrolled/fwd_bwd prefixes; RAG: empty)
             + strategy.kernel_details_section()

@@ -208,7 +208,7 @@ def build_rag_block(
     lines: list[str] = []
     lines.append("[Retrieved backward references — adapt, don't copy]\n")
     lines.append("- Use these as patterns to ADAPT my current backward. They are similar but NOT exactly for my forward.\n")
-    lines.append("- Edit ONLY my backward file; preserve stub/kernel signatures; no unrelated refactors.\n")
+    lines.append("- Edit ONLY my backward file to match MY forward's signature and semantics; no unrelated refactors.\n")
 
     for fp in ranked:
         # fwd_full = documents.get(fp, "")

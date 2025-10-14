@@ -118,6 +118,24 @@ class BaseStrategy:
             # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
         )
 
+    def allowed_edits_section(self) -> str:
+        """Return allowed edits constraints for system prompt.
+
+        Describes what the LLM is allowed to modify in the backward kernel.
+        Override in subclasses for strategy-specific constraints.
+
+        Compiler-generated kernels: Stub signature is correct, don't change it.
+        RAG-retrieved kernels: Stub signature may need adaptation to match forward.
+        """
+        return (
+            # "You must modify backward kernel; but preserve function names and pointer/mask semantics.\n"
+            "The backward file contains BOTH the backward Triton kernel and a generated backward stub; you can (and likely should) edit both.\n"
+            "Do NOT change the backward stub's signature, you can edit body of the stub but not its signature.\n"
+            "You can edit the backward kernel signature and its body (but not stub's signature). Do not rename or move the file.\n"
+            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs.\n"
+            "You can edit _mk_block_ptr when it's present.\n"
+        )
+
 class RegularStrategy(BaseStrategy):
     def __init__(self, temp: float = 0.7) -> None:
         self.name = "regular"
@@ -260,6 +278,17 @@ class RAGAdaptationStrategy(BaseStrategy):
     def kernel_details_section(self) -> str:
         """RAG kernels don't have compiler-specific characteristics, return empty."""
         return ""
+
+    def allowed_edits_section(self) -> str:
+        """Return RAG-specific allowed edits - stub signatures MUST be adapted to match forward."""
+        return (
+            "The backward file contains BOTH the backward Triton kernel and a backward stub; you can (and likely should) edit both.\n"
+            "You can edit both the backward kernel and the backward stub (their signatures and bodies) to match YOUR forward kernel.\n"
+            "The retrieved stub name/signature is from a DIFFERENT forward - you MUST adapt it to match YOUR forward's expectations.\n"
+            "Do not rename or move the file.\n"
+            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs.\n"
+            "You can edit _mk_block_ptr when it's present.\n"
+        )
 
     def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
         """Return adaptation phase instructions and temperature."""
