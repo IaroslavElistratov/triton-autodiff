@@ -187,8 +187,7 @@ class KernelOptimizer:
         # 3) Change detection
         after = _read_bytes(bwd_fp)
         changed = (after != before)
-        # don't keep patch in the breadcrumbs, because model keeps the summary
-        # of the changes in the kernel docstring
+        # don't keep full patch in breadcrumbs to reduce token overhead
         self.patcher.remember(f"apply.{stage}", ("patch applied successfully" if changed else "no-change"))
         if VERBOSE:
             print(f"[kernel-agent][it={it}] {'patch applied successfully' if changed else 'no change'} in '{stage}'")

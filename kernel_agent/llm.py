@@ -126,14 +126,6 @@ Minimal example:
 # "- ≤120 changed lines per patch.\n"
 
 
-MEM_SPEC = """
-MEMORY REQUIREMENT:
-- Rewrite the backward kernel's docstring to briefly note this iteration (<= 15 lines; no code/diffs).
-- Focus on: what you changed; what previously failed and why; and what key takeaways worth remembering for the next iteration.
-- Do this in the SAME patch as your code edits. Do NOT submit a docstring-only patch.
-"""
-
-
 @dataclass
 class MinimalLLMPatchProvider:
     reasoning_effort: str
@@ -221,7 +213,7 @@ class MinimalLLMPatchProvider:
 
         # Compose system prompt from strategy-specific sections + generic sections
         # Strategy provides: workflow_section(), allowed_edits_section(), kernel_details_section()
-        # Generic sections: patch requirements, docstring requirements, minor notes
+        # Generic sections: patch requirements, minor notes
         system = (
             strategy.workflow_section()
 
@@ -237,12 +229,6 @@ class MinimalLLMPatchProvider:
             "Before calling it, form a high-level plan of your changes in your private reasoning and rehearse the patch.\n"
             "When you call functions.apply_patch, output only a real diff—no rule echoing, no commentary, no placeholders. Include the *** Begin Patch / *** End Patch envelope inside the patch argument; do not echo the rule list.\n"
             "Use the analysis channel for planning (no functions.apply_patch in analysis). Then, as your final action, call the function tool functions.apply_patch with arguments {\"patch\": \"<one apply_patch.md block>\"}. No prose.\n"
-
-            "\n### Docstring requirements\n"
-            # not "what to try next;" -- because this will be dictated by Strategy, model should not decide that
-            "Maintain a concise iteration note (<= 15 lines; no code/diffs; no future plans) in the backward Triton kernel's docstring. That note should contain a concise but informative note to your future self about this iteration.\n"
-            "Whenever you modify the backward kernel code you MUST rewrite/update this docstring in the same patch as your code edits, focusing on key takeaways worth remembering for the next iteration (e.g. what changed, what failed and why, etc.).\n"
-            "This docstring update is always required alongside your code edits. Do not submit a docstring-only patch.\n"
 
             "\n### Minor\n"
             # observed error cases:
@@ -302,7 +288,6 @@ class MinimalLLMPatchProvider:
         facts_lines = "\n".join(f"{k}={v}" for k, v in (state_facts or {}).items())
         user = (
             f"\n{phase}\n"
-            # todo-high: maybe don't manually save it but let llm an option to write a note for the next iteration and work done in the current iteration
             + f"Context from previous iterations:\n{self._history_block()}\n\n"
             + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
             # path is not shown to the model; the workflow injects the target file name
@@ -311,7 +296,6 @@ class MinimalLLMPatchProvider:
             # optional: gradcheck, profiler hint, bench -- info is carried in state_facts below
             + (f"State:\n{facts_lines}\n" if facts_lines else "")
             + PATCH_SPEC
-            + MEM_SPEC
         )
 
         if VERBOSE:
