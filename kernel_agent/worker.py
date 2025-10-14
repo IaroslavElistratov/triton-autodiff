@@ -57,10 +57,17 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         q.close(); q.join_thread()
         os._exit(0)
     except Exception as e:
-        # First report error to parent and flush queue so parent never hangs.
-        # Deliberately omit traceback from payload to keep LLM-facing messages concise
-        # and avoid leaking file paths. Full tracebacks are still available in logs.
-        q.put({"etype": type(e).__name__, "emsg": str(e)})
+        # Surface compile errors to LLM with full traceback. Without traceback, LLM sees generic "KeyError"
+        # but can't tell what key or where, leading to blind guessing instead of targeted fixes.
+        # Examples caught here:
+        #   - SyntaxError: invalid Python syntax in generated backward (LLM mangled indentation/syntax)
+        #   - NameError: name 'triton' not defined (missing import in generated backward)
+        #   - AttributeError: 'NoneType' has no attribute 'shape' (LLM used wrong variable)
+        #   - KeyError: 'backward_stub' (RAG kernel uses wrong stub name, compiler expects specific name)
+        #   - TypeError: kernel() missing required argument (signature mismatch between stub and kernel)
+        import traceback
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        q.put({"etype": type(e).__name__, "emsg": str(e), "traceback": tb})
         q.close(); q.join_thread()
         # avoid torch.cuda.synchronize() and any cudaDeviceReset() here, bc
         # exiting the child process is sufficient to release GPU resources
@@ -100,7 +107,13 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     p.join()
     # Use child exit code to decide success; queue carries payload only.
     if p.exitcode != 0:
-        raise RuntimeError(f"compile probe failed: {payload}")
+        # Attach structured payload from child so orchestrator can extract full traceback.
+        # payload = {"etype": "KeyError", "emsg": "'backward_stub'", "traceback": "...full frames..."}
+        # Orchestrator's run_with_fix will extract this via hasattr(err, 'worker_payload') and
+        # filter the traceback before showing to LLM (removing middleware frames, keeping user code).
+        err = RuntimeError(f"compile probe failed: {payload.get('etype', 'Unknown')}: {payload.get('emsg', str(payload))}")
+        err.worker_payload = payload  # Attach payload dict as attribute
+        raise err
     # payload is the bwd_fp (string)
     return payload
 
@@ -146,7 +159,24 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         q.put((bool(ok), stats))
         status_ok = True
     except BaseException as e:
-        q.put({"etype": type(e).__name__, "emsg": str(e)})
+        # Catch exceptions during gradcheck and send traceback to parent for LLM.
+        # Flow: child puts traceback in queue + exits with code 1 → parent raises RuntimeError
+        # with worker_payload → orchestrator's run_with_fix catches it → filters traceback → shows to LLM.
+        # So exceptions ARE shown to LLM (not hidden by exit code).
+        #
+        # Examples caught here (STRUCTURAL errors - exceptions thrown):
+        #   - KeyError: 'backward_stub' (stub name mismatch - RAG kernel uses different name)
+        #   - TypeError: backward_stub() takes 2 args but 5 given (stub signature doesn't match forward inputs)
+        #   - RuntimeError: shape mismatch in backward (stub returns wrong number/shape of gradients)
+        #   - AttributeError: accessing undefined variable in backward kernel
+        #   - IndexError: out of bounds access in backward kernel logic
+        #
+        # Note: Numerical failures (gradients numerically wrong by max_abs=0.05) are NOT exceptions.
+        # Those complete successfully (no exception) and return (False, stats) above (exit code 0).
+        # Orchestrator receives stats dict and shows it to LLM separately (not as filtered traceback).
+        import traceback
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        q.put({"etype": type(e).__name__, "emsg": str(e), "traceback": tb})
     finally:
         try:
             q.close(); q.join_thread()
@@ -181,7 +211,15 @@ def run_gradcheck_child(fwd_fp: str, overwrite_fp: str | None):
     # Use child exit code to decide success; payload contains (parity_ok, stats).
     # Partial parity is a successful run (exit 0). Parent can inspect stats and run rollback/LLM fix.
     if p.exitcode != 0:
-        raise RuntimeError(f"gradcheck failed: {payload}")
+        # Child encountered exception (exit code 1) - raise to trigger orchestrator's run_with_fix.
+        # Attach structured payload from child so orchestrator can extract full traceback.
+        # payload = {"etype": "TypeError", "emsg": "takes 2 args but 5 given", "traceback": "..."}
+        # Flow: raise here → run_with_fix catches → filters traceback → shows to LLM.
+        # This handles EXCEPTIONS during gradcheck (stub signature issues, runtime errors).
+        # Numerical failures (wrong gradients) exit 0 and return (False, stats) below - not exceptions.
+        err = RuntimeError(f"gradcheck failed: {payload.get('etype', 'Unknown')}: {payload.get('emsg', str(payload))}")
+        err.worker_payload = payload  # Attach payload dict as attribute
+        raise err
     return payload  # (ok: bool, stats: dict)
 
 
@@ -213,8 +251,14 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         q.put(cand)
         status_ok = True
     except BaseException as e:
-        # Keep payload minimal: no traceback for model consumption.
-        q.put({"etype": type(e).__name__, "emsg": str(e)})
+        # Surface benchmark execution errors to LLM with full traceback.
+        # Examples caught here (rare - bench only runs after parity passes):
+        #   - RuntimeError: CUDA OOM during benchmarking (kernel uses too much memory under load)
+        #   - RuntimeError: CUDA illegal memory access (kernel has bounds bugs exposed under benchmark stress)
+        #   - RuntimeError: device-side assert triggered (kernel correctness bug that didn't show in gradcheck)
+        import traceback
+        tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        q.put({"etype": type(e).__name__, "emsg": str(e), "traceback": tb})
     finally:
         try:
             q.close(); q.join_thread()
@@ -248,7 +292,13 @@ def run_bench_child(fwd_fp: str, overwrite_fp: str | None):
     p.join()
     # Use child exit code to decide success; queue payload contains the benchmark summary.
     if p.exitcode != 0:
-        raise RuntimeError(f"bench failed: {payload}")
+        # Attach structured payload from child so orchestrator can extract full traceback.
+        # payload = {"etype": "RuntimeError", "emsg": "CUDA OOM", "traceback": "..."}
+        # Bench errors are rare (only runs after parity passes) and usually catastrophic
+        # (OOM, illegal memory access, device asserts). Traceback helps diagnose if fixable.
+        err = RuntimeError(f"bench failed: {payload.get('etype', 'Unknown')}: {payload.get('emsg', str(payload))}")
+        err.worker_payload = payload  # Attach payload dict as attribute
+        raise err
     return payload  # cand dict
 
 

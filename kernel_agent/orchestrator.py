@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
-from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes, redact_torch_fn
+from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes, redact_torch_fn, filter_traceback_for_llm
 from .worker import run_gradcheck_child, run_bench_child, run_compile_child
 from .strategy import make_strategy, PhasedStrategy
 from .rollback import Rollback
@@ -23,6 +23,7 @@ def _read_bytes(path: str) -> bytes:
             return f.read()
     except Exception:
         return b""
+
 
 @dataclass
 class Config:
@@ -209,7 +210,33 @@ class KernelOptimizer:
             if it is None:
                 raise ce
 
-            err = f"{type(ce).__name__}: {ce}"
+            # Extract and filter traceback before showing to LLM.
+            # Worker errors (from compile/gradcheck/bench children) attach structured payload with full traceback.
+            # Filter removes middleware frames (triton runtime, autodiff internals) keeping only:
+            #   - User-controlled code (generated/ backward, test/ forward, tools/)
+            #   - Last frame (actual error location, even if in internal code)
+            # This gives LLM enough context to diagnose without 20+ lines of framework noise.
+            #
+            # Example filtering result (hypothetical):
+            #   Before: 15 frames (worker.py, utils.py, triton runtime, autodiff, torch internals, generated code, utils.py)
+            #   After:  3 frames (test/attention.py:269, generated/raised.py:5 @triton.jit, utils.py:187 raise)
+            import traceback
+            if hasattr(ce, 'worker_payload') and isinstance(ce.worker_payload, dict):
+                payload = ce.worker_payload
+                # Worker sent {"etype": "...", "emsg": "...", "traceback": "..."}
+                if "traceback" in payload:
+                    # Filter traceback to show only relevant frames (last frame + user-controlled paths)
+                    filtered_tb = filter_traceback_for_llm(payload['traceback'])
+                    err = f"{payload.get('etype', type(ce).__name__)}: {payload.get('emsg', str(ce))}\n\nTraceback:\n{filtered_tb}"
+                else:
+                    err = f"{payload.get('etype', type(ce).__name__)}: {payload.get('emsg', str(ce))}"
+            else:
+                # Regular exception (not from worker) - capture traceback here
+                tb = "".join(traceback.format_exception(type(ce), ce, ce.__traceback__))
+                # Filter traceback to show only relevant frames
+                filtered_tb = filter_traceback_for_llm(tb)
+                err = f"{type(ce).__name__}: {ce}\n\nTraceback:\n{filtered_tb}"
+
             self.patcher.remember(err_category, err)
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] {err_category}: {err}")

@@ -34,6 +34,111 @@ class UserError(Exception):
     pass
 
 
+def filter_traceback_for_llm(tb_string: str) -> str:
+    """
+    Filter traceback to show only relevant frames for LLM error fixing.
+
+    Motivation:
+    1. Full tracebacks contain 10+ frames of middleware (triton runtime, autodiff backend,
+       torch internals) that LLM has no control over - this is noise that distracts from the
+       actual problem in user code.
+    2. But we can't just filter to user-controlled files, because the LAST frame (where the
+       actual error occurs) might be in internal code (e.g., generated code calls triton.language.func()
+       which throws internally). If we filter that out, LLM won't see the actual error location.
+    3. Solution: Keep LAST frame always (actual error location) + keep frames from user-controlled
+       paths (generated/, test/, tools/) + skip middleware frames.
+    4. This gives LLM: error location (last frame) + how user code led to it (user frames) without
+       20 lines of triton/torch/autodiff internals.
+
+    Examples of what gets filtered:
+    - KEPT: generated/abc123/raised.py (LLM-generated backward code - can modify)
+    - KEPT: kernel_agent/test/matmul.py (user forward code - shows call context)
+    - KEPT: kernel_agent/tools/gradcheck/core.py (user tools - shows what triggered error)
+    - FILTERED: kernel_agent/worker.py (infrastructure - LLM can't modify)
+    - FILTERED: kernel_agent/utils.py (infrastructure - just plumbing)
+    - FILTERED: triton/runtime/jit.py (framework - LLM can't modify)
+    - FILTERED: triton/backends/autodiff/hooks.py (framework internals)
+    - KEPT: Last frame even if in filtered path (shows actual error location)
+
+    Why string-based filtering instead of traceback object reconstruction (like TensorFlow/Django):
+    1. Workers run in separate processes (multiprocessing) - traceback objects cannot be
+       pickled/serialized across process boundaries. Workers must convert to strings via
+       format_exception() before sending through the queue.
+    2. Orchestrator receives strings, not live traceback objects - no access to tb_frame, tb_next, etc.
+    3. Don't need to re-raise exceptions with modified tracebacks - just formatting error messages
+       for LLM consumption, so string output is the end goal anyway.
+    4. String parsing is simpler and sufficient for this use case given the architecture constraints.
+    """
+    lines = tb_string.split('\n')
+
+    # User-controlled paths that LLM can modify
+    # Note: 'test/' and 'tools/' match via substring check (f'/{prefix}' in path),
+    # so kernel_agent/test/*.py and kernel_agent/tools/*.py are still matched,
+    # but kernel_agent/utils.py, worker.py, orchestrator.py are excluded (infrastructure)
+    USER_CONTROLLED_PREFIXES = (
+        'generated/',
+        # 'test/',
+        # 'tools/',
+    )
+
+    # Parse traceback into frames
+    frames = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith('File "'):
+            # Extract file path from: File "path/to/file.py", line 123, in function
+            frame_lines = [line]
+            i += 1
+            # Collect code context lines (typically 1-2 lines after File line)
+            # Context lines are indented (start with spaces), stop at non-indented lines (error messages)
+            while i < len(lines) and not lines[i].strip().startswith('File "'):
+                # Stop at non-indented, non-empty lines (like "NameError: ..." at the end)
+                # Check BEFORE appending to avoid including error message in last frame
+                if lines[i].strip() and not lines[i].startswith('  '):
+                    break
+                frame_lines.append(lines[i])
+                i += 1
+
+            # Check if this frame is from user-controlled path
+            file_path = line.split('"')[1] if '"' in line else ""
+            is_user_controlled = any(file_path.startswith(prefix) or f'/{prefix}' in file_path
+                                     for prefix in USER_CONTROLLED_PREFIXES)
+
+            frames.append({
+                'lines': frame_lines,
+                'is_user_controlled': is_user_controlled,
+                'file_path': file_path
+            })
+        else:
+            i += 1
+
+    if not frames:
+        # No frames found, return original
+        return tb_string
+
+    # Always keep last frame (actual error location)
+    # Keep all user-controlled frames
+    # Skip middleware frames (triton, torch, autodiff internals)
+    kept_frames = []
+    skipped_count = 0
+
+    for idx, frame in enumerate(frames):
+        is_last = (idx == len(frames) - 1)
+        if is_last or frame['is_user_controlled']:
+            # Insert skipped marker if we skipped frames just before this one
+            if skipped_count > 0:
+                kept_frames.append(f'  [...skipped {skipped_count} internal frames...]')
+                skipped_count = 0
+            kept_frames.extend(frame['lines'])
+        else:
+            skipped_count += 1
+
+    # Reconstruct traceback
+    result = '\n'.join(kept_frames)
+    return result
+
+
 def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     """
     Execute user's forward module, run its setup(), and return:
