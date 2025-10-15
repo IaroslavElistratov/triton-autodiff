@@ -129,8 +129,6 @@ def get_last_bwd_fp() -> Optional[str]:
 
 
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
-
-
     jit_fn = fn.jit_function  # JITFunction
 
     # compile hook registers on all instances of JITFunction,
@@ -189,7 +187,8 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
             # the short‑lived ContextVar (_AD_ARTIFACTS), the ContextVar is intentionally reset
             # at the end of record_autodiff_artifacts() to avoid cross‑kernel contamination,
             # so it is usually None here, instead read the last installed path from the JITFunction._generated_bwd_stub_path
-            if not raised_py_path:
+            # Check if attribute exists (might not exist if previous compilation failed before setting it)
+            if not raised_py_path and hasattr(jit_fn, "_generated_bwd_stub_path"):
                 raised_py_path = jit_fn._generated_bwd_stub_path
 
             assert raised_py_path, "Forward kernel retraces, but backward overwrite is not provided. Aborting to avoid creating another backward kernel + stub pair."
@@ -231,34 +230,89 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                 builtins.repr(compile_dict["signature"]),
             )
 
-
-            bwd_stub = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
-            # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
-            setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
-            # remember path on the kernel for future retraces. We avoid relying on the
-            # thread‑local ContextVar because it is reset after setup() and can point to
-            # artifacts of a different kernel if multiple kernels are traced interleaved
-            setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
-
             # expose artifacts in context store
             # publish raised.py as the backward file pointer
             _AD_ARTIFACTS.set(raised_py_path)
 
-        else:
+        # compile_kernel(..., overwrite_fp=...) path already re‑executes the user module, runs setup(),
+        # and attaches the edited stub from the on disk generated/[sha]/raised.py even when the JIT hook doesn't fire
+        # because the forward specialization is cached. Allows for reload without re‑running the MLIR pass
 
-            # compile_kernel(..., overwrite_fp=...) path already re‑executes the user module, runs setup(),
-            # and attaches the edited stub from the on disk generated/[sha]/raised.py even when the JIT hook doesn’t fire
-            # because the forward specialization is cached. Allows for reload without re‑running the MLIR pass
+        # ensure the bwd stub is installed on the forward JITFunction when overwrite_fp is used
+        # so StubOverrideDCK.backward can find it without regenerating. The hook already does this
+        # on fresh generations; we add a defensive install here for overwrite path
 
-            # ensure the bwd stub is installed on the forward JITFunction when overwrite_fp is used
-            # so StubOverrideDCK.backward can find it without regenerating. The hook already does this
-            # on fresh generations; we add a defensive install here for overwrite path
+        # Common prepending + stub loading for both compiler and RAG modes
+        # Prepend forward kernel+stub source to raised.py so both are in one file.
+        # Benefits:
+        # - Namespace isolation solved: backward can call forward kernels (both in same namespace)
+        # - LLM can edit both: enables coordination (e.g., forward saves intermediates, backward uses them)
+        # - Runtime binding: load both stubs from raised.py, edits take effect at runtime
 
-            # NOTE: LLM edits are picked up because I rebind each time
-            bwd_stub = runpy.run_path(raised_py_path)[f"backward_{stub_name}"]
-            assert callable(bwd_stub)
-            setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
-            setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
+        raised_content = open(raised_py_path).read()
+
+        # Re-prepend if forward is missing OR if @autodiff decorator is present (need to strip it)
+        needs_prepend = (f"def {stub_name}(" not in raised_content) or ("@autodiff" in raised_content)
+
+        if needs_prepend:
+            # Forward stub missing or has decorator - (re)prepend it
+            # Compiler mode: always triggers on first trace (raised.py has backward only)
+            # RAG mode: triggers on first compile (orchestrator wrote backward only)
+            # Re-prepend if decorator present: old raised.py has decorator, need to strip it
+            fwd_source = get_fwd_source_from_module(mod_name)
+            if fwd_source and fwd_source.strip():
+                # Strip @autodiff decorator from forward source before prepending
+                # Original forward file has decorator that creates proxies - we don't need it in raised.py
+                # We only need the raw stub function for the proxy to call via getattr(kernel, "_generated_fwd_stub")
+                # If decorator executes during runpy.run_path(), it wraps the function and causes issues
+                import re
+                # Match entire @autodiff line (handles nested parens like idxs_buffers=(4, 5))
+                fwd_source = re.sub(r'^@autodiff.*$\n?', '', fwd_source, flags=re.MULTILINE)
+
+                # Extract backward-only content (strip old forward if present)
+                if "# Backward kernel and stub" in raised_content:
+                    # Split and keep only backward section
+                    parts = raised_content.split("# Backward kernel and stub")
+                    if len(parts) > 1:
+                        raised_content = "# Backward kernel and stub" + parts[-1]
+
+                with open(raised_py_path, "w") as f:
+                    f.write("# ============================================================\n")
+                    f.write("# Forward kernel and stub (copied from user file)\n")
+                    f.write("# Backward can call these to recompute intermediates\n")
+                    f.write("# ============================================================\n\n")
+                    f.write(fwd_source)
+                    f.write("\n\n# ============================================================\n")
+                    f.write("# Backward kernel and stub\n")
+                    f.write("# ============================================================\n\n")
+                    f.write(raised_content)
+
+        # Load both forward and backward stubs from raised.py
+        # Enforce consistent naming: backward stub must be named backward_{stub_name}
+        # Compiler mode generates this name automatically
+        # RAG mode: LLM must rename retrieved stub to match this convention
+        # NOTE: LLM edits are picked up because we rebind each time
+        raised_module = runpy.run_path(raised_py_path)
+
+        bwd_stub_name = f"backward_{stub_name}"
+        bwd_stub = raised_module.get(bwd_stub_name)
+        if not bwd_stub:
+            raise KeyError(f"Backward stub '{bwd_stub_name}' not found in {raised_py_path}")
+
+        fwd_stub = raised_module.get(stub_name)
+        if not fwd_stub:
+            raise KeyError(f"Forward stub '{stub_name}' not found in {raised_py_path}")
+
+        assert callable(bwd_stub)
+        assert callable(fwd_stub)
+
+        # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
+        setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
+        setattr(jit_fn, "_generated_fwd_stub", fwd_stub)
+        # remember path on the kernel for future retraces. We avoid relying on the
+        # thread‑local ContextVar because it is reset after setup() and can point to
+        # artifacts of a different kernel if multiple kernels are traced interleaved
+        setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
 
         # if overwrite_fp is provided then raise the kernel stored in the provided file
         # bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
@@ -351,10 +405,24 @@ import sys, importlib, inspect, textwrap
 
 def get_stub_src_from_module(mod_name, stub_name: str) -> str:
     mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
-    print("[get_stub_src_from_module] mod", mod)
     stub_obj = getattr(mod, stub_name)  # assumes the stub is a top-level def
     stub_obj = inspect.unwrap(stub_obj) # in case user decorated the stub too
     return textwrap.dedent(inspect.getsource(stub_obj))  # -> str
+
+def get_fwd_source_from_module(mod_name: str) -> str:
+    """Extract forward kernel+stub source from user module, with same filtering as shown to LLM."""
+    mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+    fwd_file = getattr(mod, "__file__", None)
+    if not fwd_file:
+        return ""
+    # Use redact_torch_fn for consistent filtering (removes test helpers, keeps kernel+stub)
+    # TRITON_AUTODIFF_DIR points to 'triton_autodiff', kernel_agent is one level up
+    repo_root = os.path.abspath(os.path.join(dir, ".."))
+    kernel_agent_path = os.path.join(repo_root, "kernel_agent")
+    if kernel_agent_path not in sys.path:
+        sys.path.insert(0, kernel_agent_path)
+    from utils import redact_torch_fn
+    return redact_torch_fn(fwd_file, None)
 
 
 
@@ -396,20 +464,48 @@ def autodiff(kernel, idxs_buffers, stub_name=None):
         fwd_kernel.idxs_buffers = idxs
         fwd_kernel._is_fwd_kernel = True
         fwd_kernel._autodiff_stub_info = (fwd_stub.__module__, fwd_stub.__name__)  # tell hook which stub
-        # late-resolving proxy that the hook will fill;
-        # when writting approach which decorates stub (not the kernel as in the legacy api) --
-        # i couldn't easily return StubOverrideDCK from my stub decorator (becuase StubOverrideDCK
-        # gets created only later and from inside the hook) -- but when my autodiff decorator runs
-        # don't yet have access to the bwd generated stub.
-        # Solution is to basically 1) inside the hook (when the bwd stub is created) install it on some
-        # kernel's attribute and 2) make StubOverrideDCK.backward to check for that attribute on the kernel
-        # (to see if the bwd_stub has been installed there by the hook or not)
+        # Late-resolving proxies for both forward and backward stubs.
+        #
+        # Why proxies are needed:
+        # - This decorator decorates the stub (not the kernel as in legacy API)
+        # - So can't return StubOverrideDCK directly because it's created later inside the hook
+        # - When decorator runs at import time, don't have access to generated backward stub yet
+        # - Raised.py doesn't exist yet (hook creates it during first kernel compilation)
+        #
+        # Solution:
+        # 1. Hook (when bwd/fwd stubs are created) installs them on fwd_kernel attributes:
+        #    - setattr(fwd_kernel, "_generated_bwd_stub", bwd_stub)
+        #    - setattr(fwd_kernel, "_generated_fwd_stub", fwd_stub)
+        # 2. Proxies check these attributes at runtime and use generated versions when available
+        # 3. This enables LLM to edit both forward and backward in raised.py - edits take effect
+        #    because we rebind stubs from raised.py on each iteration
+
+        def _fwd_stub_proxy(*args, **kwargs):
+            # Check if hook installed edited forward from raised.py
+            fn = getattr(fwd_kernel, "_generated_fwd_stub", None)
+            if fn is not None:
+                # Use LLM-editable version from raised.py (enables forward/backward coordination)
+                return fn(*args, **kwargs)
+            # Fallback to original user stub on first call (before hook installs generated version)
+            # Hook fires during kernel compilation inside first stub call, so proxy executes before hook
+            return fwd_stub(*args, **kwargs)
+
         def _bwd_stub_proxy(*args, **kwargs):
             fn = getattr(fwd_kernel, "_generated_bwd_stub", None)
             if fn is None:
                 raise RuntimeError("backward stub not ready; run forward once")
             return fn(*args, **kwargs)
-        wrapped = _add_kwarg_support(fwd_stub, _bwd_stub_proxy)   # do not return .apply directly
+
+        # Preserve original user stub's signature on the proxy function.
+        # _add_kwarg_support (below) uses inspect.signature() to extract parameter names for argument binding.
+        # Without this fix, it sees the proxy's (*args, **kwargs) signature instead of the real stub signature.
+        # This causes bind_partial to create ordered = [(q,k,v), {}] instead of [q, k, v],
+        # which then makes StubOverrideDCK.forward call _fwd_stub_proxy((q,k,v), {}) instead of (q, k, v),
+        # leading to "missing required positional argument" errors when the proxy falls back to fwd_stub.
+        _fwd_stub_proxy.__signature__ = inspect.signature(fwd_stub)
+        _fwd_stub_proxy.__wrapped__ = fwd_stub  # For inspect.unwrap in case signature extraction uses it
+
+        wrapped = _add_kwarg_support(_fwd_stub_proxy, _bwd_stub_proxy)   # Pass proxies, not raw stubs
         setattr(wrapped, "__is_autodiff_stub__", True)            # tag for loader detection
         return wrapped
 

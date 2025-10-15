@@ -285,6 +285,12 @@ class KernelOptimizer:
         #   (retrieved backward is shown to LLM as reference via KERNEL_AGENT_RAG_PROMPTS in llm.py,
         #    but compiler-generated backward is used as the actual starting kernel for optimization)
         if self.cfg.use_rag and not self.cfg.use_compiler:
+
+            # in api.py mlir passes compiler is not called, because:
+            #   1. Orchestrator writes retrieved backward to raised.py (here)
+            #   2. First compile: compile_kernel(fwd_fp, overwrite_fp=raised_py)
+            #     - so because overwrite_fp is set, compiler is NOT called
+
             # RAG initialization: retrieve most similar backward kernel
             if VERBOSE:
                 print("[kernel-agent] Using RAG to retrieve initial backward kernel")

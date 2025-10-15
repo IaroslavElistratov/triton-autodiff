@@ -132,7 +132,7 @@ class MinimalLLMPatchProvider:
     temperature: float = 0.0
     max_tokens: int = 1536
     context: int | None = None
-    snippet_max_lines: int = 400  # Max lines shown to LLM for fwd/bwd snippets
+    snippet_max_lines: int = 800  # Max lines shown to LLM (increased to accommodate fwd+bwd in one file)
     # Tracks backend stop reason (e.g., "max_tokens") to disambiguate truncation
     # from other failure modes and report errors upstream.
     last_stop_reason: str = ""
@@ -250,9 +250,10 @@ class MinimalLLMPatchProvider:
         # system = base + initial_kernel_details + tail
 
 
-        # Create snippets (context shown to LLM: redacted forward, sliced backward)
-        fwd_kernel_snippet = redact_torch_fn(fwd_fp, self.snippet_max_lines)
-        bwd_kernel_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
+        # Create working file snippet (orchestrator prepended forward to backward file).
+        # The working file now contains: forward kernel+stub at top, backward kernel+stub at bottom.
+        # Both sections are editable by LLM, enabling coordination (e.g., forward saves intermediates).
+        working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
 
         # Optional RAG block: append compact retrieved references to the phase header
         # Cache the RAG block since forward kernel doesn't change during a run
@@ -293,9 +294,9 @@ class MinimalLLMPatchProvider:
         user = (
             f"\n{phase}\n"
             + f"Context from previous iterations:\n{self._history_block()}\n\n"
-            + "Forward snippet:\n" + fwd_kernel_snippet + "\n\n"
+            + "Working file (forward kernel+stub at top, backward kernel+stub at bottom - you can edit all sections):\n"
             # path is not shown to the model; the workflow injects the target file name
-            + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
+            + working_file_snippet + "\n"
             + rag_block
             # optional: gradcheck, profiler hint, bench -- info is carried in state_facts below
             + (f"State:\n{facts_text}\n" if facts_text else "")

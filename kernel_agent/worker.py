@@ -5,6 +5,50 @@ import traceback
 
 import sys
 
+# ============================================================================
+# KERNEL AGENT WORKER EXECUTION FLOW (RAG MODE)
+# ============================================================================
+#
+# High-level workflow:
+#
+# 0. Orchestrator retrieves backward kernel from RAG index → writes to raised.py (backward only)
+#
+# 1. Orchestrator spawns child process → calls compile_kernel(fwd_fp=attention.py, overwrite_fp=raised.py)
+#    - compile_kernel EXECUTES attention.py (forward file), NOT raised.py
+#    - overwrite_fp tells hook: "use this backward file, skip MLIR passes"
+#
+# 2. Inside compile_kernel:
+#    - runpy.run_path(attention.py) creates fresh kernel objects, runs @autodiff decorator
+#    - @autodiff creates proxies (_fwd_stub_proxy, _bwd_stub_proxy) that late-bind to stubs
+#    - Proxies needed because decorator runs at import time (backward doesn't exist yet)
+#    - setup() calls stub → triggers kernel compilation → hook fires
+#
+# 3. Hook (in api/new.py) executes during kernel compilation:
+#    - Prepends forward kernel+stub source to raised.py (now has both forward and backward)
+#    - Loads both stubs: runpy.run_path(raised.py) → creates separate namespace
+#    - Sets attributes: kernel._generated_fwd_stub = fwd_stub_from_raised
+#                       kernel._generated_bwd_stub = bwd_stub_from_raised
+#
+# 4. Proxy mechanism enables runtime binding:
+#    - First call: proxy uses original stub from attention.py (triggers compilation)
+#    - After hook: proxy uses stub from raised.py (getattr(kernel, "_generated_fwd_stub"))
+#    - This stub calls kernels from raised.py namespace (different JITFunction objects)
+#    - LLM edits to raised.py take effect immediately via proxy redirection
+#
+# 5. Gradcheck/benchmark execute in SAME child process:
+#    - They call op(q, k, v) many times
+#    - Each call → proxy → uses stub from raised.py (set by hook in step 3)
+#    - Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, not from user file
+#
+# 6. Across iterations:
+#    - Each iteration spawns fresh child → compile_kernel runs AGAIN
+#    - Hook fires AGAIN → reloads edited raised.py → sets attributes in new child
+#    - Gradcheck uses newly loaded stubs (LLM edits picked up)
+#
+# Key insight: Process-local attributes are fine because compile_kernel recreates them
+# in every child before gradcheck runs. No state needs to persist across processes.
+#
+# ============================================================================
 
 # Dedicated timeouts for long-running child tasks (env-overridable)
 GRADCHECK_TIMEOUT_S = float(os.environ.get("TB_GRADCHECK_TIMEOUT_S", "180"))
@@ -48,6 +92,12 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Reconstruct everything fresh in the child; this triggers the same
         # compile path and the in-process backward preflight inside compile_kernel.
         # Capture bwd_fp to return to the parent (ns is not pickleable; return only bwd_fp).
+        #
+        # FLOW: compile_kernel executes fwd_fp (user's forward file), NOT overwrite_fp:
+        # - runpy.run_path(fwd_fp) creates fresh kernel objects, runs @autodiff
+        # - setup() triggers compilation → hook fires → prepends forward to raised.py
+        # - Hook loads stubs from raised.py → sets kernel._generated_{fwd,bwd}_stub
+        # - Result: All subsequent calls use stubs from raised.py via proxy mechanism
         _op, bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
         # Ensure any pending device work (e.g., preflight backward) is observed before exit,
         # so device-side asserts surface in this child, not later in the parent.
@@ -138,7 +188,12 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         from .tools.gradcheck.core import check_op_backward_parity_sweep
         import torch as _t
 
+        # CRITICAL: compile_kernel runs FIRST in this child process:
+        # - Executes fwd_fp (attention.py) → hook fires → loads stubs from raised.py
+        # - Sets kernel._generated_{fwd,bwd}_stub in THIS process
+        # - Returns op that uses proxies pointing to these attributes
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+
         # Phase-0 throttling: optionally limit SWEEP to the first shape via env.
         # None -- a sentinel meaning "all shapes"
         limit = os.environ.get("KERNEL_AGENT_SWEEP_LIMIT")
@@ -146,6 +201,12 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         if limit is not None and isinstance(sidecar.get("SWEEP"), (list, tuple)):
             limit = int(limit)
             sidecar["SWEEP"] = list(sidecar["SWEEP"])[:limit]
+
+        # Gradcheck calls op many times, each call:
+        # - op(q, k, v) → proxy → getattr(kernel, "_generated_fwd_stub")
+        # - Uses stub from raised.py (loaded by hook above)
+        # - Stub calls kernels from raised.py namespace (different JITFunction objects)
+        # Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, NOT user file
         ok, stats = check_op_backward_parity_sweep(
             ref_fwd=ns["torch_fn"], my_op=op, sidecar=sidecar, outputs="auto",
             # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
@@ -236,7 +297,13 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         from .tools.benchmark import bench_op
         import torch as _t
 
+        # CRITICAL: compile_kernel runs FIRST in this child process:
+        # - Executes fwd_fp (attention.py) → hook fires → loads stubs from raised.py
+        # - Sets kernel._generated_{fwd,bwd}_stub in THIS process
+        # - Returns op that uses proxies pointing to these attributes
+        # Result: Benchmark ALWAYS uses stubs/kernels from raised.py, NOT user file
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+
         # Phase-0 throttling: optionally limit SWEEP to the first shape via env.
         limit = os.environ.get("KERNEL_AGENT_SWEEP_LIMIT")
         sidecar = dict(ns)
