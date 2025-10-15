@@ -197,14 +197,17 @@ def check_op_backward_parity_sweep(
             grad_pass.append(d)
             passed += 1
         else:
+            # Include per_input details for failed cases so LLM can see which gradient is wrong
+            if "per_input" in stats_i:
+                d["per_input"] = stats_i["per_input"]
+            # Also include exception info if this shape failed with an error
+            if "error" in stats_i:
+                d["error"] = stats_i["error"]
             grad_fail.append(d)
         ok_all = ok_all and bool(ok_i)
 
-    # NOTE: i'm omitting tolerances and how close grad is to the truth, as to not confuse the model
-    # with too much info, because seems the simple status of what shape passed and what failed seems
-    # should be enough
-
-    # todo: actually seems worth showing numeric differences to the model, because can help debug
+    # Per-input error details (max_abs, max_rel) are now included in grad_fail entries
+    # to help LLM identify which specific gradient is wrong and by how much
 
     summary: Dict[str, Any] = {
         "ok": bool(ok_all),
@@ -214,7 +217,57 @@ def check_op_backward_parity_sweep(
         "grad_pass": grad_pass,
         "grad_fail": grad_fail,
     }
+
+    # Add formatted text to make errors prominent while preserving shape association.
+    # Each error stays tied to its shape because different shapes trigger different errors:
+    # - Small shapes might hit NameError (structural bug)
+    # - Large shapes might hit OOM (memory allocation bug)
+    # This tells LLM whether errors are universal or shape-specific.
+    summary["summary_text"] = _format_summary_for_llm(summary)
+
     return ok_all, summary
+
+
+def _format_summary_for_llm(summary: Dict[str, Any]) -> str:
+    """Format gradcheck summary to make errors and numerical failures prominent."""
+    lines = []
+    lines.append(f"ok: {summary['ok']}")
+    lines.append(f"passed: {summary['num_passed']}/{summary['num_total']}")
+
+    grad_fail = summary.get('grad_fail', [])
+    if grad_fail:
+        lines.append("")
+        lines.append("Failures:")
+        for entry in grad_fail:
+            # Extract shape dimensions (exclude 'error' and 'per_input' keys)
+            shape_items = [(k, v) for k, v in entry.items() if k not in ('error', 'per_input')]
+            shape_str = ", ".join(f"{k}={v}" for k, v in shape_items)
+            lines.append(f"  - Shape: {shape_str}")
+
+            # Show error prominently if present (structural errors like NameError, OOM)
+            if 'error' in entry:
+                lines.append(f"    ERROR: {entry['error']}")
+
+            # Show per-input numerical details if present (which gradients are wrong and by how much)
+            if 'per_input' in entry:
+                lines.append("    per_input:")
+                for inp in entry['per_input']:
+                    idx = inp.get('index', '?')
+                    if not inp.get('compared', True):
+                        reason = inp.get('reason', 'not_compared')
+                        lines.append(f"      [{idx}] {reason}")
+                    elif inp.get('equal', True):
+                        max_abs = inp.get('max_abs', 0)
+                        max_rel = inp.get('max_rel', 0)
+                        lines.append(f"      [{idx}] grad OK: max_abs={max_abs:.4g}, max_rel={max_rel:.4g}")
+                    else:
+                        max_abs = inp.get('max_abs', 0)
+                        max_rel = inp.get('max_rel', 0)
+                        lines.append(f"      [{idx}] grad WRONG: max_abs={max_abs:.4g}, max_rel={max_rel:.4g}")
+
+            lines.append("")  # blank line between failures
+
+    return "\n".join(lines)
 
 
 # def torch_ref(a, b):

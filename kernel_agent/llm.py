@@ -121,7 +121,7 @@ Minimal example:
 +    x = new_value
 *** End Patch
 """
-# Do NOT change the backward stub's signature.
+# Stub signature constraints are now strategy-specific (see strategy.py allowed_edits_section)
 # attention kernel is about that size, to introduce for loop need to at least indent almost all of the lines in the kernel (around 120 lines)
 # "- ≤120 changed lines per patch.\n"
 
@@ -284,8 +284,12 @@ class MinimalLLMPatchProvider:
 
         rag_block = self._rag_cache or ""
 
-        # user prompt
-        facts_lines = "\n".join(f"{k}={v}" for k, v in (state_facts or {}).items())
+        # Format state_facts for LLM prompt.
+        # orchestrator.py extracts pre-formatted summary_text from gradcheck results,
+        # so all facts are simple key=value pairs.
+        facts_lines = [f"{k}={v}" for k, v in (state_facts or {}).items()]
+        facts_text = "\n".join(facts_lines)
+
         user = (
             f"\n{phase}\n"
             + f"Context from previous iterations:\n{self._history_block()}\n\n"
@@ -294,7 +298,7 @@ class MinimalLLMPatchProvider:
             + "Backward snippet:\n" + bwd_kernel_snippet + "\n"
             + rag_block
             # optional: gradcheck, profiler hint, bench -- info is carried in state_facts below
-            + (f"State:\n{facts_lines}\n" if facts_lines else "")
+            + (f"State:\n{facts_text}\n" if facts_text else "")
             + PATCH_SPEC
         )
 

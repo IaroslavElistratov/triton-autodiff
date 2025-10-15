@@ -7,6 +7,8 @@
 # kernel-agent --backend openai --openai-model gpt-5-mini --reasoning-effort medium --file-path kernel_agent/test/matmul.py --compiler --mode phased --rag > kernel_agent/LOGS/out.txt
 # kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --compiler --mode phased --rag > kernel_agent/LOGS/out.txt
 
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/attention.py --rag > kernel_agent/LOGS/out.txt
+
 from __future__ import annotations
 import argparse
 import os

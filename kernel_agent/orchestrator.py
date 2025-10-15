@@ -451,8 +451,10 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
-            # minimal breadcrumb
-            self.patcher.remember("gradcheck", grad_stats)
+            # Store only formatted text in history to avoid duplication with state_facts.
+            # The summary_text already contains all important info (errors, per-input details).
+            # state_facts will show current iteration's formatted summary, so history doesn't need raw dict.
+            self.patcher.remember("gradcheck", grad_stats.get("summary_text", str(grad_stats)))
 
             was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
 
@@ -506,10 +508,14 @@ class KernelOptimizer:
                 include_phase = is_loop_phase or is_rag_adaptation
                 fix_header = (phase_text + "\n" if include_phase else "") + "ONLY restore correctness to pass gradcheck.\n"
 
+                # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
+                # Pass only formatted text, not full dict, to reduce coupling with llm.py.
+                grad_summary_text = grad_stats.get("summary_text", str(grad_stats))
+
                 self._llm_request_and_apply(
                     it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=fix_header,
-                    state_facts={"grad_summary": grad_stats},
+                    state_facts={"grad_summary": grad_summary_text},
                     # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
                     temperature=0.25,
                 )
@@ -553,10 +559,14 @@ class KernelOptimizer:
             # comment:
             # i guess i can think of it that the only time phase header and constraints are shown in here
             # and all the previous llm calls were basically fixes in one from or another (e.g. patch fixes, grad-correctness fixes)
+            # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
+            # Pass only formatted text, not full dict, to reduce coupling with llm.py.
+            grad_summary_text = grad_stats.get("summary_text", str(grad_stats))
+
             changed = self._llm_request_and_apply(
                 it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                 header=phase_text,
-                state_facts={"bench": cand, "grad_summary": grad_stats},
+                state_facts={"bench": cand, "grad_summary": grad_summary_text},
                 temperature=temp,
             )
             if not changed:
