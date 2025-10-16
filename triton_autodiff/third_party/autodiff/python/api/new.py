@@ -2,6 +2,7 @@ import runpy
 import inspect, functools
 
 from .common import *
+from .bwd_sig_comment import build_signature_comment_from_compile_sig, extract_stub_info
 
 
 # todo: replace the two subprocess helpers with import-first calls
@@ -195,6 +196,10 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         mod_name, stub_name = jit_fn._autodiff_stub_info
 
+        # Store compile signature for later use (needed for RAG path)
+        if not hasattr(jit_fn, "_compile_signature"):
+            jit_fn._compile_signature = compile_dict["signature"]
+
         # run the mlir pass to generate TTIR,
         # and then raise that ttir to triton-lang
         # (via raise_to_triton_lang below)
@@ -285,6 +290,25 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                     f.write("\n\n# ============================================================\n")
                     f.write("# Backward kernel and stub\n")
                     f.write("# ============================================================\n\n")
+                    f.write(raised_content)
+
+        # Add signature comment for RAG path (compiler path already has it from emit_stub.py)
+        raised_content = open(raised_py_path).read()
+        if "# SIGNATURE CONTRACT" not in raised_content:
+            fwd_source = raised_content.split("# Backward kernel and stub")[0]
+            param_names, num_returns = extract_stub_info(fwd_source, stub_name)
+
+            if param_names:
+                sig_comment = build_signature_comment_from_compile_sig(
+                    stub_name, param_names, num_returns, jit_fn._compile_signature
+                )
+                # Insert signature comment after the backward section separator (# ====)
+                raised_content = re.sub(
+                    r'(# Backward kernel and stub\n# =+\n)',
+                    r'\1' + sig_comment,
+                    raised_content
+                )
+                with open(raised_py_path, "w") as f:
                     f.write(raised_content)
 
         # Load both forward and backward stubs from raised.py
