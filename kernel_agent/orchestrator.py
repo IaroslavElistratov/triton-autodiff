@@ -107,6 +107,7 @@ class KernelOptimizer:
                     fwd_fp=fwd_fp,
                     bwd_fp=bwd_fp,
                     state_facts=state_facts,
+                    it=it,
                 )
                 return patch, None
             except Exception as err_propose:

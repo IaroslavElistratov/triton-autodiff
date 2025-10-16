@@ -209,7 +209,8 @@ class MinimalLLMPatchProvider:
                       strategy,
                       fwd_fp: str,
                       bwd_fp: str,
-                      state_facts=None) -> str:
+                      state_facts=None,
+                      it: int = 0) -> str:
 
         # Compose system prompt from strategy-specific sections + generic sections
         # Strategy provides: workflow_section(), allowed_edits_section(), kernel_details_section()
@@ -265,10 +266,16 @@ class MinimalLLMPatchProvider:
 
         # Check if strategy has stored RAG references (RAG-only mode)
         if hasattr(strategy, 'rag_fwd') and hasattr(strategy, 'rag_bwd'):
-            # RAG-only mode: show full RAG FWD+BWD as reference
-            rag_block = strategy.rag_reference_section(strategy.rag_fwd, strategy.rag_bwd)
-            if VERBOSE and not rag_block:
-                print("[kernel-agent] RAG reference section is empty")
+            # RAG-only mode: show full RAG FWD+BWD reference on iteration 0 only
+            # Subsequent iterations rely on previous_response_id chaining to access RAG context
+            if it == 0:
+                rag_block = strategy.rag_reference_section(strategy.rag_fwd, strategy.rag_bwd)
+                if VERBOSE and not rag_block:
+                    print("[kernel-agent] RAG reference section is empty")
+            else:
+                rag_block = ""
+                if VERBOSE:
+                    print("[kernel-agent] Skipping RAG reference (it>0, relying on response chaining)")
 
         # Otherwise check for hybrid mode (--rag --compiler)
         elif self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG_PROMPTS", "0"):
