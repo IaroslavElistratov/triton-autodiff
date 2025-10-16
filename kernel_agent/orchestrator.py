@@ -338,12 +338,14 @@ class KernelOptimizer:
                 print(f"[kernel-agent] Retrieved backward from '{best_match}' (similarity: {best_similarity:.3f})")
                 print(f"[kernel-agent] Retrieved FWD: {len(retrieved_fwd)} chars, BWD: {len(retrieved_bwd)} chars")
 
-            # Write ONLY backward stub skeleton to raised.py
+            # Store RAG references on strategy (used for prompt reference section)
+            self.strategy.rag_fwd = retrieved_fwd
+            self.strategy.rag_bwd = retrieved_bwd
+
+            # Generate initial raised.py with backward stub skeleton
             # Forward will be prepended by compile_kernel hook during first gradcheck
             # LLM will write backward for USER's forward, using RAG as reference
-            from .utils import generate_backward_stub_skeleton
-
-            backward_stub_skeleton = generate_backward_stub_skeleton(fwd_source)
+            initial_content = self.strategy.generate_initial_file(fwd_source)
 
             digest = hashlib.sha256(fwd_source.encode()).hexdigest()[:10]
             gen_dir = f"generated/{digest}"
@@ -351,19 +353,12 @@ class KernelOptimizer:
             bwd_fp = f"{gen_dir}/raised.py"
 
             with open(bwd_fp, "w") as f:
-                f.write("# " + "="*60 + "\n")
-                f.write("# YOUR BACKWARD (write this using RAG reference)\n")
-                f.write("# Forward kernel will be prepended by compile hook\n")
-                f.write("# " + "="*60 + "\n\n")
-                f.write(backward_stub_skeleton)
+                f.write(initial_content)
 
             if VERBOSE:
                 print(f"[kernel-agent] Wrote backward stub skeleton to: {bwd_fp}")
                 print(f"[kernel-agent] Forward will be prepended automatically during first gradcheck")
 
-            # Store RAG references for prompt building
-            self.strategy._rag_fwd = retrieved_fwd
-            self.strategy._rag_bwd = retrieved_bwd
             self.bwd_fp = bwd_fp
 
         elif self.cfg.use_compiler:

@@ -543,7 +543,6 @@ def generate_backward_stub_skeleton(fwd_source: str) -> str:
         String containing minimal backward stub skeleton
     """
     import ast
-    import re
 
     # Parse forward source to find stub function
     try:
@@ -551,7 +550,7 @@ def generate_backward_stub_skeleton(fwd_source: str) -> str:
     except SyntaxError:
         # Fallback: minimal skeleton without parsed signature
         return (
-            "def backward_stub(*args, upstream_0):\n"
+            "def backward_stub(*args, *, upstream_0):\n"
             "    # TODO: Adapt retrieved backward logic for YOUR forward\n"
             "    # - Match signature to forward stub parameters\n"
             "    # - Allocate gradient buffers\n"
@@ -569,7 +568,7 @@ def generate_backward_stub_skeleton(fwd_source: str) -> str:
     if not stub_node:
         # No stub found, return minimal skeleton
         return (
-            "def backward_stub(*args, upstream_0):\n"
+            "def backward_stub(*args, *, upstream_0):\n"
             "    # TODO: No forward stub found - define signature manually\n"
             "    raise NotImplementedError('Backward stub needs implementation')\n"
         )
@@ -589,7 +588,7 @@ def generate_backward_stub_skeleton(fwd_source: str) -> str:
         default_idx = i - (num_args - num_defaults)
         if default_idx >= 0:
             default_node = args_obj.defaults[default_idx]
-            # Try to get default value as string
+            # Get default value as string
             default_str = ast.unparse(default_node) if hasattr(ast, 'unparse') else repr(default_node)
             defaults_dict[arg_name] = default_str
         args_list.append(arg_name)
@@ -607,26 +606,23 @@ def generate_backward_stub_skeleton(fwd_source: str) -> str:
     # Build minimal skeleton
     # SIGNATURE CONTRACT comment will be injected by hook using accurate compile_signature
     # (hook has actual runtime type info, skeleton generator only has syntax)
-    lines = []
-    lines.append(f"def backward_stub({signature}, *, upstream_0):")
-    lines.append("    \"\"\"Backward pass for YOUR forward kernel.")
-    lines.append("    ")
-    lines.append("    Hook will inject SIGNATURE CONTRACT comment showing:")
-    lines.append("    - Exact calling convention (which params are tensors vs scalars)")
-    lines.append("    - Required return value (tuple of gradients)")
-    lines.append("    \"\"\"")
-    lines.append("    ")
-    lines.append("    # TODO: Adapt retrieved backward logic for YOUR forward")
-    lines.append("    # Steps:")
-    lines.append("    # 1. Compare RETRIEVED FWD vs YOUR FWD (see reference above)")
-    lines.append("    # 2. Allocate gradient buffers for tensor inputs")
-    lines.append("    # 3. Call backward kernel(s) to compute gradients")
-    lines.append("    # 4. Return gradients in the order specified by SIGNATURE CONTRACT")
-    lines.append("    ")
-    lines.append("    raise NotImplementedError('TODO: Adapt backward logic from retrieved reference')")
-    lines.append("")
+    skeleton = f'''def backward_stub({signature}, *, upstream_0):
+    """Backward pass for YOUR forward kernel.
 
-    return "\n".join(lines)
+    Hook will inject SIGNATURE CONTRACT comment after first compilation.
+    """
+
+    # TODO: Adapt retrieved backward logic for YOUR forward
+    # Steps:
+    # 1. Compare RETRIEVED FWD vs YOUR FWD (see reference above)
+    # 2. Allocate gradient buffers for tensor inputs
+    # 3. Call backward kernel(s) to compute gradients
+    # 4. Return gradients in the order specified by SIGNATURE CONTRACT
+
+    raise NotImplementedError('TODO: Adapt backward logic from retrieved reference')
+'''
+
+    return skeleton
 
 
 def _env_truthy(name: str, default: str = "0") -> bool:

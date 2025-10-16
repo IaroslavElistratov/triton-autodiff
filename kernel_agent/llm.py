@@ -256,7 +256,7 @@ class MinimalLLMPatchProvider:
         working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
 
         # RAG reference block: two different modes
-        # 1. RAG-only mode (--rag without --compiler): Strategy has stored _rag_fwd and _rag_bwd
+        # 1. RAG-only mode (--rag without --compiler): Strategy has stored rag_fwd and rag_bwd
         #    Show full RAG FWD+BWD as readonly reference for each turn
         # 2. Hybrid mode (--rag --compiler): Use build_rag_block for compact references
         #    Only add when KERNEL_AGENT_RAG_PROMPTS is set
@@ -264,9 +264,9 @@ class MinimalLLMPatchProvider:
         rag_block = ""
 
         # Check if strategy has stored RAG references (RAG-only mode)
-        if hasattr(strategy, '_rag_fwd') and hasattr(strategy, '_rag_bwd'):
+        if hasattr(strategy, 'rag_fwd') and hasattr(strategy, 'rag_bwd'):
             # RAG-only mode: show full RAG FWD+BWD as reference
-            rag_block = strategy.rag_reference_section(strategy._rag_fwd, strategy._rag_bwd)
+            rag_block = strategy.rag_reference_section(strategy.rag_fwd, strategy.rag_bwd)
             if VERBOSE and not rag_block:
                 print("[kernel-agent] RAG reference section is empty")
 

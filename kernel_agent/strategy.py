@@ -2,11 +2,17 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 import os
 
-from .utils import _env_truthy
+from .utils import _env_truthy, generate_backward_stub_skeleton
 
 
 # Default verbose ON unless explicitly disabled
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
+
+# RAG reference formatting constants
+_RAG_MAX_CHARS = 15000  # Max chars per kernel in reference section (to stay within token budget)
+_SEP_MAJOR = "=" * 80   # Major section separator
+_SEP_MINOR = "─" * 80   # Minor section separator
+_SEP_HEADER = "=" * 60  # Header separator for initial file comments
 
 # Strategy module: encapsulates per-step instructions and temperature, so the
 # orchestrator can toggle this behavior without changing its main loop.
@@ -257,12 +263,17 @@ class RAGAdaptationStrategy(BaseStrategy):
     loops, atomics, coalesce), RAG-retrieved kernels are already optimized and just
     need adaptation to the specific forward kernel.
     """
-    def __init__(self):
+    def __init__(self, rag_fwd: Optional[str] = None, rag_bwd: Optional[str] = None):
         self.name = "rag_adaptation"
         # todo-low: cleanup (rm for this phase)
         self.i = 0  # for compatibility with rollback system
         # No phase advance since there's only one phase
         self.pending_advance_from = None
+
+        # Store retrieved FWD+BWD for use in prompt as reference pattern
+        # These are shown as readonly reference, not edited directly
+        self.rag_fwd = rag_fwd
+        self.rag_bwd = rag_bwd
 
     def workflow_section(self) -> str:
         """Return RAG-specific workflow context emphasizing adaptation over optimization."""
@@ -302,44 +313,63 @@ class RAGAdaptationStrategy(BaseStrategy):
         Returns:
             Formatted reference block with comparison instructions
         """
-        # Truncate if too long (keep under ~15k chars each to stay within token budget)
-        max_chars = 15000
-        if len(rag_fwd) > max_chars:
-            rag_fwd = rag_fwd[:max_chars] + "\n... [truncated] ..."
-        if len(rag_bwd) > max_chars:
-            rag_bwd = rag_bwd[:max_chars] + "\n... [truncated] ..."
+        # Truncate if too long (stay within token budget)
+        if len(rag_fwd) > _RAG_MAX_CHARS:
+            rag_fwd = rag_fwd[:_RAG_MAX_CHARS] + "\n... [truncated] ..."
+        if len(rag_bwd) > _RAG_MAX_CHARS:
+            rag_bwd = rag_bwd[:_RAG_MAX_CHARS] + "\n... [truncated] ..."
 
-        return (
-            "\n" + "="*80 + "\n" +
-            "REFERENCE ONLY (do not edit this section)\n" +
-            "="*80 + "\n" +
-            "\n" +
-            "The sections below show a RETRIEVED FWD+BWD pair written for a DIFFERENT kernel.\n" +
-            "Use this as a REFERENCE PATTERN to understand how backward mirrors forward structure.\n" +
-            "\n" +
-            "CRITICAL: Your task is to write backward for YOUR forward (shown in working file above).\n" +
-            "DO NOT copy-paste this reference code. Instead:\n" +
-            "1. Compare RETRIEVED FWD vs YOUR FWD (what's algorithmically different?)\n" +
-            "2. Understand the pattern (how does retrieved BWD mirror its FWD?)\n" +
-            "3. Apply that pattern to write BWD for YOUR FWD\n" +
-            "\n" +
-            "───────────────────────────────────────────────────────────────────────────────\n" +
-            "RETRIEVED FORWARD (this is what the retrieved backward was written for):\n" +
-            "───────────────────────────────────────────────────────────────────────────────\n" +
-            "\n" +
-            f"{rag_fwd}\n" +
-            "\n" +
-            "───────────────────────────────────────────────────────────────────────────────\n" +
-            "RETRIEVED BACKWARD (pattern reference - shows how backward mirrors forward):\n" +
-            "───────────────────────────────────────────────────────────────────────────────\n" +
-            "\n" +
-            f"{rag_bwd}\n" +
-            "\n" +
-            "="*80 + "\n" +
-            "END REFERENCE SECTION\n" +
-            "="*80 + "\n" +
-            "\n"
-        )
+        return f"""
+{_SEP_MAJOR}
+REFERENCE ONLY (do not edit this section)
+{_SEP_MAJOR}
+
+The sections below show a RETRIEVED FWD+BWD pair written for a DIFFERENT kernel.
+Use this as a REFERENCE PATTERN to understand how backward mirrors forward structure.
+
+CRITICAL: Your task is to write backward for YOUR forward (shown in working file above).
+DO NOT copy-paste this reference code. Instead:
+1. Compare RETRIEVED FWD vs YOUR FWD (what's algorithmically different?)
+2. Understand the pattern (how does retrieved BWD mirror its FWD?)
+3. Apply that pattern to write BWD for YOUR FWD
+
+{_SEP_MINOR}
+RETRIEVED FORWARD (this is what the retrieved backward was written for):
+{_SEP_MINOR}
+
+{rag_fwd}
+
+{_SEP_MINOR}
+RETRIEVED BACKWARD (pattern reference - shows how backward mirrors forward):
+{_SEP_MINOR}
+
+{rag_bwd}
+
+{_SEP_MAJOR}
+END REFERENCE SECTION
+{_SEP_MAJOR}
+
+"""
+
+    def generate_initial_file(self, fwd_source: str) -> str:
+        """Generate initial raised.py content with backward stub skeleton.
+
+        Uses utils.generate_backward_stub_skeleton() to parse forward and create
+        minimal backward_stub, then formats it with file header.
+
+        Args:
+            fwd_source: Forward kernel source code containing stub function
+
+        Returns:
+            String containing file header + backward stub skeleton
+        """
+        skeleton = generate_backward_stub_skeleton(fwd_source)
+        return f"""# {_SEP_HEADER}
+# YOUR BACKWARD (write this using RAG reference)
+# Forward kernel will be prepended by compile hook
+# {_SEP_HEADER}
+
+{skeleton}"""
 
     def allowed_edits_section(self) -> str:
         """Return RAG-specific allowed edits - stub signatures MUST be adapted to match forward."""
