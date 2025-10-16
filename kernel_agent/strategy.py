@@ -268,9 +268,19 @@ class RAGAdaptationStrategy(BaseStrategy):
         """Return RAG-specific workflow context emphasizing adaptation over optimization."""
         return (
             "\n### Workflow context\n"
-            "You are a Triton kernel adapter. You are called to adapt a retrieved backward kernel to work with a specific forward kernel.\n"
-            "Workflow: RAG retrieval -> [adapt -> gradcheck] repeats until gradcheck passes on all shapes.\n"
-            "The retrieved backward was written for a DIFFERENT forward kernel and needs adaptation to compute correct gradients for THIS forward.\n"
+            "You are a Triton kernel adapter. Your task: write a backward kernel for YOUR forward (shown in working file).\n"
+            "You can try adapt a retrieved backward kernel to work with a specific forward kernel.\n"
+            "Workflow: RAG retrieval -> [write/adapt backward -> gradcheck] repeats until gradcheck passes on all shapes.\n"
+            "\n"
+            "A retrieved FWD+BWD pair is provided as a REFERENCE PATTERN (see reference section below).\n"
+            "The retrieved backward was written for a DIFFERENT forward kernel and needs adaptation/rewrite to compute correct gradients for THIS forward.\n"
+            "Your job: write backward for YOUR forward using the retrieved pair as a pattern guide.\n"
+            "\n"
+            "CRITICAL APPROACH:\n"
+            "1. SEMANTIC ANALYSIS FIRST: Compare RETRIEVED FWD vs YOUR FWD (what's algorithmically different?)\n"
+            "2. UNDERSTAND PATTERN: How does retrieved BWD mirror its FWD structure?\n"
+            "3. APPLY PATTERN: Write BWD for YOUR FWD following the same backward-mirrors-forward principle\n"
+            "\n"
             "Your goal is correctness (pass gradcheck), not optimization. The retrieved kernel is already optimized.\n"
             "You will have multiple turns to refine the adaptation. Adhere to Phase-specific adaptation goals.\n"
         )
@@ -278,6 +288,58 @@ class RAGAdaptationStrategy(BaseStrategy):
     def kernel_details_section(self) -> str:
         """RAG kernels don't have compiler-specific characteristics, return empty."""
         return ""
+
+    def rag_reference_section(self, rag_fwd: str, rag_bwd: str) -> str:
+        """Build readonly RAG reference section for prompt.
+
+        This shows the retrieved FWD+BWD pair as a reference pattern,
+        NOT as code to edit directly. Forces semantic comparison with user's forward.
+
+        Args:
+            rag_fwd: Retrieved forward kernel source
+            rag_bwd: Retrieved backward kernel source
+
+        Returns:
+            Formatted reference block with comparison instructions
+        """
+        # Truncate if too long (keep under ~15k chars each to stay within token budget)
+        max_chars = 15000
+        if len(rag_fwd) > max_chars:
+            rag_fwd = rag_fwd[:max_chars] + "\n... [truncated] ..."
+        if len(rag_bwd) > max_chars:
+            rag_bwd = rag_bwd[:max_chars] + "\n... [truncated] ..."
+
+        return (
+            "\n" + "="*80 + "\n" +
+            "REFERENCE ONLY (do not edit this section)\n" +
+            "="*80 + "\n" +
+            "\n" +
+            "The sections below show a RETRIEVED FWD+BWD pair written for a DIFFERENT kernel.\n" +
+            "Use this as a REFERENCE PATTERN to understand how backward mirrors forward structure.\n" +
+            "\n" +
+            "CRITICAL: Your task is to write backward for YOUR forward (shown in working file above).\n" +
+            "DO NOT copy-paste this reference code. Instead:\n" +
+            "1. Compare RETRIEVED FWD vs YOUR FWD (what's algorithmically different?)\n" +
+            "2. Understand the pattern (how does retrieved BWD mirror its FWD?)\n" +
+            "3. Apply that pattern to write BWD for YOUR FWD\n" +
+            "\n" +
+            "───────────────────────────────────────────────────────────────────────────────\n" +
+            "RETRIEVED FORWARD (this is what the retrieved backward was written for):\n" +
+            "───────────────────────────────────────────────────────────────────────────────\n" +
+            "\n" +
+            f"{rag_fwd}\n" +
+            "\n" +
+            "───────────────────────────────────────────────────────────────────────────────\n" +
+            "RETRIEVED BACKWARD (pattern reference - shows how backward mirrors forward):\n" +
+            "───────────────────────────────────────────────────────────────────────────────\n" +
+            "\n" +
+            f"{rag_bwd}\n" +
+            "\n" +
+            "="*80 + "\n" +
+            "END REFERENCE SECTION\n" +
+            "="*80 + "\n" +
+            "\n"
+        )
 
     def allowed_edits_section(self) -> str:
         """Return RAG-specific allowed edits - stub signatures MUST be adapted to match forward."""

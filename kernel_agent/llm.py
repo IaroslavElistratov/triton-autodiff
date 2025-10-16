@@ -250,16 +250,28 @@ class MinimalLLMPatchProvider:
         # system = base + initial_kernel_details + tail
 
 
-        # Create working file snippet (orchestrator prepended forward to backward file).
-        # The working file now contains: forward kernel+stub at top, backward kernel+stub at bottom.
-        # Both sections are editable by LLM, enabling coordination (e.g., forward saves intermediates).
+        # Create working file snippet
+        # For RAG-only mode: working file contains USER FWD + backward stub skeleton
+        # For compiler mode: working file contains both forward and backward
         working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
 
-        # Optional RAG block: append compact retrieved references to the phase header
-        # Cache the RAG block since forward kernel doesn't change during a run
-        # Only add when KERNEL_AGENT_RAG_PROMPTS is set (--rag --compiler)
-        # RAG-only init skips this to avoid duplicating the working kernel in context
-        if self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG_PROMPTS", "0"):
+        # RAG reference block: two different modes
+        # 1. RAG-only mode (--rag without --compiler): Strategy has stored _rag_fwd and _rag_bwd
+        #    Show full RAG FWD+BWD as readonly reference for each turn
+        # 2. Hybrid mode (--rag --compiler): Use build_rag_block for compact references
+        #    Only add when KERNEL_AGENT_RAG_PROMPTS is set
+
+        rag_block = ""
+
+        # Check if strategy has stored RAG references (RAG-only mode)
+        if hasattr(strategy, '_rag_fwd') and hasattr(strategy, '_rag_bwd'):
+            # RAG-only mode: show full RAG FWD+BWD as reference
+            rag_block = strategy.rag_reference_section(strategy._rag_fwd, strategy._rag_bwd)
+            if VERBOSE and not rag_block:
+                print("[kernel-agent] RAG reference section is empty")
+
+        # Otherwise check for hybrid mode (--rag --compiler)
+        elif self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG_PROMPTS", "0"):
             try:
                 from pathlib import Path
                 index_path = Path(__file__).parent / "kernel_embeddings.pkl"
@@ -283,7 +295,7 @@ class MinimalLLMPatchProvider:
                 if VERBOSE:
                     print(f"[kernel-agent] RAG retrieval failed: {type(e).__name__}: {e}")
 
-        rag_block = self._rag_cache or ""
+            rag_block = self._rag_cache or ""
 
         # Format state_facts for LLM prompt.
         # orchestrator.py extracts pre-formatted summary_text from gradcheck results,
