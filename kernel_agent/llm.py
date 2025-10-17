@@ -132,7 +132,10 @@ class MinimalLLMPatchProvider:
     temperature: float = 0.0
     max_tokens: int = 1536
     context: int | None = None
-    snippet_max_lines: int = 800  # Max lines shown to LLM (increased to accommodate fwd+bwd in one file)
+    # No limit - 800-line truncation cuts mid-function → model thinks "code missing, must re-add"
+    # (reality: code complete, just hidden) → re-adds existing code, comments out working sections,
+    # re-applies same patches → IndentationError death spiral (9 consecutive iters, 4K reasoning tokens wasted)
+    snippet_max_lines: int | None = None
     # Tracks backend stop reason (e.g., "max_tokens") to disambiguate truncation
     # from other failure modes and report errors upstream.
     last_stop_reason: str = ""

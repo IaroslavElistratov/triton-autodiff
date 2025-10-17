@@ -334,11 +334,16 @@ def run_with_timeout(fn, timeout_s: float):
 
 
 
-# todo-high: use slicing, don't feed entire file
-def _read_snippet(path: str, max_lines: int) -> str:
+def _read_snippet(path: str, max_lines: int | None) -> str:
+    """Read file snippet, optionally limiting lines.
+
+    If max_lines is None, reads entire file (no limit).
+    """
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
+        if max_lines is None:
+            return "".join(lines)
         return "".join(lines[:max_lines])
     except Exception as e:
         return f"(snippet unavailable: {e})"
