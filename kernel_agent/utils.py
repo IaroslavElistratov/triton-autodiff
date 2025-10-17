@@ -247,9 +247,6 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
 
     if not callable(ns.get("make_args")) or not isinstance(ns.get("SWEEP"), (list, tuple)):
         raise UserError("User kernel must define make_args and SWEEP")
-    if not ns.get("torch_fn"):
-        raise UserError("Please define torch_fn semantically equivalent to your triton kernel + stub")
-
 
     bwd_fp = None
     def _exec_setup():

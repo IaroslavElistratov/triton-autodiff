@@ -114,10 +114,6 @@ def stub(
     return c
 
 
-def torch_fn(a, b):
-    return torch.matmul(a, b)
-
-
 SWEEP = [
     # {"M": size, "N": size, "K": 16}
     # for size in (256, 512, 1024, 2048)

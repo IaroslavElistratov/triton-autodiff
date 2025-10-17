@@ -186,35 +186,11 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         from .utils import compile_kernel
         import torch as _t
 
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # GRADCHECK MODE SELECTION
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # Default: Uses PyTorch's torch.autograd.gradcheck (numerical mode)
-        # - Computes numerical gradients via finite differences: (f(x+eps) - f(x-eps))/(2*eps)
-        # - Compares against analytical gradients from backward kernel
-        # - Uses ONLY efficient Triton kernel (no naive torch_fn) → O(n) memory
-        # - Works with float32/float16 (PyTorch warns but passes with appropriate tolerances)
-        #
-        # Alternative: Set GRADCHECK_MODE=parity for original behavior
-        # - Compares naive torch_fn reference vs Triton kernel (both analytical gradients)
-        # - WARNING: torch_fn materializes full O(n²) attention matrices → OOM on large sequences
-        # - Only use for small sequences or when you need direct reference comparison
-        #
-        # Modes:
-        #   - "numerical" (default): PyTorch gradcheck with Triton kernel only
-        #                           → Avoids OOM, uses O(n) memory throughout
-        #   - "parity": Compares torch_fn (naive) vs Triton kernel
-        #              → WILL OOM on large sequences due to torch_fn O(n²)
-        # ═══════════════════════════════════════════════════════════════════════════════
-        gradcheck_mode = os.environ.get("GRADCHECK_MODE", "numerical").lower()
-
-        # Import appropriate gradcheck function based on mode
-        if gradcheck_mode == "numerical":
-            # Efficient numerical gradients using Triton forward kernel (avoids O(n²) memory)
-            from .tools.gradcheck.core_efficient import check_op_backward_numerical_sweep as gradcheck_fn
-        else:
-            # Original parity mode comparing torch reference vs Triton kernel
-            from .tools.gradcheck.core import check_op_backward_parity_sweep as gradcheck_fn
+        # Import gradcheck function - uses PyTorch's torch.autograd.gradcheck
+        # Computes numerical gradients via finite differences: (f(x+eps) - f(x-eps))/(2*eps)
+        # Compares against analytical gradients from backward kernel
+        # Uses ONLY efficient Triton kernel (no naive torch_fn) → O(n) memory
+        from .tools.gradcheck.core_efficient import check_op_backward_numerical_sweep as gradcheck_fn
 
         # CRITICAL: compile_kernel runs FIRST in this child process:
         # - Executes fwd_fp (attention.py) → hook fires → loads stubs from raised.py
@@ -236,24 +212,13 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # - Stub calls kernels from raised.py namespace (different JITFunction objects)
         # Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, NOT user file
 
-        # Call the appropriate gradcheck function based on mode
-        if gradcheck_mode == "numerical":
-            # Numerical mode: uses efficient forward for numerical gradients
-            # No ref_fwd needed - uses my_op for both numerical and analytical
-            ok, stats = gradcheck_fn(
-                my_op=op, sidecar=sidecar, outputs="auto",
-                atol=0.07, rtol=0.02,
-                eps=float(os.environ.get("GRADCHECK_EPS", "1e-4")),
-                numerical_method=os.environ.get("GRADCHECK_NUMERICAL_METHOD", "central")
-            )
-        else:
-            # Parity mode: compares torch reference vs Triton kernel (original behavior)
-            ok, stats = gradcheck_fn(
-                ref_fwd=ns["torch_fn"], my_op=op, sidecar=sidecar, outputs="auto",
-                # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
-                # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
-                atol=0.07, rtol=0.02
-            )
+        # Call gradcheck function with numerical gradients via PyTorch's gradcheck
+        ok, stats = gradcheck_fn(
+            my_op=op, sidecar=sidecar, outputs="auto",
+            atol=0.07, rtol=0.02,
+            eps=float(os.environ.get("GRADCHECK_EPS", "1e-4")),
+            numerical_method=os.environ.get("GRADCHECK_NUMERICAL_METHOD", "central")
+        )
         try:
             _t.cuda.synchronize()
         except Exception:

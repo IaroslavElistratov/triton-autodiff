@@ -211,27 +211,6 @@ def stub(q, k, v, causal=False, sm_scale=0.5, BLOCK_M=16, BLOCK_N=16):
     return o
 
 
-def torch_fn(q, k, v, causal=False, sm_scale=0.5):
-    p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
-
-    if causal:
-        M = torch.tril(torch.ones((SEQ_LEN, SEQ_LEN), device=DEVICE))
-        p[:, :, M == 0] = float("-inf")
-
-    # p = torch.softmax(p.float(), dim=-1).half()
-
-    p = p.float()
-    p = p - p.max(axis=3, keepdim=True)[0]
-    p = torch.exp(p)
-    p = (p / p.sum(dim=3, keepdim=True))
-    p = p.half()
-
-    ref_out = torch.matmul(p, v)
-    return ref_out
-
-
-
-
 
 SWEEP = [
     # todo: use these instead
@@ -262,9 +241,6 @@ def flops(dims, mode):
 
 
 def setup():
-    # q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-    # k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-    # v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
     (q, k, v), _ = make_args(SWEEP[0])
     stub(q, k, v)
 
