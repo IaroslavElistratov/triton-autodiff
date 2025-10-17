@@ -613,8 +613,6 @@ def generate_backward_stub_skeleton(fwd_source: str) -> str:
     # (hook has actual runtime type info, skeleton generator only has syntax)
     skeleton = f'''def backward_stub({signature}, *, upstream_0):
     """Backward pass for YOUR forward kernel.
-
-    Hook will inject SIGNATURE CONTRACT comment after first compilation.
     """
 
     # TODO: Adapt retrieved backward logic for YOUR forward

@@ -1,4 +1,7 @@
 
+/triton_autodiff/third_party/nvidia/*
+/triton_autodiff/python/*
+
 
 *.diff
 *.log
