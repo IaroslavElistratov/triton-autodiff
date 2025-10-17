@@ -19,7 +19,7 @@ from .llm import MinimalLLMPatchProvider
 
 def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
-    ap.add_argument("--max-iters", type=int, default=8)
+    ap.add_argument("--max-iters", type=int, default=15)
     ap.add_argument("--patience_perf_stop", type=int, default=4)
     ap.add_argument("--patience_parity_restore", type=int, default=4)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
