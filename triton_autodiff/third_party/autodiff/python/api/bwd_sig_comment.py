@@ -103,28 +103,36 @@ def extract_stub_info(stub_source, stub_name):
 def analyze_stub_for_signature(fwd_source, stub_name, kernel_name, compile_signature):
     """
     Analyze stub to determine tensor parameters and return count.
-    Uses kernel call site analysis - no name heuristics.
+    Uses kernel call site analysis - NO name heuristics.
 
-    Instead of matching stub param names to kernel param names (fails when
-    stub uses "weight" but kernel uses "W"), this matches stub params to
-    their POSITIONS in the kernel call, then checks if those positions
-    are pointer types in compile_signature.
+    Instead of matching stub param names to kernel param names, this
+    matches stub params to their POSITIONS in the kernel call, the
+    checks if those positions are pointer types in compile_signature.
+
+    Call-site analysis (current approach)
+    - Parse stub AST to find kernel[grid](...) call
+    - Match stub params by POSITION in kernel call (not by name)
+    - Check compile_signature to see if that position is a pointer type
+    - Example: stub calls kernel[grid](x, weight, eps, ...)
+    -   Position 0: x → compile_signature[0] = '*fp32' → tensor
+    -   Position 1: weight → compile_signature[1] = '*fp32' → tensor
+    -   Position 3: eps → compile_signature[2] = 'fp32' → scalar (no *)
+    - Correctly identifies (x, weight, bias) as tensors regardless of kernel param names
+
+    compile_signature has ground truth from Triton compilation
 
     Args:
         fwd_source: Source code containing stub definition
         stub_name: Name of stub function (e.g., "stub")
         kernel_name: Name of kernel function (e.g., "_layer_norm_fwd_fused")
         compile_signature: Ordered dict {param_name: type_str} from kernel compilation
+                          e.g., {'X': '*fp32', 'W': '*fp32', 'eps': 'fp32', ...}
 
     Returns:
         (param_names, tensor_params, num_returns)
         - param_names: List of all stub parameter names
-        - tensor_params: List of stub params that are tensors (based on kernel call position)
-        - num_returns: Number of values returned by stub
-
-    Raises:
-        ValueError: If stub or kernel call not found
-        SyntaxError: If source cannot be parsed
+        - tensor_params: List of stub params that are tensors (identified via call-site analysis)
+        - num_returns: Number of return values from stub
     """
     import ast
 
@@ -224,3 +232,91 @@ def build_signature_comment(bwd_name, param_names, num_returns, ret_string):
     ])
 
     return "\n".join(lines)
+
+
+def generate_backward_stub_with_scaffolding(stub_name, fwd_source, kernel_name, compile_signature):
+    """
+    Generate backward_stub skeleton with proper scaffolding using compile_signature.
+
+    Moved skeleton generation from orchestrator (old approach), because
+    orchestrator runs BEFORE kernel compilation -> no access to compile_signature
+
+    Skeleton generation in compile hook (current approach)
+    - Hook runs AFTER kernel compilation (triggered by first forward pass)
+    - Has access to compile_signature with ground truth type information
+    - Uses call-site analysis to match params by position
+    - Generates correct scaffolding:
+    -   grad_x = torch.zeros_like(x)     # Only for tensors
+    -   grad_weight = torch.zeros_like(weight)
+    -   # NOT for scalars like eps
+    -   return (grad_x, grad_weight)  # Correct count
+
+    Why this timing is critical:
+    - Orchestrator: runs once at start, no kernel compilation yet
+    - First forward pass: triggers kernel compilation, hook fires
+    - Hook has compile_signature available from jit_fn._compile_signature
+    - This is the ONLY point where we have both source code AND type info
+
+    Args:
+        stub_name: Name of forward stub (e.g., "stub")
+        fwd_source: Full source code containing stub and kernel call
+        kernel_name: Name of kernel function
+        compile_signature: Kernel compile signature dict from Triton
+
+    Returns:
+        str: Complete backward_stub skeleton with scaffolding
+    """
+    # Use call-site analysis to identify tensor params
+    param_names, tensor_params, num_returns = analyze_stub_for_signature(
+        fwd_source, stub_name, kernel_name, compile_signature
+    )
+
+    # Build signature string (same as forward stub)
+    # Note: We don't have access to default values easily, so just list params
+    bwd_name = f"backward_{stub_name}"
+    params_str = ", ".join(param_names)
+
+    # Build upstream kwargs
+    upstream_params = ", ".join(f"upstream_{i}" for i in range(num_returns))
+
+    # Generate grad allocation code for tensor params
+    grad_allocs = []
+    for tparam in tensor_params:
+        grad_allocs.append(f"    grad_{tparam} = torch.zeros_like({tparam})")
+
+    # Build return tuple
+    ret_parts = [f"grad_{tp}" for tp in tensor_params]
+    if len(ret_parts) == 1:
+        ret_tuple = f"({ret_parts[0]},)"
+    else:
+        ret_tuple = f"({', '.join(ret_parts)})"
+
+    skeleton_lines = [
+        f"def {bwd_name}({params_str}, *, {upstream_params}):",
+        '    """Backward pass for YOUR forward kernel.',
+        '    ',
+        '    TODO: Implement gradient computation',
+        '    - Allocate gradient buffers (see scaffolding below)',
+        '    - Call backward kernel(s) to compute gradients',
+        '    - Return gradients for tensor inputs in correct order',
+        '    """',
+        '    # Allocate gradient buffers for tensor inputs',
+    ]
+
+    skeleton_lines.extend(grad_allocs)
+
+    skeleton_lines.extend([
+        '',
+        '    # TODO: Call backward kernel(s) to compute gradients',
+        '    # Example:',
+        '    #   backward_kernel[grid](',
+        f'    #       {", ".join(param_names)},',
+        f'    #       {", ".join(f"grad_{tp}" for tp in tensor_params)},',
+        f'    #       upstream_0,  # gradient from loss',
+        '    #       ...',
+        '    #   )',
+        '',
+        f'    return {ret_tuple}',
+    ])
+
+    return "\n".join(skeleton_lines)

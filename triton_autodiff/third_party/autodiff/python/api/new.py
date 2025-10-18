@@ -2,7 +2,7 @@ import runpy
 import inspect, functools
 
 from .common import *
-from .bwd_sig_comment import build_signature_comment_from_stub_analysis
+from .bwd_sig_comment import build_signature_comment_from_stub_analysis, generate_backward_stub_with_scaffolding
 
 
 # todo: replace the two subprocess helpers with import-first calls
@@ -254,7 +254,18 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # - LLM can edit both: enables coordination (e.g., forward saves intermediates, backward uses them)
         # - Runtime binding: load both stubs from raised.py, edits take effect at runtime
 
-        raised_content = open(raised_py_path).read()
+        # Check if file exists (RAG mode might not have written it yet)
+        if os.path.exists(raised_py_path):
+            raised_content = open(raised_py_path).read()
+
+            # Detect old skeleton format from previous orchestrator (pre-refactor)
+            # If found, treat as non-existent to force regeneration with new format
+            if "# YOUR BACKWARD (write this using RAG reference)" in raised_content:
+                raised_content = ""
+        else:
+            # RAG mode on first run: file doesn't exist yet
+            # Hook will generate entire structure with compile_signature available
+            raised_content = ""
 
         # Re-prepend if forward is missing OR if @autodiff decorator is present (need to strip it)
         needs_prepend = (f"def {stub_name}(" not in raised_content) or ("@autodiff" in raised_content)
@@ -300,16 +311,20 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                         f.write("\n")
                         f.write(gen_dck_template(stub_name))
 
-        # Add signature comment if missing (applies to both compiler and RAG paths)
+        # Add signature comment and/or backward_stub if missing
         # Compiler path: emit_stub.py generates backward stub without signature comment
-        # RAG path: orchestrator writes backward skeleton without signature comment
-        # Both paths: add signature comment here using kernel call site analysis
+        # RAG path: orchestrator doesn't write file, hook generates everything
+        # Both paths: add signature comment + skeleton here using kernel call site analysis
         raised_content = open(raised_py_path).read()
-        if "# SIGNATURE CONTRACT" not in raised_content:
-            fwd_source = raised_content.split("# Backward kernel and stub")[0]
 
-            # Use kernel call site analysis (no name heuristics)
-            # Parses stub to find kernel[grid](...) call and matches params by position
+        # Check if we need to generate backward_stub skeleton
+        needs_backward_stub = f"def backward_{stub_name}(" not in raised_content
+        needs_signature_comment = "# SIGNATURE CONTRACT" not in raised_content
+
+        if needs_backward_stub or needs_signature_comment:
+            fwd_source = raised_content.split("# Backward kernel and stub")[0] if "# Backward kernel and stub" in raised_content else raised_content
+
+            # Generate signature comment using call-site analysis
             sig_comment = build_signature_comment_from_stub_analysis(
                 stub_name,
                 fwd_source,           # Full source with kernel call
@@ -317,12 +332,49 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                 jit_fn._compile_signature
             )
 
-            # Insert signature comment after the backward section separator (# ====)
-            raised_content = re.sub(
-                r'(# Backward kernel and stub\n# =+\n)',
-                r'\1' + sig_comment,
-                raised_content
-            )
+            if needs_backward_stub:
+                # Generate backward_stub skeleton with proper scaffolding
+                # Uses compile_signature to identify tensor params and allocate grad buffers
+                stub_skeleton = generate_backward_stub_with_scaffolding(
+                    stub_name,
+                    fwd_source,
+                    jit_fn.fn.__name__,
+                    jit_fn._compile_signature
+                )
+
+                # Check if DCK template exists in original content (preserve it)
+                dck_content = ""
+                if "class StubOverrideDCK" in raised_content:
+                    # Extract DCK section
+                    parts = raised_content.split("class StubOverrideDCK")
+                    if len(parts) > 1:
+                        dck_content = "\nclass StubOverrideDCK" + parts[1]
+                else:
+                    # DCK not present, generate it
+                    dck_content = "\n" + gen_dck_template(stub_name)
+
+                # Build complete backward section
+                backward_section = (
+                    "# ============================================================\n"
+                    "# Backward kernel and stub\n"
+                    "# ============================================================\n"
+                    f"{sig_comment}\n"
+                    f"{stub_skeleton}\n"
+                    f"{dck_content}"
+                )
+
+                # Rebuild complete file (forward + backward + DCK)
+                raised_content = fwd_source + "\n\n" + backward_section
+
+            elif needs_signature_comment:
+                # Stub exists but signature comment missing (emit_stub.py case)
+                # Insert signature comment after the backward section separator
+                raised_content = re.sub(
+                    r'(# Backward kernel and stub\n# =+\n)',
+                    r'\1' + sig_comment,
+                    raised_content
+                )
+
             with open(raised_py_path, "w") as f:
                 f.write(raised_content)
 

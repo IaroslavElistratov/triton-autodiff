@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 import os
 
-from .utils import _env_truthy, generate_backward_stub_skeleton
+from .utils import _env_truthy
 
 
 # Default verbose ON unless explicitly disabled
@@ -384,26 +384,6 @@ END REFERENCE SECTION
 {_SEP_MAJOR}
 
 """
-
-    def generate_initial_file(self, fwd_source: str) -> str:
-        """Generate initial raised.py content with backward stub skeleton.
-
-        Uses utils.generate_backward_stub_skeleton() to parse forward and create
-        minimal backward_stub, then formats it with file header.
-
-        Args:
-            fwd_source: Forward kernel source code containing stub function
-
-        Returns:
-            String containing file header + backward stub skeleton
-        """
-        skeleton = generate_backward_stub_skeleton(fwd_source)
-        return f"""# {_SEP_HEADER}
-# YOUR BACKWARD (write this using RAG reference)
-# Forward kernel will be prepended by compile hook
-# {_SEP_HEADER}
-
-{skeleton}"""
 
     def allowed_edits_section(self) -> str:
         """Return RAG-specific allowed edits - stub signatures MUST be adapted to match forward."""
