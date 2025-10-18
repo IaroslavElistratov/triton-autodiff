@@ -475,10 +475,8 @@ class KernelOptimizer:
             if VERBOSE:
                 print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
-            # Store only formatted text in history to avoid duplication with state_facts.
-            # The summary_text already contains all important info (errors, per-input details).
-            # state_facts will show current iteration's formatted summary, so history doesn't need raw dict.
-            self.patcher.remember("gradcheck", grad_stats.get("summary_text", str(grad_stats)))
+            # Don't add gradcheck to history - it appears in state_facts when prompting,
+            # and previous iterations' gradcheck results aren't useful for current fixes.
 
             was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
 
