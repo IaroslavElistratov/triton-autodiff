@@ -281,6 +281,9 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                     if len(parts) > 1:
                         raised_content = "# Backward kernel and stub" + parts[-1]
 
+                # Check if DCK already present (avoid overwriting model edits on retrace)
+                needs_dck = "class StubOverrideDCK" not in raised_content
+
                 with open(raised_py_path, "w") as f:
                     f.write("# ============================================================\n")
                     f.write("# Forward kernel and stub (copied from user file)\n")
@@ -291,6 +294,11 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                     f.write("# Backward kernel and stub\n")
                     f.write("# ============================================================\n\n")
                     f.write(raised_content)
+
+                    # Append LLM-editable DCK template (first trace only)
+                    if needs_dck:
+                        f.write("\n")
+                        f.write(gen_dck_template(stub_name))
 
         # Add signature comment for RAG path (compiler path already has it from emit_stub.py)
         raised_content = open(raised_py_path).read()
@@ -311,28 +319,41 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                 with open(raised_py_path, "w") as f:
                     f.write(raised_content)
 
-        # Load both forward and backward stubs from raised.py
-        # Enforce consistent naming: backward stub must be named backward_{stub_name}
-        # Compiler mode generates this name automatically
-        # RAG mode: LLM must rename retrieved stub to match this convention
+        # Load DCK and/or stubs from raised.py
+        # New approach (raised.py with DCK): Load CustomDCK class
+        # Old approach (backward compat): Load stubs for tuple-based framework DCK
         # NOTE: LLM edits are picked up because we rebind each time
         raised_module = runpy.run_path(raised_py_path)
 
-        bwd_stub_name = f"backward_{stub_name}"
-        bwd_stub = raised_module.get(bwd_stub_name)
-        if not bwd_stub:
-            raise KeyError(f"Backward stub '{bwd_stub_name}' not found in {raised_py_path}")
+        # Try loading custom DCK first (new raised.py files)
+        CustomDCK = raised_module.get("StubOverrideDCK")
+        if CustomDCK:
+            # New path: LLM-editable DCK in raised.py
+            setattr(jit_fn, "_CustomDCK", CustomDCK)
+        # todo: remove
+        else:
+            # Fallback: old raised.py without DCK (backward compat)
+            # Load stubs for framework StubOverrideDCK (tuple-based)
 
-        fwd_stub = raised_module.get(stub_name)
-        if not fwd_stub:
-            raise KeyError(f"Forward stub '{stub_name}' not found in {raised_py_path}")
+            # Load both forward and backward stubs from raised.py
+            # Enforce consistent naming: backward stub must be named backward_{stub_name}
+            # Compiler mode generates this name automatically
+            # RAG mode: LLM must rename retrieved stub to match this convention
+            bwd_stub_name = f"backward_{stub_name}"
+            bwd_stub = raised_module.get(bwd_stub_name)
+            if not bwd_stub:
+                raise KeyError(f"Backward stub '{bwd_stub_name}' not found in {raised_py_path}")
 
-        assert callable(bwd_stub)
-        assert callable(fwd_stub)
+            fwd_stub = raised_module.get(stub_name)
+            if not fwd_stub:
+                raise KeyError(f"Forward stub '{stub_name}' not found in {raised_py_path}")
 
-        # _bwd_stub_proxy then uses it at runtime to load the backward generated stub
-        setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
-        setattr(jit_fn, "_generated_fwd_stub", fwd_stub)
+            assert callable(bwd_stub)
+            assert callable(fwd_stub)
+
+            # Old path: _bwd_stub_proxy uses these at runtime
+            setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
+            setattr(jit_fn, "_generated_fwd_stub", fwd_stub)
         # remember path on the kernel for future retraces. We avoid relying on the
         # thread‑local ContextVar because it is reset after setup() and can point to
         # artifacts of a different kernel if multiple kernels are traced interleaved
@@ -381,7 +402,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 triton.knobs.runtime.jit_post_compile_hook = my_post_hook
 
 
-
+# todo: remove
 # same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
 # useful to provide llm with ability to overwirte stubs
 class StubOverrideDCK(torch.autograd.Function):
@@ -449,6 +470,62 @@ def get_fwd_source_from_module(mod_name: str) -> str:
     return redact_torch_fn(fwd_file, None)
 
 
+def gen_dck_template(stub_name: str) -> str:
+    """Generate LLM-editable DCK class for raised.py.
+
+    Creates a working StubOverrideDCK that calls stub/backward_stub directly,
+    with optimization guidance in docstring for saving forward intermediates.
+    """
+    bwd_name = f"backward_{stub_name}"
+
+    return f'''
+class StubOverrideDCK(torch.autograd.Function):
+    """
+    Connects forward/backward stubs for automatic differentiation.
+
+    OPTIMIZATION: To avoid wasteful recomputation of forward intermediates,
+    edit this class to save/restore them via ctx.save_for_backward().
+    See "CRITICAL: AVOID RECOMPUTING FORWARD INTERMEDIATES" in prompts for pattern.
+    """
+
+    @staticmethod
+    def forward(ctx, *all_stub_inputs):
+        # Call forward stub (defined above in this file)
+        result = {stub_name}(*all_stub_inputs)
+
+        # Save tensor inputs for backward
+        ten = [x for x in all_stub_inputs if isinstance(x, torch.Tensor)]
+        ctx.save_for_backward(*ten)
+
+        # Save non-tensor inputs (scalars, shapes, etc.)
+        ctx.non_ten = [x for x in all_stub_inputs if not isinstance(x, torch.Tensor)]
+        ctx.is_ten = [isinstance(x, torch.Tensor) for x in all_stub_inputs]
+
+        return result
+
+    @staticmethod
+    def backward(ctx, *upstreams):
+        # Reconstruct all forward inputs (mix tensors + non-tensors)
+        it_t = iter(ctx.saved_tensors)
+        it_n = iter(ctx.non_ten)
+        all_inps = [next(it_t) if t else next(it_n) for t in ctx.is_ten]
+
+        # Prepare upstream gradients as keyword args
+        kw_up = {{f"upstream_{{i}}": g for i, g in enumerate(upstreams)}}
+
+        # Call backward stub (defined above in this file)
+        grads_for_tensors = {bwd_name}(*all_inps, **kw_up)
+
+        # Validate return count (must match number of tensor inputs)
+        if len(grads_for_tensors) != sum(ctx.is_ten):
+            raise RuntimeError("Backward stub must return one grad per tensor input (in stub order).")
+
+        # Align gradients to forward inputs (Tensor → grad, non-Tensor → None)
+        it_g = iter(grads_for_tensors)
+        per_input = [next(it_g) if t else None for t in ctx.is_ten]
+        return tuple(per_input)
+'''
+
 
 # now i'm sucessfully generating both raised user bwd kernel and bwd stub into a file.
 # Now basically i want to replace user's stub (fucntion with some name) in their module
@@ -463,7 +540,7 @@ def get_fwd_source_from_module(mod_name: str) -> str:
 
 # autograd.Function[s] doesn't support kwargs, but user might be
 # using their stub with kwargs this helper adds the kwarg support
-def _add_kwarg_support(fwd_stub, bwd_proxy):
+def _add_kwarg_support(fwd_stub, bwd_proxy, fwd_kernel):
     sig   = inspect.signature(fwd_stub)
     names = [p.name for p in sig.parameters.values()]
 
@@ -472,7 +549,15 @@ def _add_kwarg_support(fwd_stub, bwd_proxy):
         bound = sig.bind_partial(*args, **kwargs); bound.apply_defaults()
         # fixed positional order for c++ apply
         ordered = [bound.arguments[n] for n in names]
-        return StubOverrideDCK.apply((fwd_stub, bwd_proxy), *ordered)
+
+        # Check if custom DCK available (new raised.py files)
+        CustomDCK = getattr(fwd_kernel, "_CustomDCK", None)
+        if CustomDCK:
+            # Use LLM-editable DCK from raised.py (no stubs tuple)
+            return CustomDCK.apply(*ordered)
+        else:
+            # Fallback to framework DCK (old raised.py or first call before hook)
+            return StubOverrideDCK.apply((fwd_stub, bwd_proxy), *ordered)
     return wrapped
 
 
@@ -510,6 +595,7 @@ def autodiff(kernel, idxs_buffers, stub_name=None):
             if fn is not None:
                 # Use LLM-editable version from raised.py (enables forward/backward coordination)
                 return fn(*args, **kwargs)
+            # todo: remove
             # Fallback to original user stub on first call (before hook installs generated version)
             # Hook fires during kernel compilation inside first stub call, so proxy executes before hook
             return fwd_stub(*args, **kwargs)
@@ -529,7 +615,7 @@ def autodiff(kernel, idxs_buffers, stub_name=None):
         _fwd_stub_proxy.__signature__ = inspect.signature(fwd_stub)
         _fwd_stub_proxy.__wrapped__ = fwd_stub  # For inspect.unwrap in case signature extraction uses it
 
-        wrapped = _add_kwarg_support(_fwd_stub_proxy, _bwd_stub_proxy)   # Pass proxies, not raw stubs
+        wrapped = _add_kwarg_support(_fwd_stub_proxy, _bwd_stub_proxy, fwd_kernel)   # Pass proxies + kernel
         setattr(wrapped, "__is_autodiff_stub__", True)            # tag for loader detection
         return wrapped
 

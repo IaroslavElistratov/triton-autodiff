@@ -135,11 +135,45 @@ class BaseStrategy:
         """
         return (
             # "You must modify backward kernel; but preserve function names and pointer/mask semantics.\n"
-            "The backward file contains BOTH the backward Triton kernel and a generated backward stub; you can (and likely should) edit both.\n"
-            "Do NOT change the backward stub's signature, you can edit body of the stub but not its signature.\n"
-            "You can edit the backward kernel signature and its body (but not stub's signature). Do not rename or move the file.\n"
-            "You must only have a single backward kernel and a single backward stub, do not attempt to create multiple backward kernels or stubs.\n"
-            "You can edit _mk_block_ptr when it's present.\n"
+            "The backward file contains the forward stub, backward Triton kernel, backward stub, and StubOverrideDCK class.\n"
+            "You can edit: backward kernel, backward stub body, forward stub body, and StubOverrideDCK class.\n"
+            "Do NOT change stub signatures. Do not rename or move the file.\n"
+            "You must only have a single backward kernel and a single backward stub.\n"
+            # "You can edit _mk_block_ptr when it's present.\n"
+            "\n"
+            "### CRITICAL: AVOID RECOMPUTING FORWARD INTERMEDIATES\n"
+            "\n"
+            "DETECT WASTE: Does backward_stub call forward_kernel to recompute intermediates?\n"
+            "  Pattern: forward_kernel[grid](..., intermediate_buffers, ...)  # ← Wasteful!\n"
+            "\n"
+            "FIX: Modify StubOverrideDCK class (at bottom of file) to save/restore intermediates.\n"
+            "\n"
+            "REQUIRED CHANGES:\n"
+            "\n"
+            "1. IN forward() METHOD - allocate, pass, and save intermediates:\n"
+            "   stats = torch.empty(...)  # Allocate intermediate buffers\n"
+            "   result = stub(*all_stub_inputs, stats=stats)  # Pass to stub\n"
+            "   ctx.save_for_backward(*ten, stats)  # SAVE intermediates (not just inputs!)\n"
+            "   ctx.num_input_tensors = len(ten)  # Track split point for retrieval\n"
+            "\n"
+            "2. IN backward() METHOD - retrieve and pass:\n"
+            "   stats, = saved[ctx.num_input_tensors:]  # RETRIEVE saved intermediates\n"
+            "   kw_up['stats'] = stats  # PASS to backward_stub\n"
+            "\n"
+            "3. UPDATE BOTH STUBS - accept intermediates as optional kwargs:\n"
+            "   def stub(..., stats=None):\n"
+            "       if stats is None: stats = torch.empty(...)\n"
+            "       forward_kernel[grid](..., stats, ...)\n"
+            "   \n"
+            "   def backward_stub(..., *, upstream_0, stats=None):\n"
+            "       if stats is None:  # Defensive fallback if DCK not modified\n"
+            "           stats = torch.empty(...)\n"
+            "           forward_kernel[grid](..., stats, ...)  # Recomputation (works but slow)\n"
+            "       backward_kernel[grid](..., stats, ...)\n"
+            "\n"
+            "Examples: stats=mean/rstd (LayerNorm), stats=(l_i,m_i,O) (attention), stats=rms (RMSNorm)\n"
+            "Multiple: ctx.save_for_backward(*ten, mean, rstd); then: mean, rstd = saved[num_input_tensors:]\n"
+            "\n"
         )
 
 class RegularStrategy(BaseStrategy):
@@ -373,7 +407,11 @@ END REFERENCE SECTION
 
     def allowed_edits_section(self) -> str:
         """Return RAG-specific allowed edits - stub signatures MUST be adapted to match forward."""
-        return (
+        # Get base stashing optimization section (shared across all strategies)
+        base_section = super().allowed_edits_section()
+
+        # RAG-specific adaptation instructions
+        rag_specific = (
             "The backward file contains BOTH the backward Triton kernel and a backward stub; you can (and likely should) edit both.\n"
             "You can edit both the backward kernel and the backward stub (their signatures and bodies) to match YOUR forward kernel.\n"
             "The retrieved stub name/signature is from a DIFFERENT forward - you MUST adapt it to match YOUR forward's expectations.\n"
@@ -438,6 +476,9 @@ END REFERENCE SECTION
             "Do not rename or move the file.\n"
             "You must only have a single backward stub, do not attempt to create multiple backward stubs.\n"
         )
+
+        # Combine: RAG-specific guidance first, then shared stashing optimization
+        return rag_specific + "\n" + base_section
 
     def current_phase(self, parity_ok: bool) -> Tuple[str, float]:
         """Return adaptation phase instructions and temperature."""
