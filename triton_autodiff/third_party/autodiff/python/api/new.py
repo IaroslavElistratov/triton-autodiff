@@ -254,129 +254,86 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # - LLM can edit both: enables coordination (e.g., forward saves intermediates, backward uses them)
         # - Runtime binding: load both stubs from raised.py, edits take effect at runtime
 
-        # Check if file exists (RAG mode might not have written it yet)
-        if os.path.exists(raised_py_path):
-            raised_content = open(raised_py_path).read()
+        # Detect if this is the very first trace for this kernel
+        # fwd_kernel_cache[key] was just added above (line 151), so cache is never empty here
+        # To detect first trace, check if this is the ONLY entry in cache
+        is_first_trace = len(fwd_kernel_cache) == 1
 
-            # Detect old skeleton format from previous orchestrator (pre-refactor)
-            # If found, treat as non-existent to force regeneration with new format
-            if "# YOUR BACKWARD (write this using RAG reference)" in raised_content:
-                raised_content = ""
-        else:
-            # RAG mode on first run: file doesn't exist yet
-            # Hook will generate entire structure with compile_signature available
-            raised_content = ""
+        if is_first_trace:
+            # FIRST TRACE: Generate complete skeleton from scratch
 
-        # Re-prepend if forward is missing OR if @autodiff decorator is present (need to strip it)
-        needs_prepend = (f"def {stub_name}(" not in raised_content) or ("@autodiff" in raised_content)
+            if VERBOSE:
+                print(f"[hook] First trace for {stub_name}, generating fresh skeleton")
 
-        if needs_prepend:
-            # Forward stub missing or has decorator - (re)prepend it
-            # Compiler mode: always triggers on first trace (raised.py has backward only)
-            # RAG mode: triggers on first compile (orchestrator wrote backward only)
-            # Re-prepend if decorator present: old raised.py has decorator, need to strip it
+            # Get forward source and strip @autodiff decorator
             fwd_source = get_fwd_source_from_module(mod_name)
-            if fwd_source and fwd_source.strip():
-                # Strip @autodiff decorator from forward source before prepending
-                # Original forward file has decorator that creates proxies - we don't need it in raised.py
-                # We only need the raw stub function for the proxy to call via getattr(kernel, "_generated_fwd_stub")
-                # If decorator executes during runpy.run_path(), it wraps the function and causes issues
-                import re
-                # Match entire @autodiff line (handles nested parens like idxs_buffers=(4, 5))
-                fwd_source = re.sub(r'^@autodiff.*$\n?', '', fwd_source, flags=re.MULTILINE)
+            if not fwd_source or not fwd_source.strip():
+                raise RuntimeError(f"Failed to extract forward source for {stub_name}")
 
-                # Extract backward-only content (strip old forward if present)
-                if "# Backward kernel and stub" in raised_content:
-                    # Split and keep only backward section
-                    parts = raised_content.split("# Backward kernel and stub")
-                    if len(parts) > 1:
-                        raised_content = "# Backward kernel and stub" + parts[-1]
-
-                # Check if DCK already present (avoid overwriting model edits on retrace)
-                needs_dck = "class StubOverrideDCK" not in raised_content
-
-                with open(raised_py_path, "w") as f:
-                    f.write("# ============================================================\n")
-                    f.write("# Forward kernel and stub (copied from user file)\n")
-                    f.write("# Backward can call these to recompute intermediates\n")
-                    f.write("# ============================================================\n\n")
-                    f.write(fwd_source)
-                    f.write("\n\n# ============================================================\n")
-                    f.write("# Backward kernel and stub\n")
-                    f.write("# ============================================================\n\n")
-                    f.write(raised_content)
-
-                    # Append LLM-editable DCK template (first trace only)
-                    if needs_dck:
-                        f.write("\n")
-                        f.write(gen_dck_template(stub_name))
-
-        # Add signature comment and/or backward_stub if missing
-        # Compiler path: emit_stub.py generates backward stub without signature comment
-        # RAG path: orchestrator doesn't write file, hook generates everything
-        # Both paths: add signature comment + skeleton here using kernel call site analysis
-        raised_content = open(raised_py_path).read()
-
-        # Check if we need to generate backward_stub skeleton
-        needs_backward_stub = f"def backward_{stub_name}(" not in raised_content
-        needs_signature_comment = "# SIGNATURE CONTRACT" not in raised_content
-
-        if needs_backward_stub or needs_signature_comment:
-            fwd_source = raised_content.split("# Backward kernel and stub")[0] if "# Backward kernel and stub" in raised_content else raised_content
+            # Strip @autodiff decorator from forward source
+            # Original forward file has decorator that creates proxies - we don't need it in raised.py
+            import re
+            fwd_source = re.sub(r'^@autodiff.*$\n?', '', fwd_source, flags=re.MULTILINE)
 
             # Generate signature comment using call-site analysis
             sig_comment = build_signature_comment_from_stub_analysis(
                 stub_name,
-                fwd_source,           # Full source with kernel call
-                jit_fn.fn.__name__,   # Kernel name (e.g., "_layer_norm_fwd_fused")
+                fwd_source,
+                jit_fn.fn.__name__,
                 jit_fn._compile_signature
             )
 
-            if needs_backward_stub:
-                # Generate backward_stub skeleton with proper scaffolding
-                # Uses compile_signature to identify tensor params and allocate grad buffers
-                stub_skeleton = generate_backward_stub_with_scaffolding(
-                    stub_name,
-                    fwd_source,
-                    jit_fn.fn.__name__,
-                    jit_fn._compile_signature
-                )
+            # Generate backward_stub skeleton with proper scaffolding
+            stub_skeleton = generate_backward_stub_with_scaffolding(
+                stub_name,
+                fwd_source,
+                jit_fn.fn.__name__,
+                jit_fn._compile_signature
+            )
 
-                # Check if DCK template exists in original content (preserve it)
-                dck_content = ""
-                if "class StubOverrideDCK" in raised_content:
-                    # Extract DCK section
-                    parts = raised_content.split("class StubOverrideDCK")
-                    if len(parts) > 1:
-                        dck_content = "\nclass StubOverrideDCK" + parts[1]
-                else:
-                    # DCK not present, generate it
-                    dck_content = "\n" + gen_dck_template(stub_name)
+            # Generate DCK template
+            dck_content = gen_dck_template(stub_name)
 
-                # Build complete backward section
-                backward_section = (
-                    "# ============================================================\n"
-                    "# Backward kernel and stub\n"
-                    "# ============================================================\n"
-                    f"{sig_comment}\n"
-                    f"{stub_skeleton}\n"
-                    f"{dck_content}"
-                )
+            # todo: Compiler mode: preserve compiler-generated backward (from MLIR)
+            # currently overwrites compiler generated stub with the stub_skeleton
 
-                # Rebuild complete file (forward + backward + DCK)
-                raised_content = fwd_source + "\n\n" + backward_section
+            # Build complete file content
+            raised_content = (
+                "# ============================================================\n"
+                "# Forward kernel and stub (copied from user file)\n"
+                "# Backward can call these to recompute intermediates\n"
+                "# ============================================================\n\n"
+                f"{fwd_source}\n\n"
+                "# ============================================================\n"
+                "# Backward kernel and stub\n"
+                "# ============================================================\n"
+                f"{sig_comment}\n"
+                f"{stub_skeleton}\n\n"
+                f"{dck_content}"
+            )
 
-            elif needs_signature_comment:
-                # Stub exists but signature comment missing (emit_stub.py case)
-                # Insert signature comment after the backward section separator
-                raised_content = re.sub(
-                    r'(# Backward kernel and stub\n# =+\n)',
-                    r'\1' + sig_comment,
-                    raised_content
-                )
-
+            # Write complete skeleton to file
             with open(raised_py_path, "w") as f:
                 f.write(raised_content)
+
+            if VERBOSE:
+                print(f"[hook] Generated skeleton: {raised_py_path}")
+
+        else:
+            # SUBSEQUENT TRACE: File already exists with potential LLM edits
+
+            if VERBOSE:
+                print(f"[hook] Trace #{len(fwd_kernel_cache)} for {stub_name}, preserving existing {raised_py_path}")
+
+            # Sanity check: file should exist
+            if not os.path.exists(raised_py_path):
+                raise RuntimeError(
+                    f"Expected {raised_py_path} to exist on trace #{len(fwd_kernel_cache)}, but it doesn't. "
+                    f"This indicates a bug in the hook or orchestrator cleanup logic."
+                )
+
+            # Don't modify the file - LLM may have edited it
+            # Just load it below for CustomDCK extraction
 
         # Load DCK and/or stubs from raised.py
         # New approach (raised.py with DCK): Load CustomDCK class
