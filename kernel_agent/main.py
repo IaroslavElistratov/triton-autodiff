@@ -8,6 +8,7 @@
 # kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --compiler --mode phased --rag > kernel_agent/LOGS/out.txt
 
 # kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/attention.py --rag > kernel_agent/LOGS/out.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/layernorm.py --rag > kernel_agent/LOGS/out.txt  --rag-min-sim 0.7
 
 from __future__ import annotations
 import argparse
@@ -44,6 +45,39 @@ def main() -> None:
     ap.add_argument("--compiler", action="store_true", help="Use MLIR compiler to generate initial backward kernel")
 
     args = ap.parse_args()
+
+    # Warn about temporarily unsupported flags
+    if args.compiler:
+        ap.error(
+            "⚠️  ERROR: --compiler flag is temporarily not supported.\n"
+            "\n"
+            "MLIR compiler-based backward generation is currently disabled.\n"
+            "Please use RAG-based initialization instead:\n"
+            "\n"
+            "  kernel-agent --backend openai --openai-model gpt-5 \\\n"
+            "    --file-path kernel_agent/test/attention.py \\\n"
+            "    --rag --rag-min-sim 0.7 \\\n"
+            "    --reasoning-effort high\n"
+            "\n"
+            "Note: Compiler support may be re-enabled in a future release."
+        )
+
+    if args.mode == "phased":
+        ap.error(
+            "⚠️  ERROR: --mode phased is temporarily not supported.\n"
+            "\n"
+            "The phased optimization strategy is currently disabled.\n"
+            "RAG mode uses single-phase adaptation instead.\n"
+            "\n"
+            "Please remove --mode phased from your command:\n"
+            "\n"
+            "  kernel-agent --backend openai --openai-model gpt-5 \\\n"
+            "    --file-path kernel_agent/test/attention.py \\\n"
+            "    --rag --rag-min-sim 0.7 \\\n"
+            "    --reasoning-effort high\n"
+            "\n"
+            "Note: Phased mode may be re-enabled in a future release."
+        )
 
     # Validate that at least one initialization method is specified
     if not args.compiler and not args.rag:
