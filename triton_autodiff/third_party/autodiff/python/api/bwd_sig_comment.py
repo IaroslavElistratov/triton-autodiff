@@ -279,12 +279,7 @@ def generate_backward_stub_with_scaffolding(stub_name, fwd_source, kernel_name, 
     # Build upstream kwargs
     upstream_params = ", ".join(f"upstream_{i}" for i in range(num_returns))
 
-    # Generate grad allocation code for tensor params
-    grad_allocs = []
-    for tparam in tensor_params:
-        grad_allocs.append(f"    grad_{tparam} = torch.zeros_like({tparam})")
-
-    # Build return tuple
+    # Build return tuple (for documentation in error message)
     ret_parts = [f"grad_{tp}" for tp in tensor_params]
     if len(ret_parts) == 1:
         ret_tuple = f"({ret_parts[0]},)"
@@ -294,29 +289,44 @@ def generate_backward_stub_with_scaffolding(stub_name, fwd_source, kernel_name, 
     skeleton_lines = [
         f"def {bwd_name}({params_str}, *, {upstream_params}):",
         '    """Backward pass for YOUR forward kernel.',
-        '    TODO: Implement gradient computation',
-        '    - Allocate gradient buffers (see scaffolding below)',
-        '    - Call backward kernel(s) to compute gradients',
-        '    - Return gradients for tensor inputs in correct order',
-        '    """',
-        '    # Allocate gradient buffers for tensor inputs',
+        '    ',
+        '    MUST IMPLEMENT:',
+        '    1. Allocate gradient buffers for tensor inputs:',
     ]
 
-    skeleton_lines.extend(grad_allocs)
+    # Add example allocations as comments
+    for tparam in tensor_params:
+        skeleton_lines.append(f"    #    grad_{tparam} = torch.zeros_like({tparam})")
 
     skeleton_lines.extend([
-        '',
-        '    # TODO: Call backward kernel(s) to compute gradients',
-        '    # Example:',
-        '    #   backward_kernel[grid](',
-        f'    #       {", ".join(param_names)},',
-        f'    #       {", ".join(f"grad_{tp}" for tp in tensor_params)},',
-                      # todo-now: don't hardcode -- can be multiple upstream grads
-        f'    #       upstream_0,  # gradient from loss',
-        '    #       ...',
-        '    #   )',
-        '',
-        f'    return {ret_tuple}',
+        '    2. Call backward kernel(s) to compute gradients:',
+        '    #    backward_kernel[grid](',
+        f'    #        {", ".join(param_names)},',
+        f'    #        {", ".join(f"grad_{tp}" for tp in tensor_params)},',
+                       # todo-now: don't hardcode -- can be multiple upstream grads
+        f'    #        {upstream_params},  # gradient(s) from loss',
+        '    #        ...',
+        '    #    )',
+        f'    3. Return: {ret_tuple}',
+        '    """',
+    ])
+
+    # Generate ValueError instead of zero initialization.
+    # Rationale:
+    # - Zero grads: GUARANTEED false positive when true grads < atol (e.g., |0 - 0.001| ≤ 0.003)
+    #   → gradcheck is useless as a signal (100% pass rate on completely wrong implementation)
+    # - LLM grads: PROBABILISTIC false positives (only when LLM happens to output small wrong values)
+    #   → gradcheck has signal (catches most errors, misses only small-magnitude mistakes)
+    # - Note: Neither approach guards against true_grad ≈ 0.0005, llm_grad ≈ 0.003 (wrong by 6x but passes)
+    # - But zero init guarantees this failure mode; LLM init makes it less likely (most LLM errors
+    #   are order-of-magnitude off, not coincidentally within atol blind zone)
+    # todo-now: implement convergence checks to solve the above
+    skeleton_lines.extend([
+        '    raise ValueError(',
+        f'        "backward_{stub_name} not implemented!\\n"',
+        f'        "Must allocate gradient buffers and call backward kernel(s).\\n"',
+        f'        "Expected return: {ret_tuple}"',
+        '    )',
     ])
 
     return "\n".join(skeleton_lines)

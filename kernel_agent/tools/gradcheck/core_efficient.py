@@ -22,11 +22,11 @@ def check_op_backward_numerical(
     outputs: OutputSel = "auto",
     upstream: Optional[Sequence[Tensor]] = None,
     compare_dtype: torch.dtype = torch.float32,
-    atol: float = 1e-2,
-    rtol: float = 1e-2,
+    atol: float = 0.001,  # Approximate float32 finite difference noise ceiling
+    rtol: float = 0.05,
     seed: int = 0,
     only_floating_inputs: bool = True,
-    eps: float = 1e-4,
+    eps: float = 0.001,
     fast_mode: bool = True,
     nondet_tol: float = 0.0,
     numerical_method: str = "central",
@@ -48,8 +48,8 @@ def check_op_backward_numerical(
         outputs: Output selector (currently ignored, kept for API compatibility)
         upstream: Upstream gradients (currently ignored, gradcheck generates internally)
         compare_dtype: dtype for comparison (currently ignored, gradcheck uses input dtype)
-        atol: Absolute tolerance for gradient comparison
-        rtol: Relative tolerance for gradient comparison
+        atol: Absolute tolerance (default 0.001 = typical float32 noise ceiling)
+        rtol: Relative tolerance (default 0.05 = 5% relative error tolerance)
         seed: RNG seed (currently ignored by gradcheck)
         only_floating_inputs: Only compute grads for float tensors
         eps: Finite difference epsilon
@@ -82,14 +82,19 @@ def check_op_backward_numerical(
     # - Attempting to run Triton kernels with float64 inputs will raise runtime errors
     #
     # Solution: Keep original dtypes (float32/float16) with appropriately loose tolerances
-    # - Use eps=1e-4 (not float64 default 1e-6) for finite difference step size
-    # - Use atol=0.07, rtol=0.02 (not float64 defaults atol=1e-5, rtol=1e-3)
+    # - Use eps=0.001 (not float64 default 1e-6) for finite difference step size
+    # - Use atol=0.001 (typical float32 noise ceiling), rtol=0.05 (not float64 defaults)
     # - Use fast_mode=True to use random projections (v^T·J·u) which is more tolerant
     #   of precision issues than full Jacobian computation
     #
+    # Float32 finite difference noise analysis:
+    # - Rounding error: ~1e-7 * |f(x)|
+    # - After subtraction & division with eps=0.001: ~0.0001 * |f(x)| for normalized ops
+    # - atol=0.001 provides ~10x safety margin above typical noise (~1e-4)
+    # - rtol=0.05 allows 5% relative error for large gradient magnitudes
+    #
     # This approach is validated by:
     # - PyTorch forums discuss "Why does gradcheck fail for floats?" - common workaround
-    # - Looser tolerances are appropriate for float32 kernels in practice
     # - Fast mode reduces sensitivity to individual element errors
     # ================================================================================
     inputs_list = list(inputs)
@@ -147,11 +152,11 @@ def check_op_backward_numerical_sweep(
     outputs: OutputSel = "auto",
     upstream: Optional[Sequence[Tensor]] = None,
     compare_dtype: torch.dtype = torch.float32,
-    atol: float = 1e-2,
-    rtol: float = 1e-2,
+    atol: float = 0.001,  # Approximate float32 finite difference noise ceiling
+    rtol: float = 0.05,
     seed: int = 0,
     only_floating_inputs: bool = True,
-    eps: float = 1e-4,
+    eps: float = 0.001,
     fast_mode: bool = True,
     nondet_tol: float = 0.0,
     numerical_method: str = "central",
@@ -170,8 +175,8 @@ def check_op_backward_numerical_sweep(
         outputs: Output selector (kept for API compatibility)
         upstream: Upstream gradients (kept for API compatibility)
         compare_dtype: Comparison dtype (kept for API compatibility)
-        atol: Absolute tolerance
-        rtol: Relative tolerance
+        atol: Absolute tolerance (default 0.001 = typical float32 noise ceiling)
+        rtol: Relative tolerance (default 0.05 = 5% relative error tolerance)
         seed: RNG seed
         only_floating_inputs: Only compute grads for float tensors
         eps: Finite difference epsilon
