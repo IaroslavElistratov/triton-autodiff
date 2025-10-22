@@ -265,6 +265,10 @@ class KernelOptimizer:
         if not os.path.isfile(fwd_fp):
             raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
+        # Set run start time for hook to distinguish within-run vs cross-run
+        # Hook uses this to decide: regenerate skeleton (new run) vs preserve LLM edits (same run)
+        import time
+        os.environ["KERNEL_AGENT_START_TIME"] = str(time.time())
 
         # Initialize backward kernel using either compiler or RAG retrieval
         # TODO: (future) Consider seed abstraction (--seed {auto,rag,compiler,user,none})

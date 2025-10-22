@@ -254,10 +254,19 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         # - LLM can edit both: enables coordination (e.g., forward saves intermediates, backward uses them)
         # - Runtime binding: load both stubs from raised.py, edits take effect at runtime
 
-        # Detect if this is the very first trace for this kernel
-        # fwd_kernel_cache[key] was just added above (line 151), so cache is never empty here
-        # To detect first trace, check if this is the ONLY entry in cache
-        is_first_trace = len(fwd_kernel_cache) == 1
+
+        # detect if this is the first trace for this kernel in the current run
+        #
+        # note: cannot rely on "len(fwd_kernel_cache) == 1" because each iteration spawns
+        # fresh worker process, process starts with empty cache -> len==1 on EVERY iteration;
+        # on another hand can't check for "not os.path.exists" because the path may exist but from
+        # previous program run
+        start_time = float(os.environ.get("KERNEL_AGENT_START_TIME", "0"))
+        if os.path.exists(raised_py_path):
+            file_mtime = os.path.getmtime(raised_py_path)
+            is_first_trace = (file_mtime < start_time)  # File is stale from previous run
+        else:
+            is_first_trace = True  # File doesn't exist yet
 
         if is_first_trace:
             # FIRST TRACE: Generate complete skeleton from scratch
@@ -320,17 +329,13 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
                 print(f"[hook] Generated skeleton: {raised_py_path}")
 
         else:
-            # SUBSEQUENT TRACE: File already exists with potential LLM edits
+            # SUBSEQUENT TRACE OR WITHIN-RUN COMPILE: File already exists with potential LLM edits
 
             if VERBOSE:
-                print(f"[hook] Trace #{len(fwd_kernel_cache)} for {stub_name}, preserving existing {raised_py_path}")
+                print(f"[hook] Preserving existing {raised_py_path} (mtime={file_mtime:.2f} > start={start_time:.2f})")
 
-            # Sanity check: file should exist
-            if not os.path.exists(raised_py_path):
-                raise RuntimeError(
-                    f"Expected {raised_py_path} to exist on trace #{len(fwd_kernel_cache)}, but it doesn't. "
-                    f"This indicates a bug in the hook or orchestrator cleanup logic."
-                )
+            # Sanity check: file must exist (we checked this above to set is_first_trace)
+            assert os.path.exists(raised_py_path), f"Logic error: is_first_trace={is_first_trace} but file doesn't exist"
 
             # Don't modify the file - LLM may have edited it
             # Just load it below for CustomDCK extraction
