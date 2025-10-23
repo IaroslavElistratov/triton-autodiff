@@ -1140,7 +1140,7 @@ class Raiser:
         R["math.sqrt"]  = lambda op: f"tl.sqrt({self._get(op.get_operand(0))})"
         R["math.rsqrt"] = lambda op: f"tl.rsqrt({self._get(op.get_operand(0))})"
         R["math.absf"]  = lambda op: f"tl.abs({self._get(op.get_operand(0))})"
-        # elementwise min/max with *num semantics* (from Answer 2)
+        # elementwise min/max with *num semantics*
         R["arith.maxnumf"] = lambda op: f"tl.maximum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
         R["arith.minnumf"] = lambda op: f"tl.minimum({self._get(op.get_operand(0))}, {self._get(op.get_operand(1))})"
 

@@ -213,12 +213,14 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, NOT user file
 
         # Call gradcheck function with numerical gradients via PyTorch's gradcheck
-        # atol=0.001: Typical float32 finite difference noise ceiling
-        # rtol=0.05: 5% relative tolerance for gradient comparison
+        # Float32 central difference settings:
+        # - eps=0.005: Optimal step size (h ≈ ε_mach^(1/3) for float32)
+        # - atol=0.0001: Above error floor (~0.00002), catches bugs
+        # - rtol=0.01: 1% relative tolerance for float32 gradient comparison
         ok, stats = gradcheck_fn(
             my_op=op, sidecar=sidecar, outputs="auto",
-            atol=0.001, rtol=0.05,
-            eps=float(os.environ.get("GRADCHECK_EPS", "0.001")),
+            atol=0.0001, rtol=0.01,
+            eps=float(os.environ.get("GRADCHECK_EPS", "0.005")),
             numerical_method=os.environ.get("GRADCHECK_NUMERICAL_METHOD", "central")
         )
         try:
