@@ -109,6 +109,14 @@ def check_op_backward_numerical(
         # Triton kernels will fail if given float64 inputs
         inputs_list[i] = inp.detach().clone().requires_grad_(True)
 
+    # Make eps magnitude-aware to handle different input scales
+    # eps_eff = eps * max(1.0, max_abs_x) scales step size with input magnitude
+    max_abs_x = max(
+        (inp.abs().max().item() for inp in inputs_list if inp.is_floating_point()),
+        default=1.0
+    )
+    eps_eff = eps * max(1.0, max_abs_x)
+
     try:
         # Call PyTorch's gradcheck directly
         # This computes numerical gradients using my_op(inputs + eps) - my_op(inputs - eps)
@@ -116,7 +124,7 @@ def check_op_backward_numerical(
         ok = torch.autograd.gradcheck(
             my_op,
             tuple(inputs_list),
-            eps=eps,
+            eps=eps_eff,
             atol=atol,
             rtol=rtol,
             raise_exception=False,  # Return False instead of raising
@@ -128,6 +136,7 @@ def check_op_backward_numerical(
             "ok": bool(ok),
             "method": "torch.autograd.gradcheck",
             "eps": eps,
+            "eps_eff": eps_eff,
             "atol": atol,
             "rtol": rtol,
             "fast_mode": fast_mode,
@@ -143,6 +152,7 @@ def check_op_backward_numerical(
             "error": f"{type(e).__name__}: {str(e)}",
             "method": "torch.autograd.gradcheck",
             "eps": eps,
+            "eps_eff": eps_eff,
             "atol": atol,
             "rtol": rtol,
         }

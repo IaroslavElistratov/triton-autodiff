@@ -220,7 +220,7 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         ok, stats = gradcheck_fn(
             my_op=op, sidecar=sidecar, outputs="auto",
             atol=0.0001, rtol=0.01,
-            eps=float(os.environ.get("GRADCHECK_EPS", "0.005")),
+            eps=0.005,
             numerical_method=os.environ.get("GRADCHECK_NUMERICAL_METHOD", "central")
         )
         try:
