@@ -9,6 +9,7 @@ Avoids O(n²) memory issues by never calling the naive torch reference implement
 import warnings
 
 import torch
+from torch.autograd.gradcheck import GradcheckError
 from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict
 
 Tensor = torch.Tensor
@@ -186,6 +187,10 @@ def check_op_backward_numerical(
         # Triton kernels will fail if given float64 inputs
         inputs_list[i] = inp.detach().clone().requires_grad_(True)
 
+    # Warn if most gradients fall in the dead-zone where absolute tolerance dominates
+    # Also collect gradient magnitude statistics for diagnostics
+    dead_zone_stats = _warn_if_unreliable_gradient_zone(my_op, inputs_list, atol, rtol, eps)
+
     # Make eps magnitude-aware to handle different input scales
     # eps_eff = eps * max(1.0, max_abs_x) scales step size with input magnitude
     max_abs_x = max(
@@ -194,57 +199,83 @@ def check_op_backward_numerical(
     )
     eps_eff = eps * max(1.0, max_abs_x)
 
-    # Warn if most gradients fall in the dead-zone where absolute tolerance dominates
-    # Also collect gradient magnitude statistics for diagnostics
-    dead_zone_stats = _warn_if_unreliable_gradient_zone(my_op, inputs_list, atol, rtol, eps)
-
     try:
-        # Call PyTorch's gradcheck directly
+        # Call PyTorch's gradcheck directly with raise_exception=True to get detailed errors
         # This computes numerical gradients using my_op(inputs + eps) - my_op(inputs - eps)
         # and compares against analytical gradients from my_op.backward()
-        ok = torch.autograd.gradcheck(
+        # NOTE: nondet_tol=0.0 by default. For kernels with atomics or non-deterministic
+        # reductions, consider increasing to ~0.00001 to 0.0001 to avoid false negatives from
+        # summation order variations.
+        torch.autograd.gradcheck(
             my_op,
             tuple(inputs_list),
             eps=eps_eff,
             atol=atol,
             rtol=rtol,
-            raise_exception=False,  # Return False instead of raising
+            raise_exception=True,  # Raise to get detailed error with input_idx
             fast_mode=fast_mode,
             nondet_tol=nondet_tol,
         )
 
+        # Success case: all gradients match
         stats = {
-            "ok": bool(ok),
+            "ok": True,
             "method": "torch.autograd.gradcheck",
             "eps": eps,
             "eps_eff": eps_eff,
             "atol": atol,
             "rtol": rtol,
             "fast_mode": fast_mode,
-            "message": "Gradients match" if ok else "Gradient mismatch detected",
+            "message": "Gradients match",
         }
         # Include dead-zone diagnostics if available
         if dead_zone_stats:
             stats["dead_zone_stats"] = dead_zone_stats
+        return True, stats
 
-        return bool(ok), stats
+    except GradcheckError as e:
+        # Gradcheck failed - include the raw error message which contains all relevant details
+        #
+        # IMPORTANT: PyTorch's gradcheck with raise_exception=True provides detailed errors:
+        # - Identifies which input failed: "Jacobian mismatch for output i with respect to input j"
+        # - Fast mode: runs scalar check first, reports max elementwise difference
+        # - On failure: reruns in slow mode, reconstructs full Jacobians and compares elementwise
+        # - Slow mode message explicitly states it's recomputing after fast mode failure
+        #
+        # NO EXTRA POST-PROCESSING NEEDED - don't parse with regex, message already includes input index
+        error_msg = str(e)
 
-    except Exception as e:
-        # Catch any errors from gradcheck (gradient mismatches, OOM, runtime errors, etc.)
         stats = {
             "ok": False,
-            "error": f"{type(e).__name__}: {str(e)}",
             "method": "torch.autograd.gradcheck",
             "eps": eps,
             "eps_eff": eps_eff,
             "atol": atol,
             "rtol": rtol,
+            "fast_mode": fast_mode,
+            "error": error_msg,
+            "message": "Gradient mismatch (see error for details)",
         }
         # Include dead-zone diagnostics even on failure - helps diagnose if failure
         # is due to wrong tolerances (dead-zone) vs actual gradient bug
         if dead_zone_stats:
             stats["dead_zone_stats"] = dead_zone_stats
         return False, stats
+
+    except Exception as e:
+        # Catch other errors: ValueError (invalid inputs), MemoryError (OOM),
+        # TypeError, or exceptions from the operation itself
+        # Note: eps_eff is always defined by the time we reach this handler
+        # (it's computed before the try block)
+        return False, {
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)}",
+            "method": "torch.autograd.gradcheck",
+            "eps": eps,
+            "eps_eff": eps_eff,  # Always exists - no NameError possible
+            "atol": atol,
+            "rtol": rtol,
+        }
 
 
 def check_op_backward_numerical_sweep(
@@ -379,7 +410,6 @@ def _format_summary_for_llm(summary: Dict[str, Any]) -> str:
     """Format gradcheck summary to make errors and numerical failures prominent."""
     lines = []
     lines.append(f"ok: {summary['ok']}")
-    lines.append(f"method: {summary.get('method', 'unknown')}")
     lines.append(f"passed: {summary['num_passed']}/{summary['num_total']}")
 
     # Include dead-zone diagnostics if present
@@ -403,13 +433,10 @@ def _format_summary_for_llm(summary: Dict[str, Any]) -> str:
             shape_str = ", ".join(f"{k}={v}" for k, v in shape_items)
             lines.append(f"  - Shape: {shape_str}")
 
-            # Show error if present
+            # Show error message with full PyTorch gradcheck details
+            # The error includes which input failed, numerical/analytical values, etc.
             if 'error' in entry:
                 lines.append(f"    ERROR: {entry['error']}")
-
-            # Show message if present
-            if 'message' in entry:
-                lines.append(f"    {entry['message']}")
 
             lines.append("")  # blank line between failures
 
