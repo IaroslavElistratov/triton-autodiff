@@ -6,6 +6,8 @@ and compares against analytical gradients from the Triton backward kernel.
 Avoids O(n²) memory issues by never calling the naive torch reference implementation.
 """
 
+import warnings
+
 import torch
 from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict
 
@@ -13,6 +15,81 @@ Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
 MaybeTensors = Union[Tensor, Sequence[Tensor]]
 OutputSel = Union[str, int, Sequence[int], Callable[[MaybeTensors], MaybeTensors]]
+
+
+def _warn_if_unreliable_gradient_zone(
+    my_op: Callable,
+    inputs: Sequence[torch.Tensor],
+    atol: float,
+    rtol: float,
+    eps: float,
+    frac_threshold: float = 0.5,   # warn if this fraction of grads is in the dead zone
+    margin: float = 2.0            # dead zone = |g| < margin * g*
+) -> Dict[str, Any]:
+    """
+    Warn if most gradient magnitudes fall in the absolute-tolerance dead zone.
+    Dead-zone crossover: g* = atol / rtol. Below this, relative term is inactive.
+
+    Returns dict with gradient magnitude statistics for diagnostics.
+    """
+    if rtol <= 0:
+        warnings.warn("rtol <= 0 → absolute-only check; tiny grads cannot be judged reliably.")
+        return {}
+
+    # 1) get analytic grads on a simple sum loss
+    test_inputs = [x.detach().clone().requires_grad_(True) for x in inputs]
+    out = my_op(*test_inputs)
+    if isinstance(out, (list, tuple)):
+        loss = sum(o.sum() for o in out if isinstance(o, torch.Tensor))
+    else:
+        loss = out.sum()
+    loss.backward()
+
+    # 2) collect gradient magnitudes
+    mags = []
+    for x in test_inputs:
+        if x.grad is not None and x.grad.numel() > 0:
+            mags.append(x.grad.detach().abs().reshape(-1))
+    if not mags:
+        return {}
+    g = torch.cat(mags)
+
+    # 3) dead-zone stats
+    g_star = atol / rtol
+    in_dead = (g < margin * g_star)
+    frac_in_dead = in_dead.float().mean().item()
+
+    p50 = torch.quantile(g, 0.5).item()
+    p95 = torch.quantile(g, 0.95).item()
+    gmax = g.max().item()
+
+    # Build stats dict for return
+    dead_zone_stats = {
+        "g_star": g_star,
+        "frac_in_dead_zone": frac_in_dead,
+        "grad_p50": p50,
+        "grad_p95": p95,
+        "grad_max": gmax,
+    }
+
+    if frac_in_dead >= frac_threshold:
+        rec_target = 5.0 * g_star  # aim median above this so rtol term matters
+        # scale factor to push p50 to rec_target (1.0 = no scaling)
+        scale_suggest = (rec_target / max(p50, 1e-12)) if p50 > 0 else float("inf")
+        msg = (
+            f"\nWARNING: {100*frac_in_dead:.1f}% of grads < {margin:.1f}·g* "
+            f"(g* = atol/rtol = {g_star:.3g}). Absolute tolerance dominates.\n"
+            f"atol={atol:.3g}, rtol={rtol:.3g}, eps={eps:.3g}\n"
+            f"stats: p50={p50:.3g}, p95={p95:.3g}, max={gmax:.3g}\n"
+            f"actions: rescale loss/inputs by ≈{scale_suggest:.2g} so median |grad| ≥ {rec_target:.3g}, "
+            f"or reduce atol if numerically safe, or use a Taylor test."
+        )
+        print(msg)
+        dead_zone_stats["warning_issued"] = True
+    else:
+        dead_zone_stats["warning_issued"] = False
+
+    return dead_zone_stats
 
 
 def check_op_backward_numerical(
@@ -117,6 +194,10 @@ def check_op_backward_numerical(
     )
     eps_eff = eps * max(1.0, max_abs_x)
 
+    # Warn if most gradients fall in the dead-zone where absolute tolerance dominates
+    # Also collect gradient magnitude statistics for diagnostics
+    dead_zone_stats = _warn_if_unreliable_gradient_zone(my_op, inputs_list, atol, rtol, eps)
+
     try:
         # Call PyTorch's gradcheck directly
         # This computes numerical gradients using my_op(inputs + eps) - my_op(inputs - eps)
@@ -142,12 +223,15 @@ def check_op_backward_numerical(
             "fast_mode": fast_mode,
             "message": "Gradients match" if ok else "Gradient mismatch detected",
         }
+        # Include dead-zone diagnostics if available
+        if dead_zone_stats:
+            stats["dead_zone_stats"] = dead_zone_stats
 
         return bool(ok), stats
 
     except Exception as e:
-        # Catch any errors from gradcheck (OOM, runtime errors, etc.)
-        return False, {
+        # Catch any errors from gradcheck (gradient mismatches, OOM, runtime errors, etc.)
+        stats = {
             "ok": False,
             "error": f"{type(e).__name__}: {str(e)}",
             "method": "torch.autograd.gradcheck",
@@ -156,6 +240,11 @@ def check_op_backward_numerical(
             "atol": atol,
             "rtol": rtol,
         }
+        # Include dead-zone diagnostics even on failure - helps diagnose if failure
+        # is due to wrong tolerances (dead-zone) vs actual gradient bug
+        if dead_zone_stats:
+            stats["dead_zone_stats"] = dead_zone_stats
+        return False, stats
 
 
 def check_op_backward_numerical_sweep(
@@ -212,6 +301,7 @@ def check_op_backward_numerical_sweep(
     ok_all = True
     total = 0
     passed = 0
+    dead_zone_stats = None  # Collect from first successful test
 
     for i, dims in enumerate(list(sweep or [])):
         try:
@@ -235,6 +325,11 @@ def check_op_backward_numerical_sweep(
             # Catch exceptions during test setup or execution
             ok_i = False
             stats_i = {"error": f"{type(e).__name__}: {str(e)}"}
+
+        # Collect dead-zone stats from first test (success or failure) for diagnostics
+        # We compute these before gradcheck runs, so they're available even on failure
+        if dead_zone_stats is None and "dead_zone_stats" in stats_i:
+            dead_zone_stats = stats_i["dead_zone_stats"]
 
         # Record the test shape
         try:
@@ -270,6 +365,10 @@ def check_op_backward_numerical_sweep(
         "fast_mode": fast_mode,
     }
 
+    # Include dead-zone diagnostics if available (from first successful test)
+    if dead_zone_stats:
+        summary["dead_zone_stats"] = dead_zone_stats
+
     # Format summary for readability
     summary["summary_text"] = _format_summary_for_llm(summary)
 
@@ -277,16 +376,22 @@ def check_op_backward_numerical_sweep(
 
 
 def _format_summary_for_llm(summary: Dict[str, Any]) -> str:
-    """Format gradcheck summary for readability."""
+    """Format gradcheck summary to make errors and numerical failures prominent."""
     lines = []
     lines.append(f"ok: {summary['ok']}")
     lines.append(f"method: {summary.get('method', 'unknown')}")
     lines.append(f"passed: {summary['num_passed']}/{summary['num_total']}")
 
-    if summary.get('eps'):
-        lines.append(f"eps: {summary['eps']}")
-    if summary.get('fast_mode') is not None:
-        lines.append(f"fast_mode: {summary['fast_mode']}")
+    # Include dead-zone diagnostics if present
+    if "dead_zone_stats" in summary:
+        dz = summary["dead_zone_stats"]
+        lines.append("")
+        lines.append("Gradient magnitude diagnostics:")
+        lines.append(f"  dead-zone threshold (g* = atol/rtol): {dz.get('g_star', 'N/A'):.4g}")
+        lines.append(f"  fraction in dead-zone: {dz.get('frac_in_dead_zone', 0)*100:.1f}%")
+        lines.append(f"  gradient magnitudes: p50={dz.get('grad_p50', 0):.4g}, p95={dz.get('grad_p95', 0):.4g}, max={dz.get('grad_max', 0):.4g}")
+        if dz.get('warning_issued'):
+            lines.append("  ⚠ WARNING: Most gradients in dead-zone (absolute tolerance dominates)")
 
     grad_fail = summary.get('grad_fail', [])
     if grad_fail:
