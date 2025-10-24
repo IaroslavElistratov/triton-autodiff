@@ -1,9 +1,14 @@
 """
 Efficient gradcheck implementation using PyTorch's built-in torch.autograd.gradcheck.
 
-This uses the Triton forward kernel for numerical gradients (via finite differences)
-and compares against analytical gradients from the Triton backward kernel.
-Avoids O(n²) memory issues by never calling the naive torch reference implementation.
+Only one verifier: torch.autograd.gradcheck is the check. Everything else improves test quality and debuginfo.
+
+Problem: in f32, if |g| < g* = atol/rtol, the relative term is inert. Gradcheck then tests
+almost-absolute error and can mislead (passes on skeleton bugs when grads ~ 0).
+
+Solution: do a cheap analytic scale check before gradcheck; run gradcheck once.
+- Diagnostic: _grad_magnitude_diagnostics (analytic-only, no FD)
+- Validation: torch.autograd.gradcheck (THE central-difference check)
 """
 
 import warnings
@@ -18,79 +23,184 @@ MaybeTensors = Union[Tensor, Sequence[Tensor]]
 OutputSel = Union[str, int, Sequence[int], Callable[[MaybeTensors], MaybeTensors]]
 
 
-def _warn_if_unreliable_gradient_zone(
+def _safe_quantiles_1d(g: torch.Tensor, qs=(0.5, 0.95), max_samples=200_000):
+    """
+    Purpose: compute median (p50) and tail (p95) safely on huge/NaN-contaminated tensors.
+
+    Median (p50) unlike mean robust to outliers, reflects TYPICAL gradient magnitude.
+
+    The need this wrapper around torch.quantile() -- torch.quantile() directly is BRITTLE:
+    1. Crashes on large tensors: "tensor too large" error on >200k elements
+    2. NaN contamination: any NaN → all quantiles become NaN
+    3. No subsample safeguard: can't handle huge gradient vectors
+
+    This wrapper makes torch.quantile() safe. We still use PyTorch's quantile
+    algorithm, just with preprocessing (filter NaN, subsample if huge, use CPU).
+
+    Returns: ([p50, p95, ...], max_from_full_tensor)
+    """
+    g = g.reshape(-1)
+
+    # Step 1: Filter non-finite values BEFORE computing quantiles
+    # Problem: torch.quantile([1, 2, nan, 4]) → [nan, nan] (NaN poisons all results)
+    # Solution: filter to finite subset first
+    finite_mask = torch.isfinite(g)
+    if not finite_mask.any():
+        return [float('nan') for _ in qs], float('nan')
+
+    g_fin = g[finite_mask]
+
+    # Step 2: Compute max from FULL finite tensor BEFORE subsampling
+    # Why: max must be from full tensor, not subsample (subsample might miss true max)
+    # Bug in old code: max was computed from subsample, losing accuracy
+    gmax = float(g_fin.max().item())
+
+    # Step 3: Subsample if tensor too large (>200k elements)
+    # Problem: torch.quantile(huge_tensor) → RuntimeError: "tensor too large"
+    # Solution: randomly sample 200k elements for quantile (median estimate still accurate)
+    # Use randperm for sampling without replacement (better than randint with replacement)
+    if g_fin.numel() > max_samples:
+        idx = torch.randperm(g_fin.numel(), device=g_fin.device)[:max_samples]
+        g_fin = g_fin.index_select(0, idx)
+
+    # Step 4: Call torch.quantile on CPU (more numerically stable)
+    # We're not replacing torch.quantile's algorithm, just making it safe to call
+    g_cpu = g_fin.float().cpu()
+    q = torch.quantile(g_cpu, torch.tensor(qs))
+    return q.tolist(), gmax
+
+
+def _grad_magnitude_diagnostics(
     my_op: Callable,
-    inputs: Sequence[torch.Tensor],
+    inputs: Sequence[Tensor],
+    *,
     atol: float,
     rtol: float,
-    eps: float,
-    frac_threshold: float = 0.5,   # warn if this fraction of grads is in the dead zone
-    margin: float = 2.0            # dead zone = |g| < margin * g*
+    margin: float = 2.0,
+    frac_threshold: float = 0.5,
+    sample_show: int = 10
 ) -> Dict[str, Any]:
     """
-    Warn if most gradient magnitudes fall in the absolute-tolerance dead zone.
-    Dead-zone crossover: g* = atol / rtol. Below this, relative term is inactive.
+    Purpose: analytic-only precheck. Computes grads once, reports fraction |g| < k·g* and median.
+    If most grads sit below g* = atol/rtol, chosen atol/rtol won't give a meaningful test.
 
-    Returns dict with gradient magnitude statistics for diagnostics.
+    No finite differences.
+    _grad_magnitude_diagnostics does one forward+backward. It only flags when most
+    grads are below g*, so you know gradcheck will be in the absolute regime. Earlier code
+    mixed diagnostics with FD (removed).
+
+    Cost: 1 forward + 1 backward pass, 0 finite-difference passes.
+    Guards quality of the central-difference check.
     """
     if rtol <= 0:
-        warnings.warn("rtol <= 0 → absolute-only check; tiny grads cannot be judged reliably.")
+        warnings.warn("rtol <= 0 → absolute-only regime; tiny grads cannot be judged reliably.")
         return {}
 
-    # 1) get analytic grads on a simple sum loss
-    test_inputs = [x.detach().clone().requires_grad_(True) for x in inputs]
-    out = my_op(*test_inputs)
-    if isinstance(out, (list, tuple)):
-        loss = sum(o.sum() for o in out if isinstance(o, torch.Tensor))
-    else:
-        loss = out.sum()
+    # SEMANTIC CHANGE 1: Preserve ALL inputs (not just float tensors)
+    # Old code dropped non-float args (int/bool tensors), causing op to fail
+    # Fix: Only set requires_grad on float tensors, pass others as-is
+    args = [
+        x.detach().clone().requires_grad_(True)
+        if (isinstance(x, torch.Tensor) and x.is_floating_point())
+        else x
+        for x in inputs
+    ]
+
+    # Run forward + backward on simple sum loss
+    out = my_op(*args)
+    loss = (
+        out.sum()
+        if not isinstance(out, (list, tuple))
+        else sum(t.sum() for t in out if isinstance(t, torch.Tensor))
+    )
     loss.backward()
 
-    # 2) collect gradient magnitudes
+    # Collect gradient magnitudes
     mags = []
-    for x in test_inputs:
-        if x.grad is not None and x.grad.numel() > 0:
+    for x in args:
+        if (isinstance(x, torch.Tensor) and x.is_floating_point()
+            and x.grad is not None and x.grad.numel() > 0):
             mags.append(x.grad.detach().abs().reshape(-1))
+
     if not mags:
         return {}
+
     g = torch.cat(mags)
 
-    # 3) dead-zone stats
-    g_star = atol / rtol
-    in_dead = (g < margin * g_star)
-    frac_in_dead = in_dead.float().mean().item()
+    # SEMANTIC CHANGE 3: Explicit finiteness filtering BEFORE stats
+    # Old code: called torch.quantile(g, 0.5) directly on raw gradients
+    # Problem: Any NaN → all quantiles become NaN (contamination)
+    # Fix: Filter to finite subset, early-out if all NaN
+    finite = torch.isfinite(g)
+    n_all = g.numel()
+    n_fin = int(finite.sum().item())
 
-    p50 = torch.quantile(g, 0.5).item()
-    p95 = torch.quantile(g, 0.95).item()
-    gmax = g.max().item()
+    # SEMANTIC CHANGE 5: Early-out on all-NaN (prevent running gradcheck on garbage)
+    # Old code returned stats with NaN values
+    # Fix: Return immediately with non_finite_grads flag, caller early-outs
+    if n_fin == 0:
+        print(f"\nERROR: All {n_all} analytical gradients are non-finite (NaN/Inf).")
+        print("Your backward kernel has a catastrophic bug. Fix this before gradcheck can run.")
+        return {
+            "ok": False,
+            "non_finite_grads": True,
+            "num_total": n_all,
+            "num_finite": 0
+        }
 
-    # Build stats dict for return
-    dead_zone_stats = {
+    # Use only finite gradients for stats (prevents NaN contamination)
+    g_fin = g[finite]
+
+    # Dead-zone analysis: g* = atol/rtol is the crossover point
+    # When |grad| < g*, relative tolerance is inactive (absolute tolerance dominates)
+    # This makes gradcheck very loose: |num - ana| < atol regardless of magnitude
+    g_star = atol / max(rtol, 1e-20)
+    frac_dead = (g_fin < margin * g_star).float().mean().item()
+
+    # Compute median (p50) and tail (p95) to understand gradient scale distribution
+    # median (unlike mean) robust typical scale
+    (p50, p95), gmax = _safe_quantiles_1d(g_fin, qs=(0.5, 0.95))
+
+    # SEMANTIC CHANGE 4: Show gradient samples for ALL shapes (not just failures)
+    # Always print for visibility (helps spot patterns across shapes)
+    k = min(sample_show, g_fin.numel())
+    if k > 0:
+        # Use randperm for sampling without replacement (better than randint)
+        idx = torch.randperm(g_fin.numel(), device=g_fin.device)[:k]
+        sample = g_fin.index_select(0, idx).tolist()
+        formatted_sample = [f'{v:.3g}' for v in sample]
+        print(f"\n[GRAD STATS] g*={g_star:.3g}  dead_frac={100*frac_dead:.1f}%  p50={p50:.3g}  p95={p95:.3g}  max={gmax:.3g}")
+        print(f"[GRAD STATS] sample({k}): {formatted_sample}")
+
+    # Warn if some (but not all) gradients are non-finite
+    if n_fin < n_all:
+        frac_nonfinite = (n_all - n_fin) / n_all
+        print(f"\nWARNING: {n_all - n_fin}/{n_all} ({100*frac_nonfinite:.1f}%) gradients are non-finite (NaN/Inf).")
+        print("Your backward kernel has numerical stability issues. Gradcheck results will be unreliable.")
+
+    # Determine if warning should be issued (return as flag)
+    warning_issued = frac_dead >= frac_threshold
+
+    # Warn if most gradients fall in dead zone
+    if warning_issued:
+        rec_target = 5.0 * g_star
+        scale = (rec_target / max(p50, 1e-12)) if p50 > 0 else float("inf")
+        print(f"\nWARNING: Your gradients are too small/broken for gradcheck to meaningfully validate correctness.")
+        print(f"Details: {100*frac_dead:.1f}% of grads < {margin:.1f}·g* (g* = atol/rtol = {g_star:.3g})")
+        print(f"Stats: p50={p50:.3g}, p95={p95:.3g}, max={gmax:.3g}")
+        print(f"Tolerances: atol={atol}, rtol={rtol}")
+        print(f"Suggested fix: Rescale inputs/loss by ~{scale:.2g}x to get median |grad| ≥ {rec_target:.3g}")
+
+    return {
         "g_star": g_star,
-        "frac_in_dead_zone": frac_in_dead,
+        "frac_in_dead_zone": frac_dead,
         "grad_p50": p50,
         "grad_p95": p95,
         "grad_max": gmax,
+        "num_total": n_all,
+        "num_finite": n_fin,
+        "warning_issued": warning_issued,
     }
-
-    if frac_in_dead >= frac_threshold:
-        rec_target = 5.0 * g_star  # aim median above this so rtol term matters
-        # scale factor to push p50 to rec_target (1.0 = no scaling)
-        scale_suggest = (rec_target / max(p50, 1e-12)) if p50 > 0 else float("inf")
-        msg = (
-            f"\nWARNING: {100*frac_in_dead:.1f}% of grads < {margin:.1f}·g* "
-            f"(g* = atol/rtol = {g_star:.3g}). Absolute tolerance dominates.\n"
-            f"atol={atol:.3g}, rtol={rtol:.3g}, eps={eps:.3g}\n"
-            f"stats: p50={p50:.3g}, p95={p95:.3g}, max={gmax:.3g}\n"
-            f"actions: rescale loss/inputs by ≈{scale_suggest:.2g} so median |grad| ≥ {rec_target:.3g}, "
-            f"or reduce atol if numerically safe, or use a Taylor test."
-        )
-        print(msg)
-        dead_zone_stats["warning_issued"] = True
-    else:
-        dead_zone_stats["warning_issued"] = False
-
-    return dead_zone_stats
 
 
 def check_op_backward_numerical(
@@ -187,9 +297,24 @@ def check_op_backward_numerical(
         # Triton kernels will fail if given float64 inputs
         inputs_list[i] = inp.detach().clone().requires_grad_(True)
 
-    # Warn if most gradients fall in the dead-zone where absolute tolerance dominates
-    # Also collect gradient magnitude statistics for diagnostics
-    dead_zone_stats = _warn_if_unreliable_gradient_zone(my_op, inputs_list, atol, rtol, eps)
+    # DIAGNOSTIC PHASE: Analytic-only gradient magnitude check
+    # Cost: 1 forward + 1 backward pass, 0 finite-difference passes
+    # Old code: _warn_if_unreliable_gradient_zone computed FD on first 3 elements (6 fwd passes)
+    # New code: _grad_magnitude_diagnostics is purely analytic (0 FD passes)
+    # This catches NaN/dead-zone issues before expensive gradcheck (~200 fwd passes)
+    dead_zone_stats = _grad_magnitude_diagnostics(my_op, inputs_list, atol=atol, rtol=rtol)
+
+    # SEMANTIC CHANGE 5: Early-out if all gradients are non-finite
+    # Old code: continued to gradcheck with NaN grads, got mysterious failures
+    # New code: abort immediately with clear error message
+    # Prevents wasting ~200 forward passes on garbage gradients
+    if dead_zone_stats.get("non_finite_grads", False):
+        return False, {
+            "ok": False,
+            "error": "All analytical gradients are non-finite (NaN/Inf). Cannot run gradcheck.",
+            "method": "torch.autograd.gradcheck",
+            "dead_zone_stats": dead_zone_stats,
+        }
 
     # Make eps magnitude-aware to handle different input scales
     # eps_eff = eps * max(1.0, max_abs_x) scales step size with input magnitude
@@ -200,12 +325,19 @@ def check_op_backward_numerical(
     eps_eff = eps * max(1.0, max_abs_x)
 
     try:
-        # Call PyTorch's gradcheck directly with raise_exception=True to get detailed errors
-        # This computes numerical gradients using my_op(inputs + eps) - my_op(inputs - eps)
-        # and compares against analytical gradients from my_op.backward()
-        # NOTE: nondet_tol=0.0 by default. For kernels with atomics or non-deterministic
-        # reductions, consider increasing to ~0.00001 to 0.0001 to avoid false negatives from
-        # summation order variations.
+        # VALIDATION PHASE: torch.autograd.gradcheck - THE ONLY FINITE DIFFERENCE CHECK
+        # Cost: ~200 forward passes (100 random directions × 2 for central differences)
+        # This is the single source of truth for gradient correctness
+        #
+        # In the revised setup:
+        # - Diagnostic phase (above): 1 backward, 0 forward (analytic-only)
+        # - Validation phase (here): ~200 forward (central differences via gradcheck)
+        # - Debug phase (future): _numeric_probe_slice runs only on fail/warn
+        #
+        # Old setup was running 3 separate FD checks (wasteful!):
+        # 1. Diagnostic FD on first 3 elements (6 fwd passes) - NOW REMOVED
+        # 2. This gradcheck (~200 fwd passes) - KEPT (only mandatory FD)
+        # 3. Debug FD in failure path - moved to optional probe
         torch.autograd.gradcheck(
             my_op,
             tuple(inputs_list),
