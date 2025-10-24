@@ -6,9 +6,10 @@ Only one verifier: torch.autograd.gradcheck is the check. Everything else improv
 Problem: in f32, if |g| < g* = atol/rtol, the relative term is inert. Gradcheck then tests
 almost-absolute error and can mislead (passes on skeleton bugs when grads ~ 0).
 
-Solution: do a cheap analytic scale check before gradcheck; run gradcheck once.
-- Diagnostic: _grad_magnitude_diagnostics (analytic-only, no FD)
-- Validation: torch.autograd.gradcheck (THE central-difference check)
+Solution: detect and escape the dead-zone, then run gradcheck once.
+- Diagnostic: _grad_magnitude_diagnostics (analytic-only, no FD) detects dead-zone
+- Scaling: outputs scaled by s to make |grad| >> g* (engages relative tolerance)
+- Validation: torch.autograd.gradcheck on scaled op (THE central-difference check)
 """
 
 import warnings
@@ -316,6 +317,53 @@ def check_op_backward_numerical(
             "dead_zone_stats": dead_zone_stats,
         }
 
+    # OUTPUT SCALING: Escape the dead-zone by making |grad| >> g*
+    # ============================================================
+    # Problem: When |grad| < g* = atol/rtol, the absolute tolerance dominates
+    #          and gradcheck tests almost-absolute error instead of relative error.
+    #          This makes the test unreliable for small gradients.
+    #
+    # Solution: Scale outputs by s so both analytical and numerical gradients
+    #           become s·grad. This preserves relative error but lifts magnitude
+    #           above g*, engaging the relative tolerance term.
+    #
+    # Mathematical validity:
+    #   ∇(s·f) = s·∇f  for constant s (chain rule on scalar multiplication)
+    #   → Both analytical and numerical grads scale by s
+    #   → Relative error unchanged: |s·g_ana - s·g_num|/|s·g_num| = |g_ana - g_num|/|g_num|
+    #   → But absolute magnitude lifted: |s·g| >> g* engages rtol term
+    #
+    # Target: 5·g* (provides safety margin above dead-zone threshold)
+    # If p50 already >> g*, scale=1.0 (no scaling needed)
+    # If p50 near or below g*, scale up to make typical grad ≈ 5·g*
+    g_star = dead_zone_stats.get("g_star", 0.0)
+    # Defensive: compute g_star from atol/rtol if missing
+    if g_star == 0:
+        g_star = atol / max(rtol, 1e-20)
+
+    p50 = dead_zone_stats.get("grad_p50", 0.0) or 0.0
+    output_scale = max(1.0, (5.0 * g_star / max(p50, 1e-12))) if g_star > 0 and p50 > 0 else 1.0
+    # Cap scale to avoid overflow (e.g., if p50 is extremely small)
+    output_scale = min(output_scale, 1e6)
+
+    def _scaled_op(*xs):
+        """Wrapper that scales outputs to lift gradients out of dead-zone.
+
+        Only scales floating-point tensors; leaves integer/bool tensors unchanged.
+        """
+        y = my_op(*xs)
+        s = float(output_scale)  # Ensure it's a Python float for safety
+
+        def _scale_tensor(t):
+            """Scale only floating-point tensors."""
+            return t * s if t.is_floating_point() else t
+
+        if isinstance(y, (list, tuple)):
+            # Handle each element: scale floating tensors, preserve others
+            return type(y)(_scale_tensor(t) if torch.is_tensor(t) else t for t in y)
+        # Single output: scale if floating tensor, else return as-is
+        return _scale_tensor(y) if torch.is_tensor(y) else y
+
     # Make eps magnitude-aware to handle different input scales
     # eps_eff = eps * max(1.0, max_abs_x) scales step size with input magnitude
     max_abs_x = max(
@@ -330,7 +378,7 @@ def check_op_backward_numerical(
         # This is the single source of truth for gradient correctness
         #
         # In the revised setup:
-        # - Diagnostic phase (above): 1 backward, 0 forward (analytic-only)
+        # - Diagnostic phase (above): 1 forward + 1 backward, 0 finite-difference (analytic-only)
         # - Validation phase (here): ~200 forward (central differences via gradcheck)
         # - Debug phase (future): _numeric_probe_slice runs only on fail/warn
         #
@@ -338,8 +386,11 @@ def check_op_backward_numerical(
         # 1. Diagnostic FD on first 3 elements (6 fwd passes) - NOW REMOVED
         # 2. This gradcheck (~200 fwd passes) - KEPT (only mandatory FD)
         # 3. Debug FD in failure path - moved to optional probe
+        #
+        # Use _scaled_op (not my_op) to escape dead-zone if needed
+        # When output_scale > 1, gradients are lifted above g* = atol/rtol
         torch.autograd.gradcheck(
-            my_op,
+            _scaled_op,  # Scaled wrapper (identity if output_scale=1.0)
             tuple(inputs_list),
             eps=eps_eff,
             atol=atol,
@@ -357,6 +408,7 @@ def check_op_backward_numerical(
             "eps_eff": eps_eff,
             "atol": atol,
             "rtol": rtol,
+            "output_scale": output_scale,  # Shows if dead-zone scaling was applied
             "fast_mode": fast_mode,
             "message": "Gradients match",
         }
@@ -384,6 +436,7 @@ def check_op_backward_numerical(
             "eps_eff": eps_eff,
             "atol": atol,
             "rtol": rtol,
+            "output_scale": output_scale,  # Shows if dead-zone scaling was applied
             "fast_mode": fast_mode,
             "error": error_msg,
             "message": "Gradient mismatch (see error for details)",
