@@ -216,11 +216,20 @@ SWEEP = [
     # todo: use these instead
     # "HEAD_DIM": 64
 
-    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
-    for N in (16, 1024, 2048, 4096, 8192, 16384)
-    # for N in (16, 32, )
-]
+    # {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
+    # for N in (16, 1024, 2048, 4096, 8192, 16384)
+    # # for N in (16, 32, )
 
+
+    # Must validate (small shapes fit in memory)
+    {"B": 1, "NUM_HEADS": 8, "SEQ_LEN": 128, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": True},
+    {"B": 2, "NUM_HEADS": 16, "SEQ_LEN": 1024, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": True},
+
+    # Optional (may OOM on naive reference)
+    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 4096, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": False},
+    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 8192, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": False},
+]
+]
 
 def make_args(dims, device="cuda", dtype=torch.float16):
     B, NUM_HEADS, SEQ_LEN, HEAD_DIM = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]

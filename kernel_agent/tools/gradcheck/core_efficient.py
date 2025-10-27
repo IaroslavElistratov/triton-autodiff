@@ -1,628 +1,473 @@
 """
-Efficient gradcheck implementation using PyTorch's built-in torch.autograd.gradcheck.
+Reference-based gradcheck implementation using PyTorch autograd.
 
-Only one verifier: torch.autograd.gradcheck is the check. Everything else improves test quality and debuginfo.
-
-Problem: in f32, if |g| < g* = atol/rtol, the relative term is inert. Gradcheck then tests
-almost-absolute error and can mislead (passes on skeleton bugs when grads ~ 0).
-
-Solution: detect and escape the dead-zone, then run gradcheck once.
-- Diagnostic: _grad_magnitude_diagnostics (analytic-only, no FD) detects dead-zone
-- Scaling: outputs scaled by s to make |grad| >> g* (engages relative tolerance)
-- Validation: torch.autograd.gradcheck on scaled op (THE central-difference check)
+Instead of finite differences, this uses a PyTorch reference implementation
+to validate Triton backward kernels via autograd gradients.
 """
 
-import warnings
-
 import torch
-from torch.autograd.gradcheck import GradcheckError
-from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict
+from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict, List
+import traceback
+
+# Import traceback filter to reduce LLM prompt noise (removes internal Triton/PyTorch frames)
+from ...utils import filter_traceback_for_llm
 
 Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
-MaybeTensors = Union[Tensor, Sequence[Tensor]]
-OutputSel = Union[str, int, Sequence[int], Callable[[MaybeTensors], MaybeTensors]]
 
 
-def _safe_quantiles_1d(g: torch.Tensor, qs=(0.5, 0.95), max_samples=200_000):
-    """
-    Purpose: compute median (p50) and tail (p95) safely on huge/NaN-contaminated tensors.
-
-    Median (p50) unlike mean robust to outliers, reflects TYPICAL gradient magnitude.
-
-    The need this wrapper around torch.quantile() -- torch.quantile() directly is BRITTLE:
-    1. Crashes on large tensors: "tensor too large" error on >200k elements
-    2. NaN contamination: any NaN → all quantiles become NaN
-    3. No subsample safeguard: can't handle huge gradient vectors
-
-    This wrapper makes torch.quantile() safe. We still use PyTorch's quantile
-    algorithm, just with preprocessing (filter NaN, subsample if huge, use CPU).
-
-    Returns: ([p50, p95, ...], max_from_full_tensor)
-    """
-    g = g.reshape(-1)
-
-    # Step 1: Filter non-finite values BEFORE computing quantiles
-    # Problem: torch.quantile([1, 2, nan, 4]) → [nan, nan] (NaN poisons all results)
-    # Solution: filter to finite subset first
-    finite_mask = torch.isfinite(g)
-    if not finite_mask.any():
-        return [float('nan') for _ in qs], float('nan')
-
-    g_fin = g[finite_mask]
-
-    # Step 2: Compute max from FULL finite tensor BEFORE subsampling
-    # Why: max must be from full tensor, not subsample (subsample might miss true max)
-    # Bug in old code: max was computed from subsample, losing accuracy
-    gmax = float(g_fin.max().item())
-
-    # Step 3: Subsample if tensor too large (>200k elements)
-    # Problem: torch.quantile(huge_tensor) → RuntimeError: "tensor too large"
-    # Solution: randomly sample 200k elements for quantile (median estimate still accurate)
-    # Use randperm for sampling without replacement (better than randint with replacement)
-    if g_fin.numel() > max_samples:
-        idx = torch.randperm(g_fin.numel(), device=g_fin.device)[:max_samples]
-        g_fin = g_fin.index_select(0, idx)
-
-    # Step 4: Call torch.quantile on CPU (more numerically stable)
-    # We're not replacing torch.quantile's algorithm, just making it safe to call
-    g_cpu = g_fin.float().cpu()
-    q = torch.quantile(g_cpu, torch.tensor(qs))
-    return q.tolist(), gmax
-
-
-def _grad_magnitude_diagnostics(
-    my_op: Callable,
-    inputs: Sequence[Tensor],
+def check_forward_outputs_match(
+    triton_op: Callable,
+    pytorch_ref: Callable,
+    test_inputs: Sequence[Tensor],
     *,
-    atol: float,
-    rtol: float,
-    margin: float = 2.0,
-    frac_threshold: float = 0.5,
-    sample_show: int = 10
-) -> Dict[str, Any]:
-    """
-    Purpose: analytic-only precheck. Computes grads once, reports fraction |g| < k·g* and median.
-    If most grads sit below g* = atol/rtol, chosen atol/rtol won't give a meaningful test.
-
-    No finite differences.
-    _grad_magnitude_diagnostics does one forward+backward. It only flags when most
-    grads are below g*, so you know gradcheck will be in the absolute regime. Earlier code
-    mixed diagnostics with FD (removed).
-
-    Cost: 1 forward + 1 backward pass, 0 finite-difference passes.
-    Guards quality of the central-difference check.
-    """
-    if rtol <= 0:
-        warnings.warn("rtol <= 0 → absolute-only regime; tiny grads cannot be judged reliably.")
-        return {}
-
-    # SEMANTIC CHANGE 1: Preserve ALL inputs (not just float tensors)
-    # Old code dropped non-float args (int/bool tensors), causing op to fail
-    # Fix: Only set requires_grad on float tensors, pass others as-is
-    args = [
-        x.detach().clone().requires_grad_(True)
-        if (isinstance(x, torch.Tensor) and x.is_floating_point())
-        else x
-        for x in inputs
-    ]
-
-    # Run forward + backward on simple sum loss
-    out = my_op(*args)
-    loss = (
-        out.sum()
-        if not isinstance(out, (list, tuple))
-        else sum(t.sum() for t in out if isinstance(t, torch.Tensor))
-    )
-    loss.backward()
-
-    # Collect gradient magnitudes
-    mags = []
-    for x in args:
-        if (isinstance(x, torch.Tensor) and x.is_floating_point()
-            and x.grad is not None and x.grad.numel() > 0):
-            mags.append(x.grad.detach().abs().reshape(-1))
-
-    if not mags:
-        return {}
-
-    g = torch.cat(mags)
-
-    # SEMANTIC CHANGE 3: Explicit finiteness filtering BEFORE stats
-    # Old code: called torch.quantile(g, 0.5) directly on raw gradients
-    # Problem: Any NaN → all quantiles become NaN (contamination)
-    # Fix: Filter to finite subset, early-out if all NaN
-    finite = torch.isfinite(g)
-    n_all = g.numel()
-    n_fin = int(finite.sum().item())
-
-    # SEMANTIC CHANGE 5: Early-out on all-NaN (prevent running gradcheck on garbage)
-    # Old code returned stats with NaN values
-    # Fix: Return immediately with non_finite_grads flag, caller early-outs
-    if n_fin == 0:
-        print(f"\nERROR: All {n_all} analytical gradients are non-finite (NaN/Inf).")
-        print("Your backward kernel has a catastrophic bug. Fix this before gradcheck can run.")
-        return {
-            "ok": False,
-            "non_finite_grads": True,
-            "num_total": n_all,
-            "num_finite": 0
-        }
-
-    # Use only finite gradients for stats (prevents NaN contamination)
-    g_fin = g[finite]
-
-    # Dead-zone analysis: g* = atol/rtol is the crossover point
-    # When |grad| < g*, relative tolerance is inactive (absolute tolerance dominates)
-    # This makes gradcheck very loose: |num - ana| < atol regardless of magnitude
-    g_star = atol / max(rtol, 1e-20)
-    frac_dead = (g_fin < margin * g_star).float().mean().item()
-
-    # Compute median (p50) and tail (p95) to understand gradient scale distribution
-    # median (unlike mean) robust typical scale
-    (p50, p95), gmax = _safe_quantiles_1d(g_fin, qs=(0.5, 0.95))
-
-    # SEMANTIC CHANGE 4: Show gradient samples for ALL shapes (not just failures)
-    # Always print for visibility (helps spot patterns across shapes)
-    k = min(sample_show, g_fin.numel())
-    if k > 0:
-        # Use randperm for sampling without replacement (better than randint)
-        idx = torch.randperm(g_fin.numel(), device=g_fin.device)[:k]
-        sample = g_fin.index_select(0, idx).tolist()
-        formatted_sample = [f'{v:.3g}' for v in sample]
-        print(f"\n[GRAD STATS] g*={g_star:.3g}  dead_frac={100*frac_dead:.1f}%  p50={p50:.3g}  p95={p95:.3g}  max={gmax:.3g}")
-        print(f"[GRAD STATS] sample({k}): {formatted_sample}")
-
-    # Warn if some (but not all) gradients are non-finite
-    if n_fin < n_all:
-        frac_nonfinite = (n_all - n_fin) / n_all
-        print(f"\nWARNING: {n_all - n_fin}/{n_all} ({100*frac_nonfinite:.1f}%) gradients are non-finite (NaN/Inf).")
-        print("Your backward kernel has numerical stability issues. Gradcheck results will be unreliable.")
-
-    # Determine if warning should be issued (return as flag)
-    warning_issued = frac_dead >= frac_threshold
-
-    # Warn if most gradients fall in dead zone
-    if warning_issued:
-        rec_target = 5.0 * g_star
-        scale = (rec_target / max(p50, 1e-12)) if p50 > 0 else float("inf")
-        print(f"\nWARNING: Your gradients are too small/broken for gradcheck to meaningfully validate correctness.")
-        print(f"Details: {100*frac_dead:.1f}% of grads < {margin:.1f}·g* (g* = atol/rtol = {g_star:.3g})")
-        print(f"Stats: p50={p50:.3g}, p95={p95:.3g}, max={gmax:.3g}")
-        print(f"Tolerances: atol={atol}, rtol={rtol}")
-        print(f"Suggested fix: Rescale inputs/loss by ~{scale:.2g}x to get median |grad| ≥ {rec_target:.3g}")
-
-    return {
-        "g_star": g_star,
-        "frac_in_dead_zone": frac_dead,
-        "grad_p50": p50,
-        "grad_p95": p95,
-        "grad_max": gmax,
-        "num_total": n_all,
-        "num_finite": n_fin,
-        "warning_issued": warning_issued,
-    }
-
-
-def check_op_backward_numerical(
-    my_op: Callable[..., MaybeTensors],
-    inputs: Sequence[Tensor],
-    *,
-    outputs: OutputSel = "auto",
-    upstream: Optional[Sequence[Tensor]] = None,
-    compare_dtype: torch.dtype = torch.float32,
-    atol: float = 0.0001,  # Float32 finite difference tolerance
-    rtol: float = 0.01,
-    seed: int = 0,
-    only_floating_inputs: bool = True,
-    eps: float = 0.005,
-    fast_mode: bool = True,
-    nondet_tol: float = 0.0,
-    numerical_method: str = "central",
+    # tolerances copied form triton tutorials
+    atol: float = 1e-2,
+    rtol: float = 0.0,
+    verbose: bool = True
 ) -> Tuple[bool, Dict[str, Any]]:
     """
-    Test backward correctness using PyTorch's gradcheck with numerical gradients.
-
-    This uses PyTorch's torch.autograd.gradcheck which:
-      - Computes numerical gradients via finite differences using my_op forward
-      - Computes analytical gradients via my_op backward
-      - Compares them with specified tolerances
-
-    Key advantage: Uses ONLY the efficient Triton kernel (my_op), never calls
-    naive torch_fn, so avoids O(n²) memory issues.
+    Validate that PyTorch reference forward outputs match Triton forward outputs.
+    Used in Phase 1 to validate the PyTorch reference implementation.
 
     Args:
-        my_op: The efficient Triton kernel wrapped in autograd.Function
-        inputs: Input tensors (must have requires_grad=True for grad computation)
-        outputs: Output selector (currently ignored, kept for API compatibility)
-        upstream: Upstream gradients (currently ignored, gradcheck generates internally)
-        compare_dtype: dtype for comparison (currently ignored, gradcheck uses input dtype)
-        atol: Absolute tolerance (default 0.0001 for float32 central differences)
-        rtol: Relative tolerance (default 0.01 = 1% relative error tolerance)
-        seed: RNG seed (currently ignored by gradcheck)
-        only_floating_inputs: Only compute grads for float tensors
-        eps: Finite difference epsilon (default 0.005, optimal for float32)
-        fast_mode: Use fast mode (random projections instead of full Jacobian)
-        nondet_tol: Tolerance for non-deterministic operations
-        numerical_method: Finite difference method ("central" or "forward")
-                         NOTE: Ignored - PyTorch's gradcheck always uses central differences.
-                         Kept for API compatibility with worker.py.
+        triton_op: Triton operation (forward only)
+        pytorch_ref: PyTorch reference implementation
+        test_inputs: Input tensors to test
+        atol: Absolute tolerance for output comparison
+        rtol: Relative tolerance
+        verbose: Print detailed information
 
     Returns:
-        (ok, stats) where:
-            ok: True if gradients match within tolerance
-            stats: Dict with detailed results
+        (passed, stats) where passed is True if outputs match
     """
-    if not inputs:
-        raise ValueError("inputs must be a non-empty sequence of tensors")
-
-    # ========== CRITICAL: dtype handling for Triton kernels with gradcheck ==========
-    #
-    # PyTorch's torch.autograd.gradcheck normally expects float64 (double precision):
-    # - Gradcheck computes numerical gradients via finite differences: (f(x+eps) - f(x-eps))/(2*eps)
-    # - This subtraction amplifies floating-point errors, requiring high precision
-    # - PyTorch docs state: "The default values are designed for input of double precision.
-    #   This check will likely fail if input is of less precision, e.g., FloatTensor."
-    # - If inputs are not float64, gradcheck issues warning and may fail with tight tolerances
-    #
-    # BUT: Triton kernels do NOT support float64:
-    # - tl.dot (matrix multiplication) only supports float32/float16/bfloat16
-    # - Most Triton ops are designed for GPU performance at lower precision
-    # - Attempting to run Triton kernels with float64 inputs will raise runtime errors
-    #
-    # Solution: Keep original dtypes (float32/float16) with appropriately loose tolerances
-    # Float32 central difference settings:
-    # - eps=0.005: Optimal step size (h ≈ ε_mach^(1/3) ≈ 0.005 for float32)
-    # - atol=0.0001: Absolute tolerance above error floor (~0.00001 to 0.00002)
-    # - rtol=0.01: 1% relative tolerance for gradient comparison
-    # - Use fast_mode=True to use random projections (v^T·J·u) which is more tolerant
-    #   of precision issues than full Jacobian computation
-    #
-    # Float32 finite difference analysis:
-    # - Machine epsilon: ~0.000000119
-    # - Optimal central diff step: h* ≈ 0.0049
-    # - Best-case relative error floor: ~0.00002
-    # - atol=0.0001 provides margin above error floor while catching bugs
-    # - rtol=0.01 balances strictness with float32 accumulation noise
-    #
-    # This approach is validated by:
-    # - PyTorch forums discuss "Why does gradcheck fail for floats?" - common workaround
-    # - Fast mode reduces sensitivity to individual element errors
-    # ================================================================================
-    inputs_list = list(inputs)
-    for i, inp in enumerate(inputs_list):
-        if only_floating_inputs and not inp.is_floating_point():
-            continue
-
-        # Keep original dtype - do NOT convert to float64
-        # Triton kernels will fail if given float64 inputs
-        inputs_list[i] = inp.detach().clone().requires_grad_(True)
-
-    # DIAGNOSTIC PHASE: Analytic-only gradient magnitude check
-    # Cost: 1 forward + 1 backward pass, 0 finite-difference passes
-    # Old code: _warn_if_unreliable_gradient_zone computed FD on first 3 elements (6 fwd passes)
-    # New code: _grad_magnitude_diagnostics is purely analytic (0 FD passes)
-    # This catches NaN/dead-zone issues before expensive gradcheck (~200 fwd passes)
-    dead_zone_stats = _grad_magnitude_diagnostics(my_op, inputs_list, atol=atol, rtol=rtol)
-
-    # SEMANTIC CHANGE 5: Early-out if all gradients are non-finite
-    # Old code: continued to gradcheck with NaN grads, got mysterious failures
-    # New code: abort immediately with clear error message
-    # Prevents wasting ~200 forward passes on garbage gradients
-    if dead_zone_stats.get("non_finite_grads", False):
-        return False, {
-            "ok": False,
-            "error": "All analytical gradients are non-finite (NaN/Inf). Cannot run gradcheck.",
-            "method": "torch.autograd.gradcheck",
-            "dead_zone_stats": dead_zone_stats,
-        }
-
-    # OUTPUT SCALING: Escape the dead-zone by making |grad| >> g*
-    # ============================================================
-    # Problem: When |grad| < g* = atol/rtol, the absolute tolerance dominates
-    #          and gradcheck tests almost-absolute error instead of relative error.
-    #          This makes the test unreliable for small gradients.
-    #
-    # Solution: Scale outputs by s so both analytical and numerical gradients
-    #           become s·grad. This preserves relative error but lifts magnitude
-    #           above g*, engaging the relative tolerance term.
-    #
-    # Mathematical validity:
-    #   ∇(s·f) = s·∇f  for constant s (chain rule on scalar multiplication)
-    #   → Both analytical and numerical grads scale by s
-    #   → Relative error unchanged: |s·g_ana - s·g_num|/|s·g_num| = |g_ana - g_num|/|g_num|
-    #   → But absolute magnitude lifted: |s·g| >> g* engages rtol term
-    #
-    # Target: 5·g* (provides safety margin above dead-zone threshold)
-    # If p50 already >> g*, scale=1.0 (no scaling needed)
-    # If p50 near or below g*, scale up to make typical grad ≈ 5·g*
-    g_star = dead_zone_stats.get("g_star", 0.0)
-    # Defensive: compute g_star from atol/rtol if missing
-    if g_star == 0:
-        g_star = atol / max(rtol, 1e-20)
-
-    p50 = dead_zone_stats.get("grad_p50", 0.0) or 0.0
-    output_scale = max(1.0, (5.0 * g_star / max(p50, 1e-12))) if g_star > 0 and p50 > 0 else 1.0
-    # Cap scale to avoid overflow (e.g., if p50 is extremely small)
-    output_scale = min(output_scale, 1e6)
-
-    def _scaled_op(*xs):
-        """Wrapper that scales outputs to lift gradients out of dead-zone.
-
-        Only scales floating-point tensors; leaves integer/bool tensors unchanged.
-        """
-        y = my_op(*xs)
-        s = float(output_scale)  # Ensure it's a Python float for safety
-
-        def _scale_tensor(t):
-            """Scale only floating-point tensors."""
-            return t * s if t.is_floating_point() else t
-
-        if isinstance(y, (list, tuple)):
-            # Handle each element: scale floating tensors, preserve others
-            return type(y)(_scale_tensor(t) if torch.is_tensor(t) else t for t in y)
-        # Single output: scale if floating tensor, else return as-is
-        return _scale_tensor(y) if torch.is_tensor(y) else y
-
-    # Make eps magnitude-aware to handle different input scales
-    # eps_eff = eps * max(1.0, max_abs_x) scales step size with input magnitude
-    max_abs_x = max(
-        (inp.abs().max().item() for inp in inputs_list if inp.is_floating_point()),
-        default=1.0
-    )
-    eps_eff = eps * max(1.0, max_abs_x)
+    stats = {}
 
     try:
-        # VALIDATION PHASE: torch.autograd.gradcheck - THE ONLY FINITE DIFFERENCE CHECK
-        # Cost: ~200 forward passes (100 random directions × 2 for central differences)
-        # This is the single source of truth for gradient correctness
-        #
-        # In the revised setup:
-        # - Diagnostic phase (above): 1 forward + 1 backward, 0 finite-difference (analytic-only)
-        # - Validation phase (here): ~200 forward (central differences via gradcheck)
-        # - Debug phase (future): _numeric_probe_slice runs only on fail/warn
-        #
-        # Old setup was running 3 separate FD checks (wasteful!):
-        # 1. Diagnostic FD on first 3 elements (6 fwd passes) - NOW REMOVED
-        # 2. This gradcheck (~200 fwd passes) - KEPT (only mandatory FD)
-        # 3. Debug FD in failure path - moved to optional probe
-        #
-        # Use _scaled_op (not my_op) to escape dead-zone if needed
-        # When output_scale > 1, gradients are lifted above g* = atol/rtol
-        torch.autograd.gradcheck(
-            _scaled_op,  # Scaled wrapper (identity if output_scale=1.0)
-            tuple(inputs_list),
-            eps=eps_eff,
-            atol=atol,
-            rtol=rtol,
-            raise_exception=True,  # Raise to get detailed error with input_idx
-            fast_mode=fast_mode,
-            nondet_tol=nondet_tol,
-        )
+        # Clone inputs for both paths
+        triton_inputs = [x.detach().clone() for x in test_inputs]
+        ref_inputs = [x.detach().clone() for x in test_inputs]
 
-        # Success case: all gradients match
-        stats = {
-            "ok": True,
-            "method": "torch.autograd.gradcheck",
-            "eps": eps,
-            "eps_eff": eps_eff,
-            "atol": atol,
-            "rtol": rtol,
-            "output_scale": output_scale,  # Shows if dead-zone scaling was applied
-            "fast_mode": fast_mode,
-            "message": "Gradients match",
-        }
-        # Include dead-zone diagnostics if available
-        if dead_zone_stats:
-            stats["dead_zone_stats"] = dead_zone_stats
-        return True, stats
+        # Forward pass - Triton
+        triton_out = triton_op(*triton_inputs)
+        if not isinstance(triton_out, (list, tuple)):
+            triton_out = (triton_out,)
 
-    except GradcheckError as e:
-        # Gradcheck failed - include the raw error message which contains all relevant details
-        #
-        # IMPORTANT: PyTorch's gradcheck with raise_exception=True provides detailed errors:
-        # - Identifies which input failed: "Jacobian mismatch for output i with respect to input j"
-        # - Fast mode: runs scalar check first, reports max elementwise difference
-        # - On failure: reruns in slow mode, reconstructs full Jacobians and compares elementwise
-        # - Slow mode message explicitly states it's recomputing after fast mode failure
-        #
-        # NO EXTRA POST-PROCESSING NEEDED - don't parse with regex, message already includes input index
-        error_msg = str(e)
+        # Forward pass - PyTorch reference
+        ref_out = pytorch_ref(*ref_inputs)
+        if not isinstance(ref_out, (list, tuple)):
+            ref_out = (ref_out,)
 
-        stats = {
-            "ok": False,
-            "method": "torch.autograd.gradcheck",
-            "eps": eps,
-            "eps_eff": eps_eff,
-            "atol": atol,
-            "rtol": rtol,
-            "output_scale": output_scale,  # Shows if dead-zone scaling was applied
-            "fast_mode": fast_mode,
-            "error": error_msg,
-            "message": "Gradient mismatch (see error for details)",
-        }
-        # Include dead-zone diagnostics even on failure - helps diagnose if failure
-        # is due to wrong tolerances (dead-zone) vs actual gradient bug
-        if dead_zone_stats:
-            stats["dead_zone_stats"] = dead_zone_stats
+        # Check: forward outputs must match
+        all_match = True
+        output_errors = []
+
+        for i, (t_out, r_out) in enumerate(zip(triton_out, ref_out)):
+            if isinstance(t_out, torch.Tensor) and isinstance(r_out, torch.Tensor):
+                try:
+                    torch.testing.assert_close(t_out, r_out, atol=atol, rtol=rtol)
+                    # Also compute actual max difference for transparency
+                    max_diff = (t_out - r_out).abs().max().item()
+                    if verbose:
+                        print(f"[Reference Check] Output {i} matches ✓ (max_diff={max_diff:.6f}, atol={atol})")
+                except AssertionError as e:
+                    all_match = False
+                    output_errors.append(f"Output {i}: {e}")
+                    if verbose:
+                        print(f"[Reference Check] Output {i} mismatch: {e}")
+
+        stats["forward_match"] = all_match
+        stats["output_errors"] = output_errors
+
+        return all_match, stats
+
+    except torch.cuda.OutOfMemoryError:
+        # NOTE: Naive reference impl can OOM, it's ok later we gonna omit errs on shapes marked as "required" in the user land.
+        #
+        # Let OOM propagate to sweep level for proper optional shape handling
+        # Sweep level will catch this and either fail (required) or skip (optional)
+        raise
+    except Exception as e:
+        # Non-OOM errors: return as failure with diagnostics
+        full_tb = traceback.format_exc()
+        # Filter traceback to show only user code + error location (not 20+ internal frames)
+        filtered_tb = filter_traceback_for_llm(full_tb)
+        if verbose:
+            print(f"[Reference Check] Exception during forward validation: {e}")
+            print(filtered_tb)
+        stats["error"] = str(e)
+        stats["traceback"] = filtered_tb
         return False, stats
 
+
+def check_op_backward_with_reference(
+    triton_op: Callable,
+    pytorch_ref: Callable,
+    test_inputs: Sequence[Tensor],
+    *,
+    atol: float = 1e-2,
+    rtol: float = 0.0,
+    verbose: bool = True
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Validate Triton backward gradients against PyTorch reference gradients.
+
+    Args:
+        triton_op: Triton operation with forward and backward
+        pytorch_ref: PyTorch reference implementation (pytorch_reference_impl)
+        test_inputs: Input tensors to test
+        atol: Absolute tolerance for gradient comparison
+        rtol: Relative tolerance (usually 0 for reference-based check)
+        verbose: Print detailed information
+
+    Returns:
+        (passed, stats) where passed is True if gradients match
+    """
+    stats = {}
+
+    try:
+        # Clone inputs for both paths
+        triton_inputs = [x.detach().clone().requires_grad_(True) if x.is_floating_point() else x
+                        for x in test_inputs]
+        ref_inputs = [x.detach().clone().requires_grad_(True) if x.is_floating_point() else x
+                     for x in test_inputs]
+
+        # Forward pass - Triton
+        triton_out = triton_op(*triton_inputs)
+        if not isinstance(triton_out, (list, tuple)):
+            triton_out = (triton_out,)
+
+        # Forward pass - PyTorch reference
+        ref_out = pytorch_ref(*ref_inputs)
+        if not isinstance(ref_out, (list, tuple)):
+            ref_out = (ref_out,)
+
+        # First check: forward outputs must match
+        forward_match = True
+        for i, (t_out, r_out) in enumerate(zip(triton_out, ref_out)):
+            if isinstance(t_out, torch.Tensor) and isinstance(r_out, torch.Tensor):
+                try:
+                    torch.testing.assert_close(t_out, r_out, atol=atol, rtol=rtol)
+                except AssertionError as e:
+                    if verbose:
+                        print(f"[Reference Check] Forward output {i} mismatch: {e}")
+                    forward_match = False
+                    break
+
+        if not forward_match:
+            stats["error"] = "Forward outputs don't match between Triton and PyTorch reference"
+            return False, stats
+
+        # Create gradient output
+        grad_outputs = []
+        for out in triton_out:
+            if isinstance(out, torch.Tensor):
+                grad_out = torch.ones_like(out)
+                grad_outputs.append(grad_out)
+
+        # todo-now: maybe instead do
+        #   dout = torch.randn_like(q)
+        #   ref_out.backward(dout)
+
+        # Backward pass - Triton
+        triton_loss = sum(o.sum() for o in triton_out if isinstance(o, torch.Tensor))
+        triton_loss.backward()
+
+        # Backward pass - PyTorch reference
+        ref_loss = sum(o.sum() for o in ref_out if isinstance(o, torch.Tensor))
+        ref_loss.backward()
+
+        # Compare gradients
+        all_match = True
+        grad_errors = []
+
+        for i, (t_inp, r_inp) in enumerate(zip(triton_inputs, ref_inputs)):
+            if not hasattr(t_inp, 'grad') or t_inp.grad is None:
+                continue
+
+            try:
+                torch.testing.assert_close(t_inp.grad, r_inp.grad, atol=atol, rtol=rtol)
+                if verbose:
+                    print(f"[Reference Check] Input {i} gradients match ✓")
+            except AssertionError as e:
+                all_match = False
+                grad_errors.append(f"Input {i}: {e}")
+                if verbose:
+                    print(f"[Reference Check] Input {i} gradient mismatch: {e}")
+
+        stats["forward_match"] = forward_match
+        stats["gradient_match"] = all_match
+        stats["grad_errors"] = grad_errors
+
+        return all_match, stats
+
+    except torch.cuda.OutOfMemoryError:
+        # Let OOM propagate to sweep level for proper optional shape handling
+        # Sweep level will catch this and either fail (required) or skip (optional)
+        raise
     except Exception as e:
-        # Catch other errors: ValueError (invalid inputs), MemoryError (OOM),
-        # TypeError, or exceptions from the operation itself
-        # Note: eps_eff is always defined by the time we reach this handler
-        # (it's computed before the try block)
-        return False, {
-            "ok": False,
-            "error": f"{type(e).__name__}: {str(e)}",
-            "method": "torch.autograd.gradcheck",
-            "eps": eps,
-            "eps_eff": eps_eff,  # Always exists - no NameError possible
-            "atol": atol,
-            "rtol": rtol,
-        }
+        # Non-OOM errors: return as failure with diagnostics
+        full_tb = traceback.format_exc()
+        # Filter traceback to show only user code + error location (not 20+ internal frames)
+        filtered_tb = filter_traceback_for_llm(full_tb)
+        if verbose:
+            print(f"[Reference Check] Exception during validation: {e}")
+            print(filtered_tb)
+        stats["error"] = str(e)
+        stats["traceback"] = filtered_tb
+        return False, stats
 
 
 def check_op_backward_numerical_sweep(
-    my_op: Callable[..., MaybeTensors],
-    *,
+    my_op: Callable,
     sidecar: Dict[str, Any],
-    outputs: OutputSel = "auto",
-    upstream: Optional[Sequence[Tensor]] = None,
-    compare_dtype: torch.dtype = torch.float32,
-    atol: float = 0.0001,  # Float32 finite difference tolerance
-    rtol: float = 0.01,
-    seed: int = 0,
-    only_floating_inputs: bool = True,
+    outputs: Any = "auto",
+    *,
+    atol: float = 1e-2,
+    rtol: float = 0.0,
     eps: float = 0.005,
-    fast_mode: bool = True,
-    nondet_tol: float = 0.0,
-    numerical_method: str = "central",
+    verbose: bool = True,
+    forward_only: bool = False
 ) -> Tuple[bool, Dict[str, Any]]:
     """
-    Run numerical gradient check once per dims in SWEEP and aggregate results.
+    Main entry point for gradcheck using reference-based validation.
 
-    Uses PyTorch's torch.autograd.gradcheck for each test case, which:
-      - Uses the efficient Triton forward kernel for numerical gradients
-      - Avoids calling naive torch_fn reference implementation
-      - Prevents O(n²) memory issues on large sequences
+    Validates Triton kernels against PyTorch reference implementation via autograd.
 
     Args:
-        my_op: The efficient Triton kernel wrapped in autograd.Function
-        sidecar: Dict containing 'make_args' and 'SWEEP'
-        outputs: Output selector (kept for API compatibility)
-        upstream: Upstream gradients (kept for API compatibility)
-        compare_dtype: Comparison dtype (kept for API compatibility)
-        atol: Absolute tolerance (default 0.0001 for float32 central differences)
-        rtol: Relative tolerance (default 0.01 = 1% relative error tolerance)
-        seed: RNG seed
-        only_floating_inputs: Only compute grads for float tensors
-        eps: Finite difference epsilon (default 0.005, optimal for float32)
-        fast_mode: Use fast mode (random projections)
-        nondet_tol: Tolerance for non-deterministic ops
-        numerical_method: Finite difference method ("central" or "forward")
-                         NOTE: Ignored - PyTorch's gradcheck always uses central differences.
-                         Kept for API compatibility with worker.py.
+        my_op: Triton operation to test
+        sidecar: Dict containing test configuration (SWEEP, make_args, pytorch_reference_impl)
+        outputs: Which outputs to check (unused, kept for compatibility)
+        atol: Absolute tolerance for comparison
+        rtol: Relative tolerance for comparison
+        eps: Step size (unused, kept for compatibility)
+        verbose: Print detailed information
+        forward_only: If True, only validate forward outputs (Phase 1)
 
     Returns:
-        (ok_all, summary) where:
-            ok_all: True if all test cases pass
-            summary: Dict with aggregated results
+        (all_passed, stats) where all_passed is True if all shapes pass
     """
-    make_args = sidecar["make_args"]
-    sweep = sidecar["SWEEP"]
+    # Get PyTorch reference implementation
+    pytorch_ref = sidecar.get("pytorch_reference_impl")
+    if pytorch_ref is None:
+        raise ValueError("pytorch_reference_impl not found in sidecar. "
+                        "PyTorch reference must be provided for reference-based gradcheck.")
 
-    grad_pass: list[Dict[str, Any]] = []
-    grad_fail: list[Dict[str, Any]] = []
-    ok_all = True
-    total = 0
-    passed = 0
-    dead_zone_stats = None  # Collect from first successful test
+    # Get test configuration
+    sweep = sidecar.get("SWEEP", [])
+    make_args = sidecar.get("make_args")
 
-    for i, dims in enumerate(list(sweep or [])):
-        try:
-            args, _ = make_args(dims)
-            ok_i, stats_i = check_op_backward_numerical(
-                my_op=my_op,
-                inputs=args,
-                outputs=outputs,
-                upstream=upstream,
-                compare_dtype=compare_dtype,
-                atol=atol,
-                rtol=rtol,
-                seed=seed + i,
-                only_floating_inputs=only_floating_inputs,
-                eps=eps,
-                fast_mode=fast_mode,
-                nondet_tol=nondet_tol,
-                numerical_method=numerical_method,
-            )
-        except Exception as e:
-            # Catch exceptions during test setup or execution
-            ok_i = False
-            stats_i = {"error": f"{type(e).__name__}: {str(e)}"}
+    if not sweep:
+        raise ValueError("SWEEP not found or empty in sidecar")
+    if not make_args:
+        raise ValueError("make_args not found in sidecar")
 
-        # Collect dead-zone stats from first test (success or failure) for diagnostics
-        # We compute these before gradcheck runs, so they're available even on failure
-        if dead_zone_stats is None and "dead_zone_stats" in stats_i:
-            dead_zone_stats = stats_i["dead_zone_stats"]
-
-        # Record the test shape
-        try:
-            d = dict(dims)
-        except Exception:
-            d = {"dims": str(dims)}
-
-        total += 1
-        if ok_i:
-            grad_pass.append(d)
-            passed += 1
-        else:
-            # Include error details for failed cases
-            if "error" in stats_i:
-                d["error"] = stats_i["error"]
-            if "message" in stats_i:
-                d["message"] = stats_i["message"]
-            grad_fail.append(d)
-
-        ok_all = ok_all and bool(ok_i)
-
-    summary: Dict[str, Any] = {
-        "ok": bool(ok_all),
-        "num_total": total,
-        "num_passed": passed,
-        "num_failed": (total - passed),
-        "grad_pass": grad_pass,
-        "grad_fail": grad_fail,
-        "method": "torch.autograd.gradcheck",
-        "eps": eps,
-        "atol": atol,
-        "rtol": rtol,
-        "fast_mode": fast_mode,
+    stats = {
+        "method": "reference",
+        "validation_type": "forward_only" if forward_only else "full_gradcheck",
+        "num_shapes": len(sweep),
+        "shapes_passed": 0,
+        "shapes_failed": 0,
+        "shapes_oom": 0,
+        "shape_details": []
     }
 
-    # Include dead-zone diagnostics if available (from first successful test)
-    if dead_zone_stats:
-        summary["dead_zone_stats"] = dead_zone_stats
+    all_passed = True
 
-    # Format summary for readability
-    summary["summary_text"] = _format_summary_for_llm(summary)
+    # FEATURE: Required Flag for Selective Shape Testing
+    # Allows users to mark shapes as required=True (must pass) or required=False (OOM OK)
+    # RATIONALE: Naive PyTorch references materialize full tensors (e.g., N×N attention matrix)
+    # which OOM on large shapes. Optional shapes allow testing on smaller shapes for correctness
+    # while skipping memory-intensive large shapes that would fail the naive reference.
+    for i, shape_dict in enumerate(sweep):
+        # Extract 'required' flag (default True - strict by default for safety)
+        is_required = shape_dict.get("required", True)
+        shape_params = {k: v for k, v in shape_dict.items() if k != "required"}
 
-    return ok_all, summary
+        if verbose:
+            validation_type = "forward outputs" if forward_only else "gradients"
+            req_tag = "[REQUIRED]" if is_required else "[OPTIONAL]"
+            print(f"\n[Reference Check] {req_tag} Testing shape {i+1}/{len(sweep)} ({validation_type}): {shape_params}")
+
+        # Generate test inputs
+        args, kwargs = make_args(shape_dict)
+
+        # Wrap in try-except for OOM handling (BOTH phases - see comment below)
+        try:
+            # Choose validation function based on phase
+            if forward_only:
+                # Phase 1: Only validate forward outputs
+                shape_passed, shape_stats = check_forward_outputs_match(
+                    triton_op=my_op,
+                    pytorch_ref=pytorch_ref,
+                    test_inputs=args,
+                    atol=atol,
+                    rtol=rtol,
+                    verbose=verbose
+                )
+            else:
+                # Phase 2: Full gradient validation (OOM handling applies - see below)
+                shape_passed, shape_stats = check_op_backward_with_reference(
+                    triton_op=my_op,
+                    pytorch_ref=pytorch_ref,
+                    test_inputs=args,
+                    atol=atol,
+                    rtol=rtol,
+                    verbose=verbose
+                )
+
+            # Validation completed (no OOM)
+            shape_info = {
+                "shape": shape_params,
+                "required": is_required,
+                "passed": shape_passed,
+                "stats": shape_stats
+            }
+            stats["shape_details"].append(shape_info)
+
+            if shape_passed:
+                stats["shapes_passed"] += 1
+                if verbose:
+                    print(f"[Reference Check] Shape {i+1} PASSED ✓")
+            else:
+                stats["shapes_failed"] += 1
+                all_passed = False
+                if verbose:
+                    print(f"[Reference Check] Shape {i+1} FAILED ✗")
+                    if "error" in shape_stats:
+                        print(f"  Error: {shape_stats['error']}")
+
+        except torch.cuda.OutOfMemoryError as e:
+            # FEATURE: OOM Handling for Naive References
+            # APPLIES TO BOTH PHASES: If naive reference OOMs in forward pass, it cannot
+            # provide reference gradients in backward pass either (must run forward first).
+            # CORNER CASE: Large shapes with naive implementations (e.g., materializing full
+            # N×N attention matrix) will OOM consistently in both Phase 1 and Phase 2.
+            # SOLUTION: Track OOM and continue testing other shapes. At the end, if no required
+            # shapes passed, we'll determine if it's user's fault (no required) or LLM's fault (all failed/OOMed).
+            stats["shapes_oom"] += 1
+            stats["shape_details"].append({
+                "shape": shape_params,
+                "required": is_required,
+                "passed": None,
+                "oom": True
+            })
+            phase_name = "forward" if forward_only else "backward"
+            req_tag = "[REQUIRED]" if is_required else "[OPTIONAL]"
+            if verbose:
+                print(f"[Reference Check] {req_tag} Shape {i+1} OOMed in {phase_name}")
+            # Continue to next shape (don't return immediately - test all shapes)
+            continue
+
+    # FEATURE: Vacuous Truth Prevention
+    # LOGIC:
+    # - If user didn't specify ANY required shapes (num_required == 0) → User's fault
+    # - If user specified required shapes (num_required > 0) but all failed/OOMed → LLM's fault
+    if stats["shapes_passed"] == 0:
+        num_required = sum(1 for s in sweep if s.get("required", True))
+
+        if num_required == 0:
+            # User's fault: No required shapes in SWEEP
+            # All shapes are optional → vacuous truth (nothing was REQUIRED to pass)
+            phase_name = "Phase 1" if forward_only else "Phase 2"
+            error_msg = (
+                f"No shapes validated in {phase_name}!\n"
+                f"  Total shapes: {len(sweep)} (all optional)\n"
+                f"  OOMed: {stats['shapes_oom']}\n"
+                f"  Failed: {stats['shapes_failed']}\n"
+                f"\n"
+                f"SWEEP must contain at least ONE required shape.\n"
+                f"\n"
+                f"Solutions:\n"
+                f"  1. Mark at least one small shape as required=True in SWEEP\n"
+                f"  2. Add smaller shapes to SWEEP (e.g., SEQ=128, required=True)\n"
+            )
+            return False, {
+                "ok": False,
+                "error": error_msg,
+                "summary_text": error_msg,
+                "results": stats["shape_details"]
+            }
+
+        # else: num_required > 0, but shapes_passed == 0
+        # → Required shapes exist but all failed validation or OOMed
+        # → LLM's fault (implementation needs fixing)
+        all_passed = False  # Ensure we signal failure to orchestrator for LLM retry
+        # → Fall through to normal return path for LLM retry with error details
+
+    # Format summary for LLM
+    stats["summary_text"] = _format_summary_for_llm(stats, forward_only)
+
+    # Print minimal summary
+    if verbose:
+        phase = "Phase 1 (forward)" if forward_only else "Phase 2 (gradients)"
+        status = "✓ PASSED" if all_passed else "✗ FAILED"
+        print(f"\n[Reference Check - {phase}] {status}: {stats['shapes_passed']}/{stats['num_shapes']} shapes validated")
+
+    return all_passed, stats
 
 
-def _format_summary_for_llm(summary: Dict[str, Any]) -> str:
-    """Format gradcheck summary to make errors and numerical failures prominent."""
+# todo: simplify
+def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
+    """
+    Format validation results into a clean summary for LLM prompts.
+    Focus on failures and actionable errors - omit passed shapes.
+    """
     lines = []
-    lines.append(f"ok: {summary['ok']}")
-    lines.append(f"passed: {summary['num_passed']}/{summary['num_total']}")
 
-    # Include dead-zone diagnostics if present
-    if "dead_zone_stats" in summary:
-        dz = summary["dead_zone_stats"]
-        lines.append("")
-        lines.append("Gradient magnitude diagnostics:")
-        lines.append(f"  dead-zone threshold (g* = atol/rtol): {dz.get('g_star', 'N/A'):.4g}")
-        lines.append(f"  fraction in dead-zone: {dz.get('frac_in_dead_zone', 0)*100:.1f}%")
-        lines.append(f"  gradient magnitudes: p50={dz.get('grad_p50', 0):.4g}, p95={dz.get('grad_p95', 0):.4g}, max={dz.get('grad_max', 0):.4g}")
-        if dz.get('warning_issued'):
-            lines.append("  ⚠ WARNING: Most gradients in dead-zone (absolute tolerance dominates)")
+    # Status line
+    phase = "Forward" if forward_only else "Gradient"
+    status = "PASSED" if stats["shapes_passed"] > 0 and stats["shapes_failed"] == 0 else "FAILED"
+    lines.append(f"{phase} Validation: {status} ({stats['shapes_passed']}/{stats['num_shapes']} shapes passed)")
 
-    grad_fail = summary.get('grad_fail', [])
-    if grad_fail:
-        lines.append("")
-        lines.append("Failures:")
-        for entry in grad_fail:
-            # Extract shape dimensions (exclude 'error' and 'message' keys)
-            shape_items = [(k, v) for k, v in entry.items() if k not in ('error', 'message')]
-            shape_str = ", ".join(f"{k}={v}" for k, v in shape_items)
-            lines.append(f"  - Shape: {shape_str}")
+    # Success case: early return with clean message
+    if stats["shapes_failed"] == 0 and stats["shapes_passed"] > 0:
+        if stats["shapes_oom"] > 0:
+            lines.append(f"OOM: {stats['shapes_oom']} shapes skipped (naive reference)")
+        return "\n".join(lines)
 
-            # Show error message with full PyTorch gradcheck details
-            # The error includes which input failed, numerical/analytical values, etc.
-            if 'error' in entry:
-                lines.append(f"    ERROR: {entry['error']}")
+    # Failed shapes - only show these (LLM needs to fix them)
+    failed_shapes = [s for s in stats["shape_details"] if s.get("passed") is False]
+    if failed_shapes:
+        lines.append("\nFailed shapes:")
+        for i, shape_info in enumerate(failed_shapes, 1):
+            shape_params = shape_info["shape"]
+            required = "[REQUIRED]" if shape_info.get("required", True) else "[OPTIONAL]"
+            shape_str = ", ".join(f"{k}={v}" for k, v in shape_params.items())
+            lines.append(f"\n{required} Shape: {shape_str}")
 
-            lines.append("")  # blank line between failures
+            # Extract error details
+            shape_stats = shape_info.get("stats", {})
+            if forward_only:
+                # Forward phase: show output mismatches
+                errors = shape_stats.get("output_errors", [])
+                for err in errors[:3]:  # Limit to first 3 outputs
+                    # Extract key info: which output and max diff
+                    lines.append(f"  {err.split(':')[0]}: mismatch")
+            else:
+                # Backward phase: show gradient mismatches OR compilation errors
+                errors = shape_stats.get("grad_errors", [])
+                if errors:
+                    for err in errors[:3]:  # Limit to first 3 inputs
+                        lines.append(f"  {err.split(':')[0]}: mismatch")
+                elif "error" in shape_stats:
+                    # Compilation/runtime error (dtype mismatch, signature error, etc.)
+                    lines.append(f"  Error: {shape_stats['error'].split(chr(10))[0]}")
+
+    # OOM shapes - distinguish between required (problem) and optional (expected)
+    oom_shapes = [s for s in stats["shape_details"] if s.get("oom")]
+    if oom_shapes:
+        required_oom = [s for s in oom_shapes if s.get("required", True)]
+        optional_oom = [s for s in oom_shapes if not s.get("required", True)]
+
+        if required_oom:
+            # Required shapes OOMed - this is a problem LLM needs to fix
+            lines.append(f"\nRequired shapes OOMed ({len(required_oom)} shapes):")
+            for shape_info in required_oom:
+                shape_str = ", ".join(f"{k}={v}" for k, v in shape_info["shape"].items())
+                lines.append(f"  [REQUIRED] {shape_str}: OOM")
+
+        if optional_oom:
+            lines.append(f"\nOptional shapes OOMed: {len(optional_oom)} (expected for naive reference)")
 
     return "\n".join(lines)

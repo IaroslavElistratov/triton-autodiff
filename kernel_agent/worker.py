@@ -212,16 +212,32 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # - Stub calls kernels from raised.py namespace (different JITFunction objects)
         # Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, NOT user file
 
-        # Call gradcheck function with numerical gradients via PyTorch's gradcheck
-        # Float32 central difference settings:
-        # - eps=0.005: Optimal step size (h ≈ ε_mach^(1/3) for float32)
-        # - atol=0.0001: Above error floor (~0.00002), catches bugs
-        # - rtol=0.01: 1% relative tolerance for float32 gradient comparison
+        # on subsequent iterations, overwrite_fp="raised.py" points to LLM-edited file containing pytorch_reference_impl
+        if overwrite_fp:
+            try:
+                import runpy
+                bwd_ns = runpy.run_path(overwrite_fp)
+                pytorch_ref = bwd_ns.get("pytorch_reference_impl")
+                if pytorch_ref:
+                    # todo: cleanup previously was using sidecar as pointer to user file which contains (SEEP, make_args, etc) but now bc pytorch_reference_impl does not live in user code, doing this which is ugly
+                    sidecar["pytorch_reference_impl"] = pytorch_ref
+                    if os.environ.get("KERNEL_AGENT_VERBOSE"):
+                        print(f"[gradcheck] Loaded pytorch_reference_impl from {overwrite_fp}")
+            except Exception as e:
+                if os.environ.get("KERNEL_AGENT_VERBOSE"):
+                    print(f"[gradcheck] Could not load pytorch_reference_impl: {e}")
+
+        # Reference mode tolerances (compare against PyTorch autograd gradients)
+        atol, rtol = 1e-2, 0.0
+
+        # Check if we're in Phase 1 (forward validation only)
+        forward_only = os.environ.get("GRADCHECK_FORWARD_ONLY", "0") == "1"
+
         ok, stats = gradcheck_fn(
             my_op=op, sidecar=sidecar, outputs="auto",
-            atol=0.0001, rtol=0.01,
+            atol=atol, rtol=rtol,
             eps=0.005,
-            numerical_method=os.environ.get("GRADCHECK_NUMERICAL_METHOD", "central")
+            forward_only=forward_only
         )
         try:
             _t.cuda.synchronize()
