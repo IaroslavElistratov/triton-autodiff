@@ -86,7 +86,11 @@ class KernelOptimizer:
         once. The next outer iteration always makes a fresh proposal (no hidden carry‑over).
         This separation keeps state clean and rollback simple.
         """
-        assert stage in ("fix", "optimize")
+        # Stage types:
+        # - "init": Initial code generation after phase advance (no errors to fix yet)
+        # - "fix": Fix existing code after validation failure
+        # - "optimize": Performance optimization after correctness achieved
+        assert stage in ("init", "fix", "optimize")
         if VERBOSE:
             print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
@@ -462,17 +466,60 @@ class KernelOptimizer:
             # Run parity in an isolated child process;
             # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
             # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
-            # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
-            # todo-high: rm; too-high deltas
-            def _run_gradcheck_child():
-                return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
-            child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, 0.25, "gradcheck_error")
-            if not child_ran_ok:
-                continue
-            # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
-            parity_ok, grad_stats = payload_gradcheck
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
+
+            if self.strategy.name == "rag_adaptation" and self.strategy.i == 0:
+                # Phase 1: Validate PyTorch reference against Triton forward
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Phase 1: Validating PyTorch reference against Triton forward")
+
+                # Only validate forward outputs
+                os.environ["GRADCHECK_FORWARD_ONLY"] = "1"
+
+                # Run validation (gradcheck will only check forward outputs)
+                def _run_reference_validation():
+                    return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
+                child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_reference_validation, 0.25, "reference_validation_error")
+                if not child_ran_ok:
+                    continue
+
+                # Check if reference validation passed
+                forward_match_ok, grad_stats = payload_gradcheck
+                # In Phase 1, parity_ok means forward outputs match, not gradients
+                parity_ok = forward_match_ok  # Keep variable name for compatibility
+
+                if forward_match_ok:
+                    self.strategy.pytorch_reference_validated = True
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference forward outputs validated!")
+                        print(f"[kernel-agent][it={it}] Advancing to Phase 2 for backward kernel generation...")
+                else:
+                    # Reset flag on validation failure (e.g., after rollback from Phase 2)
+                    self.strategy.pytorch_reference_validated = False
+                    if VERBOSE:
+                        print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference validation failed, will retry")
+
+                grad_summary_text = ""
+
+            else:
+                # Normal gradcheck for Phase 2 or other strategies
+                # Clear forward-only flag for Phase 2
+                os.environ.pop("GRADCHECK_FORWARD_ONLY", None)
+
+                # later proper fix: keep accumulators fp32 and cast only at tl.atomic_add
+                # todo-high: rm; too-high deltas
+                def _run_gradcheck_child():
+                    return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
+                child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, 0.25, "gradcheck_error")
+                if not child_ran_ok:
+                    continue
+                # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
+                parity_ok, grad_stats = payload_gradcheck
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
+
+                # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
+                # Pass only formatted text, not full dict, to reduce coupling with llm.py.
+                grad_summary_text = grad_stats.get("summary_text", str(grad_stats))
 
             # Don't add gradcheck to history - it appears in state_facts when prompting,
             # and previous iterations' gradcheck results aren't useful for current fixes.
@@ -487,20 +534,56 @@ class KernelOptimizer:
             # Solves advancing on stale parity and prompting with the wrong phase.
             # Do not advance immediately after _llm_request_and_apply (in the previous iteration),
             # using parity from the previous kernel, it misalignes prompts and flips SWEEP early.
+
+            # Phase Advance Detection
+            # Track phase transitions (e.g., Phase 1->2) to avoid using stale validation results
+            # BUG FIX: Previously, we would terminate after Phase 2 using Phase 1's parity_ok
+            # Now we detect advances and ensure fresh validation before termination decisions
+            phase_before_advance = self.strategy.i  # TIMING: Phase BEFORE advance
+
+            # TIMING CRITICAL: This call may change self.strategy.i (e.g., 0->1)
             self.strategy.maybe_advance(bwd_fp, payload_gradcheck)
+
+            # Check if we just advanced phases
+            phase_after_advance = self.strategy.i  # TIMING: Phase AFTER advance
+            phase_just_advanced = (phase_before_advance != phase_after_advance)
 
             phase_text, temp = self.strategy.current_phase(parity_ok)
 
-            # RAG-only mode: stop immediately after parity is achieved
+            # RAG-only mode: stop immediately after parity is achieved IN PHASE 2
             # Retrieved kernels are already optimized - once adapted to pass gradcheck, no further optimization needed
-            if parity_ok and rag_init:
+            # Only terminate if we're in Phase 2 (backward generation), not Phase 1 (reference validation)
+            # Don't terminate using stale parity_ok after phase advance!
+            # TIMING: This reflects phase AFTER advance (may have just changed above)
+            #
+            # CORNER CASE: Phase Just Advanced
+            # SEMANTIC CONFUSION without phase_just_advanced tracking:
+            #   parity_ok=True means "Phase 1 passed" (BEFORE advance)
+            #   in_phase2=True means "now in Phase 2" (AFTER advance)
+            #   -> Would misinterpret as "Phase 2 passed" and terminate prematurely!
+            # When phase advances (e.g., 0->1), parity_ok is from OLD phase (forward validation)
+            # We must NOT terminate using stale results - need to generate code for NEW phase first
+            #
+            # if just advanced phases - parity_ok is from the previous phase!
+            # Will call LLM to generate initial code for new phase, then validate
+            # Skip termination check (parity_ok is stale from previous phase)
+            in_phase2 = not (self.strategy.name == "rag_adaptation" and self.strategy.i == 0)
+
+            if parity_ok and rag_init and in_phase2:
+                # TIMING: Safe to terminate - parity_ok and in_phase2 are from same context (no advance)
+                # Both refer to Phase 2: validation passed AND still in Phase 2
+                # Only terminate if we're in Phase 2 AND we have fresh Phase 2 validation results
                 stop_reason = "rag_parity_achieved"
                 if VERBOSE:
-                    print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes")
+                    print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes (backward gradients validated)")
                 break
 
-            # note "parity_ok" does not mean "if err in the child occurred", instead it means "if not full parity is achieved" (aka "if gracheck did't pass on full SWEEP")
-            if not parity_ok:
+            # Previously skipped LLM call after phase advance, causing immediate gradcheck
+            # on unimplemented backward stub. Now correctly generate initial code for new phases.
+            # Call LLM after phase advance (to generate initial code) OR after parity failure (to fix)
+            # Note: "parity_ok" means either "fwd parity" or "backward" (gradcheck passed on all SWEEP shapes)
+            if not parity_ok or phase_just_advanced:
+
                 if was_restored:
                     # reset perf patience counter after rollback
                     tracker.reset_patience()
@@ -513,29 +596,18 @@ class KernelOptimizer:
                     # and immediately re-test on the restored kernel next iteration
                     continue
 
+                # Two LLM call scenarios:
+                # (1) Initial generation after phase advance - no gradcheck results yet (use "init" stage)
+                # (2) Fix after parity failure - include gradcheck error summary (use "fix" stage)
+
                 # when child returns ok (no err was raised) but parity_ok is False (some gradcheck test failed), call the fix prompt, then continue;
                 # can't just rm this and just do "if not parity_ok: continue" bc that would just continue on parity failure (no LLM "fix" turn)
                 # -- the kernel would never change
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Parity failed on sweep — requesting 'fix' patch from LLM")
-
-                # Decide the fix prompt header:
-                # - Phase 1 (loops): include phase header since the explicit goal is parity via loop re-introduction
-                # - RAG adaptation: include phase header since adaptation is the core goal
-                # - Otherwise (regular strategy or other phases): issue correctness-only header to avoid confusing
-                #   the model with optimization goals while fixing parity
-                is_loop_phase = self.strategy.name == "phased" and self.strategy.i == 1
-                is_rag_adaptation = self.strategy.name == "rag_adaptation"
-                include_phase = is_loop_phase or is_rag_adaptation
-                fix_header = (phase_text + "\n" if include_phase else "") + "ONLY restore correctness to pass gradcheck.\n"
-
-                # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
-                # Pass only formatted text, not full dict, to reduce coupling with llm.py.
-                grad_summary_text = grad_stats.get("summary_text", str(grad_stats))
-
                 self._llm_request_and_apply(
-                    it, "fix", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=fix_header,
+                    it,
+                    "init" if phase_just_advanced else "fix",
+                    bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                    header=phase_text if phase_just_advanced else phase_text + "\nONLY restore correctness to pass gradcheck.\n",
                     state_facts={"grad_summary": grad_summary_text},
                     # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
                     temperature=0.25,
