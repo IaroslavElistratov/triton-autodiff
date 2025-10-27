@@ -346,7 +346,25 @@ def _read_snippet(path: str, max_lines: int | None) -> str:
         return f"(snippet unavailable: {e})"
 
 
-FN_NAMES_TO_STRIP = {"torch_fn", "make_args", "setup", "flops"}
+def strip_backward_section(content: str) -> str:
+    """Remove backward section from file content (for Phase 1 filtering).
+
+    During Phase 1 (PyTorch reference generation), the backward section contains
+    only a stub skeleton with "raise NotImplementedError", which should be hidden
+    from the LLM to avoid confusion.
+
+    File structure: [forward kernel] [forward stub] [backward kernel] [backward stub] [autograd.Function] <EOF>
+    Once the backward marker is found, everything from that point to EOF is removed.
+    """
+    # Look for the standard backward section marker
+    marker = "# Backward kernel and stub"
+    idx = content.find(marker)
+    if idx != -1:
+        return content[:idx]
+    return content
+
+
+FN_NAMES_TO_STRIP = {"torch_fn", "make_args", "setup", "flops", "pytorch_reference_impl"}
 
 
 # todo: instead of removing unwanted code, maybe change instead
@@ -357,6 +375,7 @@ def redact_torch_fn(path: str, max_lines: int | None = None) -> str:
 
     Removes these top-level items (module scope only):
       - def torch_fn(...): (with decorators)
+      - def pytorch_reference_impl(...): (validation reference - prevents LLM from emitting PyTorch code)
       - def make_args(...):, def setup(...):, def flops(...):
       - Any assignment to SWEEP (Assign, AnnAssign, AugAssign)
 

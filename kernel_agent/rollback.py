@@ -51,6 +51,8 @@ class Rollback:
             # Remember the strategy phase index at snapshot time for later restore
             if self._strategy.name == "phased":
                 self._saved_phase_index = self._strategy.i
+            elif self._strategy.name == "rag_adaptation":
+                self._saved_phase_index = self._strategy.i
             # don't snapshot any pending tool call ("PendingTool") -- which is unfinalized function_call
             # that must be acknowledged on very next API request via function_call_output.
             # Because i snapshot code after the tool has been already applied, no need
@@ -74,12 +76,21 @@ class Rollback:
                 shutil.copyfile(self.lock_fp, self.backward_fp)
                 self._log(f"restore: {self.lock_fp} -> {self.backward_fp}")
                 # If we saved a phase index, restore it now so policy state matches the restored kernel
-                if self._strategy.name == "phased":
-                    # Drop any pending phase advance request (stale kernel)
-                    self._strategy.pending_advance_from = None
+                # if self._strategy.name == "phased":
+                #     # Drop any pending phase advance request (stale kernel)
+                #     self._strategy.pending_advance_from = None
+                #     self._strategy.set_phase_index(self._saved_phase_index)
+                #     if VERBOSE:
+                #         print(f"[kernel-agent][rollback] strategy phase restored to i={self._saved_phase_index}")
+                if self._strategy.name == "rag_adaptation":
+                    # Restore phase index and reset validation flag if rolling back to Phase 1
                     self._strategy.set_phase_index(self._saved_phase_index)
+                    if self._saved_phase_index == 0:
+                        self._strategy.pytorch_reference_validated = False
                     if VERBOSE:
-                        print(f"[kernel-agent][rollback] strategy phase restored to i={self._saved_phase_index}")
+                        print(f"[kernel-agent][rollback] RAGAdaptationStrategy phase restored to i={self._saved_phase_index}")
+                        if self._saved_phase_index == 0:
+                            print(f"[kernel-agent][rollback] Reset pytorch_reference_validated flag on rollback to Phase 1")
                 # clears any pending and sets prev_response_id to the saved anchor so the
                 # next turn starts clean, avoiding stale function_call_output acks against the wrong turn.
                 if os.environ.get("KERNEL_AGENT_BACKEND") == "openai" and self._chain is not None:

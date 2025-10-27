@@ -20,6 +20,7 @@ def check_forward_outputs_match(
     triton_op: Callable,
     pytorch_ref: Callable,
     test_inputs: Sequence[Tensor],
+    test_kwargs: Dict[str, Any],
     *,
     # tolerances copied form triton tutorials
     atol: float = 1e-2,
@@ -49,14 +50,19 @@ def check_forward_outputs_match(
         ref_inputs = [x.detach().clone() for x in test_inputs]
 
         # Forward pass - Triton
-        triton_out = triton_op(*triton_inputs)
+        triton_out = triton_op(*triton_inputs, **test_kwargs)
         if not isinstance(triton_out, (list, tuple)):
             triton_out = (triton_out,)
 
         # Forward pass - PyTorch reference
-        ref_out = pytorch_ref(*ref_inputs)
+        ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
+
+        # Check output arity (must have same number of outputs)
+        if len(triton_out) != len(ref_out):
+            stats["error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            return False, stats
 
         # Check: forward outputs must match
         all_match = True
@@ -104,6 +110,7 @@ def check_op_backward_with_reference(
     triton_op: Callable,
     pytorch_ref: Callable,
     test_inputs: Sequence[Tensor],
+    test_kwargs: Dict[str, Any],
     *,
     atol: float = 1e-2,
     rtol: float = 0.0,
@@ -133,14 +140,19 @@ def check_op_backward_with_reference(
                      for x in test_inputs]
 
         # Forward pass - Triton
-        triton_out = triton_op(*triton_inputs)
+        triton_out = triton_op(*triton_inputs, **test_kwargs)
         if not isinstance(triton_out, (list, tuple)):
             triton_out = (triton_out,)
 
         # Forward pass - PyTorch reference
-        ref_out = pytorch_ref(*ref_inputs)
+        ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
+
+        # Check output arity (must have same number of outputs)
+        if len(triton_out) != len(ref_out):
+            stats["error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            return False, stats
 
         # First check: forward outputs must match
         forward_match = True
@@ -158,16 +170,18 @@ def check_op_backward_with_reference(
             stats["error"] = "Forward outputs don't match between Triton and PyTorch reference"
             return False, stats
 
-        # Create gradient output
-        grad_outputs = []
-        for out in triton_out:
-            if isinstance(out, torch.Tensor):
-                grad_out = torch.ones_like(out)
-                grad_outputs.append(grad_out)
-
-        # todo-now: maybe instead do
-        #   dout = torch.randn_like(q)
-        #   ref_out.backward(dout)
+        # TODO: Maybe add Triton kernel launch detection to prevent LLM from bypassing Triton entirely
+        # Problem: LLM might write backward_stub using pure PyTorch (no Triton kernel call),
+        # which would pass gradcheck but defeats the purpose.
+        #
+        # Potential solution: Hook into triton.runtime.jit.JITFunction.__call__ before backward pass:
+        #   1. Set flag kernel_launched = {"seen": False}
+        #   2. Wrap JITFunction.__call__ to set flag when any @triton.jit kernel executes
+        #   3. Call triton_loss.backward()
+        #   4. Check flag - if still False, return error "No Triton kernel detected during backward"
+        #   5. Restore original launcher in finally block
+        #
+        # This guards against reward-hacking.
 
         # Backward pass - Triton
         triton_loss = sum(o.sum() for o in triton_out if isinstance(o, torch.Tensor))
@@ -182,9 +196,26 @@ def check_op_backward_with_reference(
         grad_errors = []
 
         for i, (t_inp, r_inp) in enumerate(zip(triton_inputs, ref_inputs)):
-            if not hasattr(t_inp, 'grad') or t_inp.grad is None:
+            # Skip non-tensor or non-floating inputs
+            if not (isinstance(t_inp, torch.Tensor) and t_inp.is_floating_point()):
                 continue
 
+            # Check gradient presence parity (both None or both not None)
+            t_has_grad = hasattr(t_inp, 'grad') and t_inp.grad is not None
+            r_has_grad = hasattr(r_inp, 'grad') and r_inp.grad is not None
+
+            if t_has_grad != r_has_grad:
+                all_match = False
+                grad_errors.append(f"Input {i}: gradient presence mismatch (Triton grad={'present' if t_has_grad else 'None'}, reference grad={'present' if r_has_grad else 'None'})")
+                if verbose:
+                    print(f"[Reference Check] Input {i} gradient presence mismatch: Triton={'present' if t_has_grad else 'None'}, reference={'present' if r_has_grad else 'None'}")
+                continue
+
+            # Both are None - skip comparison
+            if not t_has_grad:
+                continue
+
+            # Both have gradients - compare them
             try:
                 torch.testing.assert_close(t_inp.grad, r_inp.grad, atol=atol, rtol=rtol)
                 if verbose:
@@ -301,6 +332,7 @@ def check_op_backward_numerical_sweep(
                     triton_op=my_op,
                     pytorch_ref=pytorch_ref,
                     test_inputs=args,
+                    test_kwargs=kwargs,
                     atol=atol,
                     rtol=rtol,
                     verbose=verbose
@@ -311,6 +343,7 @@ def check_op_backward_numerical_sweep(
                     triton_op=my_op,
                     pytorch_ref=pytorch_ref,
                     test_inputs=args,
+                    test_kwargs=kwargs,
                     atol=atol,
                     rtol=rtol,
                     verbose=verbose

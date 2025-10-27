@@ -713,24 +713,24 @@ END REFERENCE SECTION
             # Advance from reference generation to backward generation
             self.i = 1
             if VERBOSE:
-                print("[kernel-agent] ReferenceBasedStrategy: Advancing from PyTorch reference to backward generation")
+                print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
         # Phase 2 doesn't advance (stays at backward generation)
 
     def set_phase_index(self, i: int) -> None:
         """Set phase index for rollback compatibility."""
-        assert i in [0, 1], "ReferenceBasedStrategy has only two phases"
+        assert i in [0, 1], "RAGAdaptationStrategy has only two phases"
         self.i = i
         if VERBOSE:
             phase_name = "PyTorch reference" if i == 0 else "Backward generation"
-            print(f"[kernel-agent] ReferenceBasedStrategy phase set to {i} ({phase_name})")
+            print(f"[kernel-agent] RAGAdaptationStrategy phase set to {i} ({phase_name})")
 
 
 def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
     # Factory: allows toggling strategy with an env flag without touching the loop.
     if mode == "phased":
-        return PhasedStrategy()
+        raise ValueError("Phased mode is temporarily disabled. Use 'regular' or 'rag_adaptation' instead.")
     elif mode == "rag_adaptation":
-        return ReferenceBasedStrategy()  # Use new reference-based strategy
+        return RAGAdaptationStrategy()  # Use new reference-based strategy
     else:
         return RegularStrategy(default_temp)
 

@@ -229,16 +229,16 @@ SWEEP = [
     {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 4096, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": False},
     {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 8192, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": False},
 ]
-]
 
 def make_args(dims, device="cuda", dtype=torch.float16):
     B, NUM_HEADS, SEQ_LEN, HEAD_DIM = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
     q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
     k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
     v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-    # todo: add support for python types args in gradcheck
-    # return (q, k, v, dims["causal"], dims["sm_scale"]), {}
-    return (q, k, v), {}
+    # Return kwargs dict with flags from SWEEP (causal, sm_scale)
+    kernel_params = ["causal", "sm_scale"]
+    kwargs = {k: dims[k] for k in kernel_params if k in dims}
+    return (q, k, v), kwargs
 
 def flops(dims, mode):
     """ optional"""

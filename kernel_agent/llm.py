@@ -27,7 +27,7 @@ from openai_harmony import (
 )
 
 
-from .utils import _env_truthy, redact_torch_fn, _read_snippet
+from .utils import _env_truthy, redact_torch_fn, _read_snippet, strip_backward_section
 from .rag import build_rag_block
 
 
@@ -254,10 +254,23 @@ class MinimalLLMPatchProvider:
         # system = base + initial_kernel_details + tail
 
 
+        # FEATURE: Phase-specific file filtering
+        # Phase 1 (i=0): Generating PyTorch reference
+        #   - Hide backward stub skeleton (just "raise NotImplementedError" at this stage)
+        #   - Read then strip backward section (simple marker-based filtering)
+        # Phase 2 (i=1): Generating Triton backward kernel
+        #   - Hide pytorch_reference_impl to prevent LLM confusion (seeing PyTorch → emitting PyTorch)
+        #   - Use redact_torch_fn (AST-based function filtering)
         # Create working file snippet
         # For RAG-only mode: working file contains USER FWD + backward stub skeleton
         # For compiler mode: working file contains both forward and backward
-        working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
+        if hasattr(strategy, 'i') and strategy.name == "rag_adaptation" and strategy.i == 0:
+            # Phase 1 (i=0): Generating PyTorch reference - hide backward stub skeleton
+            working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
+            working_file_snippet = strip_backward_section(working_file_snippet)
+        else:
+            # Phase 2+ (i>=1): Generating backward kernel - filter out pytorch_reference_impl and test helpers
+            working_file_snippet = redact_torch_fn(bwd_fp, self.snippet_max_lines)
 
         # RAG reference block: two different modes
         # 1. RAG-only mode (--rag without --compiler): Strategy has stored rag_fwd and rag_bwd

@@ -9,7 +9,7 @@ import torch
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes, redact_torch_fn, filter_traceback_for_llm
 from .worker import run_gradcheck_child, run_bench_child, run_compile_child
-from .strategy import make_strategy, PhasedStrategy
+from .strategy import make_strategy
 from .rollback import Rollback
 from .tools.benchmark import PerfTracker
 from .rag import _load_index, _embed_query, _cosine
@@ -303,7 +303,7 @@ class KernelOptimizer:
             # RAG initialization: retrieve most similar backward kernel
             if VERBOSE:
                 print("[kernel-agent] Using RAG to retrieve initial backward kernel")
-                print("[kernel-agent] Strategy: RAGAdaptationStrategy (single adaptation phase)")
+                print("[kernel-agent] Strategy: RAGAdaptationStrategy (two-phase: reference then backward)")
 
             # Get the forward source for embedding
             fwd_source = redact_torch_fn(fwd_fp, None)
@@ -338,8 +338,8 @@ class KernelOptimizer:
                 raise ValueError(f"No similar kernels found in RAG index (similarity >= {min_sim:.2f}). "
                                "Try lowering --rag-min-sim or use --compiler instead.")
 
-            # Store RAG FWD+BWD for use in prompt (not in file)
-            # RAG backward will be shown as readonly reference, not edited directly
+            # Store RAG FWD+BWD for use in Phase 2 (backward generation)
+            # RAGAdaptationStrategy shows these only in Phase 2, not Phase 1
             retrieved_fwd = documents.get(best_match, "")
             retrieved_bwd = best_content
 
@@ -347,7 +347,7 @@ class KernelOptimizer:
                 print(f"[kernel-agent] Retrieved backward from '{best_match}' (similarity: {best_similarity:.3f})")
                 print(f"[kernel-agent] Retrieved FWD: {len(retrieved_fwd)} chars, BWD: {len(retrieved_bwd)} chars")
 
-            # Store RAG references on strategy (used for prompt reference section)
+            # Store RAG references on strategy (used in Phase 2 prompts)
             self.strategy.rag_fwd = retrieved_fwd
             self.strategy.rag_bwd = retrieved_bwd
 
@@ -569,7 +569,7 @@ class KernelOptimizer:
             # Skip termination check (parity_ok is stale from previous phase)
             in_phase2 = not (self.strategy.name == "rag_adaptation" and self.strategy.i == 0)
 
-            if parity_ok and rag_init and in_phase2:
+            if parity_ok and rag_init and in_phase2 and not phase_just_advanced:
                 # TIMING: Safe to terminate - parity_ok and in_phase2 are from same context (no advance)
                 # Both refer to Phase 2: validation passed AND still in Phase 2
                 # Only terminate if we're in Phase 2 AND we have fresh Phase 2 validation results
