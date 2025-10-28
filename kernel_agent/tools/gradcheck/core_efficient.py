@@ -485,7 +485,8 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
                         lines.append(f"  {err.split(':')[0]}: mismatch")
                 elif "error" in shape_stats:
                     # Compilation/runtime error (dtype mismatch, signature error, etc.)
-                    lines.append(f"  Error: {shape_stats['error'].split(chr(10))[0]}")
+                    # Show full error message (not just first line) so model can see actual error type
+                    lines.append(f"  Error: {shape_stats['error']}")
 
     # OOM shapes - distinguish between required (problem) and optional (expected)
     oom_shapes = [s for s in stats["shape_details"] if s.get("oom")]
