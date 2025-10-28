@@ -488,28 +488,18 @@ class KernelOptimizer:
             # Do not advance immediately after _llm_request_and_apply (in the previous iteration),
             # using parity from the previous kernel, it misalignes prompts and flips SWEEP early.
 
-            # Phase Advance Detection
-            # Track phase transitions (e.g., Phase 1->2) to avoid using stale validation results
-            # BUG FIX: Previously, we would terminate after Phase 2 using Phase 1's parity_ok
-            # Now we detect advances and ensure fresh validation before termination decisions
-            phase_before_advance = self.strategy.i  # TIMING: Phase BEFORE advance
-
-            # this call may change self.strategy.i (e.g., 0->1)
+            # Check for phase advancement and handle any transitions
             self.strategy.maybe_advance(bwd_fp, payload_gradcheck)
 
-            # Check if we just advanced phases
-            phase_after_advance = self.strategy.i  # TIMING: Phase AFTER advance
-            phase_just_advanced = (phase_before_advance != phase_after_advance)
-
-            # CRITICAL: Reset conversation chain when advancing from Phase 1 to Phase 2
-            # Phase 1 shows the LLM how to write PyTorch reference implementation
-            # Phase 2 must start with a FRESH conversation to avoid bias toward PyTorch code
-            # Without this reset, the LLM remembers Phase 1 and writes pure PyTorch backward instead of Triton
-            if phase_just_advanced and phase_after_advance == 1:
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Phase transition detected (0→1), resetting conversation chain to start fresh")
+            # Reset conversation chain when advancing from Phase 0 to Phase 1
+            # Phase 0 shows the LLM how to write PyTorch reference implementation
+            # Phase 1 must start with a FRESH conversation to avoid bias toward PyTorch code
+            # Without this reset, LLM remembers Phase 0 and writes pure PyTorch backward instead of Triton
+            if self.strategy.phase_just_advanced:
+                if VERBOSE: print(f"[kernel-agent][it={it}] Phase transition detected (0→1), resetting conversation chain to start fresh")
                 self.patcher._sampler._chain.restore_anchor(None)
 
+            # if we just advanced to next phase, this will give the prompt of the new phase
             phase_text, temp = self.strategy.current_phase(parity_ok)
 
             # RAG-only mode: stop immediately after parity is achieved IN PHASE 2
@@ -519,7 +509,7 @@ class KernelOptimizer:
             # TIMING: This reflects phase AFTER advance (may have just changed above)
             #
             # CORNER CASE: Phase Just Advanced
-            # SEMANTIC CONFUSION without phase_just_advanced tracking:
+            # SEMANTIC CONFUSION without self.strategy.phase_just_advanced tracking:
             #   parity_ok=True means "Phase 1 passed" (BEFORE advance)
             #   in_phase2=True means "now in Phase 2" (AFTER advance)
             #   -> Would misinterpret as "Phase 2 passed" and terminate prematurely!
@@ -529,12 +519,10 @@ class KernelOptimizer:
             # if just advanced phases - parity_ok is from the previous phase!
             # Will call LLM to generate initial code for new phase, then validate
             # Skip termination check (parity_ok is stale from previous phase)
-            in_phase2 = not (self.strategy.i == 0)
-
-            if parity_ok and in_phase2 and not phase_just_advanced:
+            if parity_ok and (self.strategy.i == 1) and not self.strategy.phase_just_advanced:
                 # TIMING: Safe to terminate - parity_ok and in_phase2 are from same context (no advance)
-                # Both refer to Phase 2: validation passed AND still in Phase 2
-                # Only terminate if we're in Phase 2 AND we have fresh Phase 2 validation results
+                # Both refer to Phase 1: validation passed AND still in Phase 1
+                # Only terminate if we're in Phase 1 AND we have fresh Phase 1 validation results
                 stop_reason = "rag_parity_achieved"
                 if VERBOSE:
                     print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes (backward gradients validated)")
@@ -544,7 +532,7 @@ class KernelOptimizer:
             # on unimplemented backward stub. Now correctly generate initial code for new phases.
             # Call LLM after phase advance (to generate initial code) OR after parity failure (to fix)
             # Note: "parity_ok" means either "fwd parity" or "backward" (gradcheck passed on all SWEEP shapes)
-            if not parity_ok or phase_just_advanced:
+            if not parity_ok or self.strategy.phase_just_advanced:
 
                 if was_restored:
                     # reset perf patience counter after rollback
@@ -567,9 +555,9 @@ class KernelOptimizer:
                 # -- the kernel would never change
                 self._llm_request_and_apply(
                     it,
-                    "init" if phase_just_advanced else "fix",
+                    "init" if self.strategy.phase_just_advanced else "fix",
                     bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-                    header=phase_text if phase_just_advanced else phase_text + "\nONLY restore correctness to pass gradcheck.\n",
+                    header=phase_text if self.strategy.phase_just_advanced else phase_text + "\nONLY restore correctness to pass gradcheck.\n",
                     state_facts={"grad_summary": grad_summary_text},
                     # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
                     temperature=0.25,

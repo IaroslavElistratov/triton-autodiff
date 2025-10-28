@@ -124,6 +124,7 @@ class RegularStrategy(BaseStrategy):
     def __init__(self, temp: float = 0.7) -> None:
         self.name = "regular"
         self._temp = temp
+        self.phase_just_advanced = False  # For compatibility with orchestrator
 
     # added this method to be compatible with PhasedStrategy.get_header
     # because orchestrator unconditionally calls self.strategy.get_header
@@ -137,6 +138,10 @@ class RegularStrategy(BaseStrategy):
             " * atomics: kernel uses atomics -- try privatizing the accumulation to the same memory location to a single CTA to avoid atomics, as it'll clearly improve the performance. "
         )
         return header, self._temp
+
+    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
+        """No-op for RegularStrategy which doesn't have phases."""
+        self.phase_just_advanced = False  # Always False since no phases
 
 # LEGACY: strategy was used to optimize MLIR compiler generated backward
 #
@@ -334,7 +339,7 @@ class RAGAdaptationStrategy(BaseStrategy):
         self.name = "rag_adaptation"
         # Phase index (0=reference generation, 1=backward generation)
         self.i = 0
-        self.pending_advance_from = None
+        self.phase_just_advanced = False  # Track if we just transitioned phases
 
         # Phase 1 state: PyTorch reference
         self.pytorch_reference_code = None  # Source code of validated reference
@@ -735,18 +740,21 @@ END REFERENCE SECTION
             return header + semantic_preamble, temp
 
     def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
-        """Advance from Phase 1 to Phase 2 after PyTorch reference is validated."""
+        """Advance from Phase 0 to Phase 1 after PyTorch reference is validated."""
+        self.phase_just_advanced = False  # Reset from previous iteration (auto-cleared each call)
         if self.i == 0 and self.pytorch_reference_validated:
             # Advance from reference generation to backward generation
             self.i = 1
+            self.phase_just_advanced = True  # Mark that we just advanced (will be reset next call)
             if VERBOSE:
                 print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
-        # Phase 2 doesn't advance (stays at backward generation)
+        # Phase 1 doesn't advance (stays at backward generation)
 
     def set_phase_index(self, i: int) -> None:
         """Set phase index for rollback compatibility."""
         assert i in [0, 1], "RAGAdaptationStrategy has only two phases"
         self.i = i
+        self.phase_just_advanced = False  # Reset flag when manually setting phase
         if VERBOSE:
             phase_name = "PyTorch reference" if i == 0 else "Backward generation"
             print(f"[kernel-agent] RAGAdaptationStrategy phase set to {i} ({phase_name})")
