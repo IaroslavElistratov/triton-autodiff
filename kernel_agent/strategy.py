@@ -152,7 +152,11 @@ class RegularStrategy(BaseStrategy):
         return header, self._temp
 
     def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
-        """No-op for RegularStrategy which doesn't have phases."""
+        """No-op for RegularStrategy which doesn't have phases.
+
+        Note: phase_just_advanced is already reset by orchestrator at start of iteration.
+        We redundantly set it to False here for clarity (RegularStrategy never transitions).
+        """
         self.phase_just_advanced = False  # Always False since no phases
 
 # LEGACY: strategy was used to optimize MLIR compiler generated backward
@@ -415,17 +419,25 @@ class RAGAdaptationStrategy(BaseStrategy):
         return ""
 
     def rag_reference_section(self, rag_fwd: str, rag_bwd: str) -> str:
-        """Show RAG references only in Phase 2 (backward generation).
+        """Show RAG references only at Phase 2 entry (backward generation init).
 
         Phase 1: PyTorch reference generation - no RAG content (returns empty)
-        Phase 2: Backward kernel generation - show RAG FWD+BWD as pattern reference
+        Phase 2 entry: Show RAG FWD+BWD as pattern reference (only once)
+        Phase 2 fix iterations: Hide RAG, rely on conversation chaining from Phase 2 entry turn
         """
+        # Phase 1: Hide RAG (don't show Triton kernels when generating PyTorch reference)
         if self.i == 0:
-            # Phase 1: Don't show Triton kernels when generating PyTorch reference
+            if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 1: generating PyTorch reference)")
             return ""
-        else:
-            # Phase 2: Show RAG FWD+BWD as pattern for backward kernel generation
+
+        # Phase 2 entry: Show RAG FWD+BWD once when transitioning
+        if self.phase_just_advanced:
+            if VERBOSE: print(f"[kernel-agent] RAG reference shown (Phase 2 entry: generating backward kernel)")
             return self._build_rag_reference_section(rag_fwd, rag_bwd)
+
+        # Phase 2 fix iterations: Hide RAG, rely on conversation chaining
+        if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 2 fix iteration: relying on conversation chaining)")
+        return ""
 
     def _build_rag_reference_section(self, rag_fwd: str, rag_bwd: str) -> str:
         """Build readonly RAG reference section for prompt.
@@ -752,12 +764,16 @@ END REFERENCE SECTION
             return header + semantic_preamble, temp
 
     def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
-        """Advance from Phase 0 to Phase 1 after PyTorch reference is validated."""
-        self.phase_just_advanced = False  # Reset from previous iteration (auto-cleared each call)
+        """Advance from Phase 0 to Phase 1 after PyTorch reference is validated.
+
+        Note: phase_just_advanced is reset to False by orchestrator at start of each iteration.
+        We redundantly set it to False here for clarity.
+        """
+        self.phase_just_advanced = False
         if self.i == 0 and self.pytorch_reference_validated:
             # Advance from reference generation to backward generation
             self.i = 1
-            self.phase_just_advanced = True  # Mark that we just advanced (will be reset next call)
+            self.phase_just_advanced = True  # Mark that we just advanced (will be reset next iteration)
             if VERBOSE: print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
         # Phase 1 doesn't advance (stays at backward generation)
 

@@ -273,16 +273,11 @@ class MinimalLLMPatchProvider:
 
         # Check if strategy has stored RAG references (RAG-only mode)
         if hasattr(strategy, 'rag_fwd') and hasattr(strategy, 'rag_bwd'):
-            # RAG-only mode: show full RAG FWD+BWD reference on iteration 0 only
-            # Subsequent iterations rely on previous_response_id chaining to access RAG context
-            if it == 0:
-                rag_block = strategy.rag_reference_section(strategy.rag_fwd, strategy.rag_bwd)
-                if VERBOSE and not rag_block:
-                    print("[kernel-agent] RAG reference section is empty")
-            else:
-                rag_block = ""
-                if VERBOSE:
-                    print("[kernel-agent] Skipping RAG reference (it>0, relying on response chaining)")
+            # Let strategy decide whether to show RAG based on current phase
+            # Shows RAG FWD+BWD only at Phase 2 entry (when phase_just_advanced=True)
+            # Phase 1 and Phase 2 fix iterations return empty (rely on conversation chaining)
+            # Note: No it>0 suppression - RAG is gated by phase_just_advanced only
+            rag_block = strategy.rag_reference_section(strategy.rag_fwd, strategy.rag_bwd)
 
 
         # Format state_facts for LLM prompt.

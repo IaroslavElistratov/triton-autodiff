@@ -389,6 +389,11 @@ class KernelOptimizer:
         for it in range(self.cfg.max_iters):
             if VERBOSE: print(f"[kernel-agent][it={it}] Begin iteration")
 
+            # Reset phase_just_advanced at start of each iteration (before any LLM calls)
+            # This ensures the flag is cleared before run_with_fix() potentially calls LLM
+            # The flag will be set to True later by maybe_advance() if phase transition occurs
+            self.strategy.phase_just_advanced = False
+
             # RAGAdaptationStrategy never throttles SWEEP
 
             # only first shape on it==0, then all shapes;
