@@ -548,6 +548,15 @@ class KernelOptimizer:
             phase_after_advance = self.strategy.i  # TIMING: Phase AFTER advance
             phase_just_advanced = (phase_before_advance != phase_after_advance)
 
+            # CRITICAL: Reset conversation chain when advancing from Phase 1 to Phase 2
+            # Phase 1 shows the LLM how to write PyTorch reference implementation
+            # Phase 2 must start with a FRESH conversation to avoid bias toward PyTorch code
+            # Without this reset, the LLM remembers Phase 1 and writes pure PyTorch backward instead of Triton
+            if phase_just_advanced and self.strategy.name == "rag_adaptation" and phase_after_advance == 1:
+                if VERBOSE:
+                    print(f"[kernel-agent][it={it}] Phase transition detected (0→1), resetting conversation chain to start fresh")
+                self.patcher._sampler._chain.restore_anchor(None)
+
             phase_text, temp = self.strategy.current_phase(parity_ok)
 
             # RAG-only mode: stop immediately after parity is achieved IN PHASE 2
