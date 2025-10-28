@@ -113,7 +113,7 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         #   - SyntaxError: invalid Python syntax in generated backward (LLM mangled indentation/syntax)
         #   - NameError: name 'triton' not defined (missing import in generated backward)
         #   - AttributeError: 'NoneType' has no attribute 'shape' (LLM used wrong variable)
-        #   - KeyError: 'backward_stub' (RAG kernel uses wrong stub name, compiler expects specific name)
+        #   - KeyError: 'backward_stub' (RAG kernel uses wrong stub name, expected specific name)
         #   - TypeError: kernel() missing required argument (signature mismatch between stub and kernel)
         import traceback
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
@@ -198,13 +198,7 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # - Returns op that uses proxies pointing to these attributes
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
 
-        # Phase-0 throttling: optionally limit SWEEP to the first shape via env.
-        # None -- a sentinel meaning "all shapes"
-        limit = os.environ.get("KERNEL_AGENT_SWEEP_LIMIT")
         sidecar = dict(ns)
-        if limit is not None and isinstance(sidecar.get("SWEEP"), (list, tuple)):
-            limit = int(limit)
-            sidecar["SWEEP"] = list(sidecar["SWEEP"])[:limit]
 
         # Gradcheck calls op many times, each call:
         # - op(q, k, v) → proxy → getattr(kernel, "_generated_fwd_stub")
@@ -330,12 +324,7 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Result: Benchmark ALWAYS uses stubs/kernels from raised.py, NOT user file
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
 
-        # Phase-0 throttling: optionally limit SWEEP to the first shape via env.
-        limit = os.environ.get("KERNEL_AGENT_SWEEP_LIMIT")
         sidecar = dict(ns)
-        if limit is not None and isinstance(sidecar.get("SWEEP"), (list, tuple)):
-            limit = int(limit)
-            sidecar["SWEEP"] = list(sidecar["SWEEP"])[:limit]
         cand = bench_op(op, sidecar, mode="bwd")
         try:
             _t.cuda.synchronize()

@@ -1,14 +1,11 @@
 # python -m pip install -e kernel_agent
 # cd /root/triton-autodiff
 # export TRITON_AUTODIFF_DIR=$(pwd)/triton_autodiff
-# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-20b/original/ --reasoning-effort medium --file-path kernel_agent/test/matmul.py --compiler --mode phased > kernel_agent/LOGS/out.txt
-# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --reasoning-effort medium --file-path kernel_agent/test/attention.py --compiler --mode phased > kernel_agent/LOGS/out.txt
 
-# kernel-agent --backend openai --openai-model gpt-5-mini --reasoning-effort medium --file-path kernel_agent/test/matmul.py --compiler --mode phased --rag > kernel_agent/LOGS/out.txt
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --compiler --mode phased --rag > kernel_agent/LOGS/out.txt
-
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/attention.py --rag > kernel_agent/LOGS/out.txt
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/layernorm.py --rag > kernel_agent/LOGS/out.txt  --rag-min-sim 0.7
+# Example usage:
+# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --reasoning-effort high --file-path kernel_agent/test/attention.py > kernel_agent/LOGS/out.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/attention.py > kernel_agent/LOGS/out.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort high --file-path kernel_agent/test/layernorm.py --min-sim 0.7 > kernel_agent/LOGS/out.txt
 
 from __future__ import annotations
 import argparse
@@ -32,63 +29,35 @@ def main() -> None:
     ap.add_argument("-r", "--reasoning-effort", metavar="REASONING_EFFORT", type=str, default="medium", choices=["high", "medium", "low"], help="Reasoning effort")
 
     ap.add_argument("-c", "--context", metavar="CONTEXT", type=int, default=262144, help="Max context length (tokens; ignored when --backend openai)")
-    ap.add_argument("--mode", type=str, default="regular", choices=["regular", "phased"], help="Optimization strategy mode")
 
-    # RAG configuration - serves dual purpose:
-    # 1. When used alone (without --compiler): Use RAG to retrieve initial backward kernel
-    # 2. When used with --compiler: Add RAG references to LLM prompts for better optimization
-    ap.add_argument("--rag", action="store_true", help="Enable RAG: use for initialization (if no --compiler) or prompt augmentation (with --compiler)")
-    ap.add_argument("--rag-topk", type=int, default=1, help="Number of RAG examples to include in prompts (when used with --compiler)")
-    ap.add_argument("--rag-min-sim", type=float, default=0.75, help="Minimum cosine similarity threshold for retrieval")
+    # Legacy flag - kept for error message only
+    ap.add_argument("--compiler", action="store_true", help=argparse.SUPPRESS)  # Hidden, shows error if used
 
-    # Compiler flag for initial backward generation
-    ap.add_argument("--compiler", action="store_true", help="Use MLIR compiler to generate initial backward kernel")
+    # RAG configuration (always enabled by default)
+    ap.add_argument("--min-sim", type=float, default=0.75, help="Minimum cosine similarity threshold for RAG retrieval")
+    ap.add_argument("--topk", type=int, default=1, help="Number of RAG examples to retrieve (currently only 1 is used)")
 
     args = ap.parse_args()
 
-    # Warn about temporarily unsupported flags
     if args.compiler:
+        # [LEGACY]
+        #
+        #   TTIR from autodiff then raise to Python once; use as seed and target
+        #   using output of triton-autodiff directly as the initial version of the backward kernel
+        #   to be optimized -- "seeding a problem with a draft" (removing patcher.naive_autodiff instead
+        #   just using output of triton-autodiff as patcher.kernel_snippet)
+        #
+        #   select method based on flags:
+        #     --rag alone: Use RAG to retrieve similar backward as starting point
+        #     --compiler alone: Use MLIR compiler to generate backward
+        #     --rag --compiler: Use compiler for initialization; RAG provides prompt augmentation only
+        #       (retrieved backward is shown to LLM as reference, but compiler-generated backward is used
+        #       as the actual starting kernel for optimization)
         ap.error(
             "⚠️  ERROR: --compiler flag is temporarily not supported.\n"
             "\n"
             "MLIR compiler-based backward generation is currently disabled.\n"
-            "Please use RAG-based initialization instead:\n"
-            "\n"
-            "  kernel-agent --backend openai --openai-model gpt-5 \\\n"
-            "    --file-path kernel_agent/test/attention.py \\\n"
-            "    --rag --rag-min-sim 0.7 \\\n"
-            "    --reasoning-effort high\n"
-            "\n"
-            "Note: Compiler support may be re-enabled in a future release."
         )
-
-    if args.mode == "phased":
-        ap.error(
-            "⚠️  ERROR: --mode phased is temporarily not supported.\n"
-            "\n"
-            "The phased optimization strategy is currently disabled.\n"
-            "RAG mode uses single-phase adaptation instead.\n"
-            "\n"
-            "Please remove --mode phased from your command:\n"
-            "\n"
-            "  kernel-agent --backend openai --openai-model gpt-5 \\\n"
-            "    --file-path kernel_agent/test/attention.py \\\n"
-            "    --rag --rag-min-sim 0.7 \\\n"
-            "    --reasoning-effort high\n"
-            "\n"
-            "Note: Phased mode may be re-enabled in a future release."
-        )
-
-    # Validate that at least one initialization method is specified
-    if not args.compiler and not args.rag:
-        ap.error("Must specify at least one of: --compiler or --rag")
-
-    # Validate --mode usage: RAG-only automatically uses adaptation strategy
-    # When using --rag without --compiler, the strategy is automatically set to rag_adaptation,
-    # if the user also specifies --mode phased, it would be silently ignored
-    if args.rag and not args.compiler and args.mode != "regular":
-        ap.error(f"--mode is ignored when using --rag without --compiler (automatically uses adaptation strategy). Remove --mode={args.mode}")
-
     # Map selected backend options into environment for the local sampler
     if args.backend:
         os.environ["KERNEL_AGENT_BACKEND"] = args.backend
@@ -96,34 +65,19 @@ def main() -> None:
         os.environ["KERNEL_AGENT_CHECKPOINT"] = args.checkpoint
     if args.backend == "openai" and args.openai_model:
         os.environ["KERNEL_AGENT_OPENAI_MODEL"] = args.openai_model
-    # Strategy selection: RAG-only uses adaptation strategy, otherwise use specified mode
-    if args.rag and not args.compiler:
-        os.environ["KERNEL_AGENT_STRATEGY"] = "rag_adaptation"
-    else:
-        # toggle (regular | phased)
-        os.environ["KERNEL_AGENT_STRATEGY"] = args.mode
 
-    if args.rag:
-        os.environ["KERNEL_AGENT_RAG"] = "1"
-        os.environ["KERNEL_AGENT_RAG_TOPK"] = str(int(args.rag_topk))
-        os.environ["KERNEL_AGENT_RAG_MIN_SIM"] = str(float(args.rag_min_sim))
+    # Always use RAG adaptation strategy
+    os.environ["KERNEL_AGENT_STRATEGY"] = "rag_adaptation"
 
-        # RAG prompt augmentation: only add reference examples when using compiler init
-        # RAG-only init should NOT add RAG prompts (would duplicate the working kernel)
-        if args.compiler:
-            os.environ["KERNEL_AGENT_RAG_PROMPTS"] = "1"
+    # Always set RAG configuration
+    os.environ["KERNEL_AGENT_RAG_TOPK"] = str(int(args.topk))
+    os.environ["KERNEL_AGENT_RAG_MIN_SIM"] = str(float(args.min_sim))
 
-    # Determine initialization method:
-    # - use_compiler: True when --compiler flag is set
-    # - use_rag: True when --rag flag is set
-    # Behavior: --rag alone = RAG init; --compiler alone = compiler init;
-    #           both flags = compiler init + RAG prompt augmentation
+    # Initialize configuration (RAG is always enabled)
     cfg = Config(max_iters=args.max_iters,
                  patience_perf_stop=args.patience_perf_stop,
                  patience_parity_restore=args.patience_parity_restore,
-                 min_rel_improvement=args.min_rel_impr,
-                 use_compiler=args.compiler,
-                 use_rag=args.rag)
+                 min_rel_improvement=args.min_rel_impr)
     llm = MinimalLLMPatchProvider(
         temperature=0.7,
         max_tokens=262144,

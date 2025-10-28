@@ -222,10 +222,10 @@ class MinimalLLMPatchProvider:
             strategy.workflow_section()
 
             + "\n### Allowed edits\n"
-            # Strategy-specific allowed edits (compiler: preserve stub signature; RAG: adapt stub signature)
+            # Strategy-specific allowed edits
             + strategy.allowed_edits_section()
 
-            # Strategy-specific kernel details (compiler: unrolled/fwd_bwd prefixes; RAG: empty)
+            # Strategy-specific kernel details
             + strategy.kernel_details_section()
 
             + "\n### Patch requirements\n"
@@ -246,12 +246,6 @@ class MinimalLLMPatchProvider:
             "- Inside kernel use `tl.*` APIs, not `triton.*`\n"
         )
 
-        # # Include initial kernel details only when not phased, or when phased and in Phase 1.
-        # phase_text = str(phase).strip().lower()
-        # is_phased = str(os.environ.get("KERNEL_AGENT_STRATEGY", "")).strip().lower() == "phased"
-        # include_initial_details = (not is_phased) or (is_phased and phase_text.startswith("phase = 1"))
-        # initial_kernel_details = initial_kernel_details if include_initial_details else ""
-        # system = base + initial_kernel_details + tail
 
 
         # FEATURE: Phase-specific file filtering
@@ -263,7 +257,6 @@ class MinimalLLMPatchProvider:
         #   - Use redact_torch_fn (AST-based function filtering)
         # Create working file snippet
         # For RAG-only mode: working file contains USER FWD + backward stub skeleton
-        # For compiler mode: working file contains both forward and backward
         if hasattr(strategy, 'i') and strategy.name == "rag_adaptation" and strategy.i == 0:
             # Phase 1 (i=0): Generating PyTorch reference - hide backward stub skeleton
             working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
@@ -272,11 +265,9 @@ class MinimalLLMPatchProvider:
             # Phase 2+ (i>=1): Generating backward kernel - filter out pytorch_reference_impl and test helpers
             working_file_snippet = redact_torch_fn(bwd_fp, self.snippet_max_lines)
 
-        # RAG reference block: two different modes
-        # 1. RAG-only mode (--rag without --compiler): Strategy has stored rag_fwd and rag_bwd
-        #    Show full RAG FWD+BWD as readonly reference for each turn
-        # 2. Hybrid mode (--rag --compiler): Use build_rag_block for compact references
-        #    Only add when KERNEL_AGENT_RAG_PROMPTS is set
+        # RAG reference block
+        # Strategy has stored rag_fwd and rag_bwd from retrieved kernel
+        # Show full RAG FWD+BWD as readonly reference for each turn
 
         rag_block = ""
 
@@ -293,32 +284,6 @@ class MinimalLLMPatchProvider:
                 if VERBOSE:
                     print("[kernel-agent] Skipping RAG reference (it>0, relying on response chaining)")
 
-        # Otherwise check for hybrid mode (--rag --compiler)
-        elif self._rag_cache is None and _env_truthy("KERNEL_AGENT_RAG_PROMPTS", "0"):
-            try:
-                from pathlib import Path
-                index_path = Path(__file__).parent / "kernel_embeddings.pkl"
-                top_k = int(os.environ.get("KERNEL_AGENT_RAG_TOPK", "2"))
-                min_sim = float(os.environ.get("KERNEL_AGENT_RAG_MIN_SIM", "0.80"))
-                # 8k chars (~2k tokens at 4 chars/token)
-                # some attention bwd are 56k tokens
-                token_budget_chars = 60000
-                # Use full redacted forward (no line cap) to maximize retrieval quality
-                fwd_source_full = redact_torch_fn(fwd_fp, None)
-                self._rag_cache = build_rag_block(
-                    index_path=str(index_path),
-                    fwd_source=fwd_source_full,
-                    top_k=top_k,
-                    min_sim=min_sim,
-                    token_budget_chars=token_budget_chars,
-                    debug=VERBOSE
-                )
-            except Exception as e:
-                self._rag_cache = ""
-                if VERBOSE:
-                    print(f"[kernel-agent] RAG retrieval failed: {type(e).__name__}: {e}")
-
-            rag_block = self._rag_cache or ""
 
         # Format state_facts for LLM prompt.
         # orchestrator.py extracts pre-formatted summary_text from gradcheck results,

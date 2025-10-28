@@ -14,7 +14,7 @@ Design:
 
 Usage:
   # As a library (called by orchestrator):
-  kernel-agent --backend triton --file-path test/attention.py --rag --rag-topk 3 --rag-min-sim 0.75
+  kernel-agent --backend triton --file-path test/attention.py --topk 3 --min-sim 0.75
 
   # As a debug CLI tool:
   python -m kernel_agent.rag --file-path test/attention.py --topk 3 --min-sim 0.75 --show-block
@@ -134,9 +134,6 @@ def build_rag_block(
     """
     from .utils import _env_truthy as _verbose_check
     VERBOSE = _verbose_check("KERNEL_AGENT_VERBOSE", "1")
-
-    if not _truthy(os.environ.get("KERNEL_AGENT_RAG"), "0"):
-        return ""
 
     if not index_path or not os.path.exists(index_path):
         if VERBOSE:
@@ -278,36 +275,26 @@ def main() -> int:
     print(f"file: {args.file_path}")
     print(f"chars: {len(fwd_source)} | lines: {len(fwd_source.splitlines())}")
 
-    # Enable RAG and call with debug=True
-    orig_rag = os.environ.get("KERNEL_AGENT_RAG")
-    os.environ["KERNEL_AGENT_RAG"] = "1"
+    # Call RAG block builder with debug=True
+    block = build_rag_block(
+        index_path=args.index,
+        fwd_source=fwd_source,
+        top_k=args.topk,
+        min_sim=args.min_sim,
+        token_budget_chars=7500,
+        debug=True,
+    )
 
-    try:
-        block = build_rag_block(
-            index_path=args.index,
-            fwd_source=fwd_source,
-            top_k=args.topk,
-            min_sim=args.min_sim,
-            token_budget_chars=7500,
-            debug=True,
-        )
-
-        if args.show_block:
-            print("\n== RAG block (as sent to model) ==")
-            if block:
-                print(block)
-                print(f"\n[Block size: {len(block)} chars, ~{len(block)//4} tokens]")
-            else:
-                print("(empty - no similar kernels found)")
-
-        if not block:
-            print(f"\n⚠️  RAG block is empty (no kernels above threshold)")
-
-    finally:
-        if orig_rag is None:
-            os.environ.pop("KERNEL_AGENT_RAG", None)
+    if args.show_block:
+        print("\n== RAG block (as sent to model) ==")
+        if block:
+            print(block)
+            print(f"\n[Block size: {len(block)} chars, ~{len(block)//4} tokens]")
         else:
-            os.environ["KERNEL_AGENT_RAG"] = orig_rag
+            print("(empty - no similar kernels found)")
+
+    if not block:
+        print(f"\n⚠️  RAG block is empty (no kernels above threshold)")
 
     return 0
 

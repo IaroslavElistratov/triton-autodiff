@@ -9,7 +9,7 @@ export TRITON_AUTODIFF_DIR=$(pwd)/triton_autodiff
 ln -s $TRITON_AUTODIFF_DIR/third_party/autodiff/python/api.py $TRITON_AUTODIFF_DIR/python/triton/backends/autodiff.py
 
 python -m pip install -e kernel_agent
-kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --file-path kernel_agent/test/attention.py --reasoning-effort medium --mode phased > kernel_agent/LOGS/out.txt
+kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --file-path kernel_agent/test/attention.py --reasoning-effort medium > kernel_agent/LOGS/out.txt
 ```
 
 Flags compatibility
@@ -20,4 +20,4 @@ Flags compatibility
 - --openai-model: only used by openai (defaults to gpt-5-mini)
 - --context: used by triton; ignored by torch/vllm/openai
 - --reasoning-effort: used by Harmony local backends (triton/torch/vllm); ignored by openai
-- Always used: --file-path, --mode, --max-iters, --patience_perf_stop, --patience_parity_restore, --min-rel-impr
+- Always used: --file-path, --max-iters, --patience_perf_stop, --patience_parity_restore, --min-rel-impr, --min-sim, --topk
