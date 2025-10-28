@@ -34,6 +34,18 @@ class BaseStrategy:
         # No-op in the base class.
         pass
 
+    def exception_fix_header(self) -> str:
+        """Return phase-appropriate header for exception fixing.
+
+        Strategies can use internal state (e.g., self.i for phase) to customize
+        the fix header. Default implementation returns generic fix prompt.
+
+        Returns:
+            Header string for LLM prompt when fixing exceptions.
+        """
+        # Default: generic fix header
+        return "Phase = fix. Fix the exception.\n"
+
     def workflow_section(self) -> str:
         """Return workflow context for system prompt.
 
@@ -748,6 +760,41 @@ END REFERENCE SECTION
             self.phase_just_advanced = True  # Mark that we just advanced (will be reset next call)
             if VERBOSE: print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
         # Phase 1 doesn't advance (stays at backward generation)
+
+    def exception_fix_header(self) -> str:
+        """Return phase-appropriate header for exception fixing.
+
+        Uses self.i (phase index) to determine appropriate guidance.
+        Phase 1 requires semantic analysis to avoid tactical fix loops,
+        while Phase 0 just needs correct PyTorch implementation.
+        """
+        if self.i == 0:
+            # Phase 0: PyTorch reference generation
+            return (
+                "Phase = fix. Fix the exception in PyTorch reference.\n"
+                "\n"
+                "The PyTorch reference must be SIMPLE and NAIVE.\n"
+                "It should compute the same mathematical operation as YOUR forward kernel.\n"
+                "Do NOT use built-in functions like F.scaled_dot_product_attention.\n"
+                "Just implement the math directly with basic PyTorch operations.\n"
+                "\n"
+            )
+        else:
+            # Phase 1: Backward kernel (self.i == 1)
+            # Semantic analysis critical to avoid tactical loops (evidenced by LOGS/3_out.txt)
+            return (
+                "Phase = fix. Fix the exception below.\n"
+                "\n"
+                "CRITICAL: Before making tactical fixes, verify semantic correctness:\n"
+                "- What mathematical transformation does YOUR forward compute?\n"
+                "- What mathematical transformation does RETRIEVED forward compute?\n"
+                "- What gradients are required by the chain rule for YOUR forward's algorithm?\n"
+                "- Is the current backward kernel computing the CORRECT gradients for YOUR forward?\n"
+                "\n"
+                "If you haven't compared YOUR forward vs RETRIEVED forward algorithms, DO THAT FIRST.\n"
+                "Do not fix dtypes, strides, or atomics until you verify the gradient math is correct.\n"
+                "\n"
+            )
 
     def set_phase_index(self, i: int) -> None:
         """Set phase index for rollback compatibility."""

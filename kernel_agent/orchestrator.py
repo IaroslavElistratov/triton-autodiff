@@ -240,12 +240,15 @@ class KernelOptimizer:
             if VERBOSE: print(f"[kernel-agent][it={it}] {err_category}: {err}")
 
             # One fix attempt for this iteration. Do not re-run fn() here.
+            # Get phase-appropriate fix header from strategy
+            header = self.strategy.exception_fix_header()
+
             self._llm_request_and_apply(
                 it,
                 "fix",
                 bwd_fp=self.bwd_fp,
                 fwd_fp=self.fwd_fp,
-                header="Phase = fix. ONLY fix the exception.\n",
+                header=header,
                 state_facts={err_category: err},
                 temperature=temperature,
             )
