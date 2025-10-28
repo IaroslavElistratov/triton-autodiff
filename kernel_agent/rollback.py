@@ -34,8 +34,7 @@ class Rollback:
         self._chain = chain
 
     def _log(self, text: str) -> None:
-        if VERBOSE:
-            print(f"[kernel-agent][rollback] {text}")
+        if VERBOSE: print(f"[kernel-agent][rollback] {text}")
 
     def snapshot(self, note: str = "") -> None:
         """Save current kernel contents to the lock file.

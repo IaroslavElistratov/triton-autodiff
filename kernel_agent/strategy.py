@@ -746,8 +746,7 @@ END REFERENCE SECTION
             # Advance from reference generation to backward generation
             self.i = 1
             self.phase_just_advanced = True  # Mark that we just advanced (will be reset next call)
-            if VERBOSE:
-                print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
+            if VERBOSE: print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
         # Phase 1 doesn't advance (stays at backward generation)
 
     def set_phase_index(self, i: int) -> None:

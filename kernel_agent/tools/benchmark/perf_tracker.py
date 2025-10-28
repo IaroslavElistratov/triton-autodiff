@@ -73,8 +73,7 @@ class PerfTracker:
         self.stop_reason: Optional[str] = None
 
     def _log(self, text: str) -> None:
-        if VERBOSE:
-            print(f"[kernel-agent][perf] {text}")
+        if VERBOSE: print(f"[kernel-agent][perf] {text}")
 
     @staticmethod
     def _full_parity(stats: Dict[str, Any]) -> bool:

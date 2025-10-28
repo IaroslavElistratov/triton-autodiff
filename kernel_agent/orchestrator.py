@@ -89,8 +89,7 @@ class KernelOptimizer:
         # - "fix": Fix existing code after validation failure
         # - "optimize": Performance optimization after correctness achieved
         assert stage in ("init", "fix", "optimize")
-        if VERBOSE:
-            print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
+        if VERBOSE: print(f"[kernel-agent][it={it}] LLM phase='{stage}'")
 
         if temperature is not None:
             self.patcher.temperature = float(temperature)
@@ -140,8 +139,7 @@ class KernelOptimizer:
                 # rely on the patcher to surface validation errors at apply time;
                 # no preflight checks; the patcher remains the source of truth
                 self.patcher.remember("apply.error", err_apply)
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] apply error: {err_apply}")
+                if VERBOSE: print(f"[kernel-agent][it={it}] apply error: {err_apply}")
             finally:
                 # stash the result for inline finalize on the next LLM call
                 self.patcher.finalize_last_tool_call(json.dumps({
@@ -192,8 +190,7 @@ class KernelOptimizer:
         changed = (after != before)
         # don't keep full patch in breadcrumbs to reduce token overhead
         self.patcher.remember(f"apply.{stage}", ("patch applied successfully" if changed else "no-change"))
-        if VERBOSE:
-            print(f"[kernel-agent][it={it}] {'patch applied successfully' if changed else 'no change'} in '{stage}'")
+        if VERBOSE: print(f"[kernel-agent][it={it}] {'patch applied successfully' if changed else 'no change'} in '{stage}'")
         return changed
 
 
@@ -240,8 +237,7 @@ class KernelOptimizer:
                 err = f"{type(ce).__name__}: {ce}\n\nTraceback:\n{filtered_tb}"
 
             self.patcher.remember(err_category, err)
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] {err_category}: {err}")
+            if VERBOSE: print(f"[kernel-agent][it={it}] {err_category}: {err}")
 
             # One fix attempt for this iteration. Do not re-run fn() here.
             self._llm_request_and_apply(
@@ -388,8 +384,7 @@ class KernelOptimizer:
 
         # optimization loop
         for it in range(self.cfg.max_iters):
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] Begin iteration")
+            if VERBOSE: print(f"[kernel-agent][it={it}] Begin iteration")
 
             # RAGAdaptationStrategy never throttles SWEEP
 
@@ -399,8 +394,7 @@ class KernelOptimizer:
             # the raised naive backward is unrolled and shape‑specialized; it will fail on varied
             # shapes until loops are restored
 
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}]") #  Inputs shapes={shapes}"
+            if VERBOSE: print(f"[kernel-agent][it={it}]") #  Inputs shapes={shapes}"
 
             # breadcrumb for LLM continuity
             self.patcher.remember("iteration", f"it={it}") # , shapes={shapes}
@@ -424,8 +418,7 @@ class KernelOptimizer:
 
             if self.strategy.i == 0:
                 # Phase 1: Validate PyTorch reference against Triton forward
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Phase 1: Validating PyTorch reference against Triton forward")
+                if VERBOSE: print(f"[kernel-agent][it={it}] Phase 1: Validating PyTorch reference against Triton forward")
 
                 # Only validate forward outputs
                 os.environ["GRADCHECK_FORWARD_ONLY"] = "1"
@@ -450,8 +443,7 @@ class KernelOptimizer:
                 else:
                     # Reset flag on validation failure (e.g., after rollback from Phase 2)
                     self.strategy.pytorch_reference_validated = False
-                    if VERBOSE:
-                        print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference validation failed, will retry")
+                    if VERBOSE: print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference validation failed, will retry")
 
                 grad_summary_text = ""
 
@@ -467,8 +459,7 @@ class KernelOptimizer:
                     continue
                 # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
                 parity_ok, grad_stats = payload_gradcheck
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
+                if VERBOSE: print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
                 # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
                 # Pass only formatted text, not full dict, to reduce coupling with llm.py.
@@ -516,7 +507,7 @@ class KernelOptimizer:
             # When phase advances (e.g., 0->1), parity_ok is from OLD phase (forward validation)
             # We must NOT terminate using stale results - need to generate code for NEW phase first
             #
-            # if just advanced phases - parity_ok is from the previous phase!
+            # If just advanced phases - parity_ok is from the previous phase!
             # Will call LLM to generate initial code for new phase, then validate
             # Skip termination check (parity_ok is stale from previous phase)
             if parity_ok and (self.strategy.i == 1) and not self.strategy.phase_just_advanced:
@@ -524,8 +515,7 @@ class KernelOptimizer:
                 # Both refer to Phase 1: validation passed AND still in Phase 1
                 # Only terminate if we're in Phase 1 AND we have fresh Phase 1 validation results
                 stop_reason = "rag_parity_achieved"
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes (backward gradients validated)")
+                if VERBOSE: print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes (backward gradients validated)")
                 break
 
             # Previously skipped LLM call after phase advance, causing immediate gradcheck
@@ -537,8 +527,7 @@ class KernelOptimizer:
                 if was_restored:
                     # reset perf patience counter after rollback
                     tracker.reset_patience()
-                    if VERBOSE:
-                        print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
+                    if VERBOSE: print(f"[kernel-agent][it={it}] Restore performed; skipping fix to re-test on restored kernel next iteration")
 
                     # avoid showing stale errors to the model after a restore by skipping the fix prompt and
                     # advancing to re-run gradcheck on the restored kernel next iteration;
@@ -570,8 +559,7 @@ class KernelOptimizer:
 
 
             # Benchmark the current autograd op (backward), independent of optimize path
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] Benchmarking backward")
+            if VERBOSE: print(f"[kernel-agent][it={it}] Benchmarking backward")
 
             # Benchmark in an isolated child process
             def _run_bench_child():
@@ -580,8 +568,7 @@ class KernelOptimizer:
             if not child_ran_ok:
                 continue
 
-            if VERBOSE:
-                print(f"[kernel-agent][it={it}] bench: {cand}")
+            if VERBOSE: print(f"[kernel-agent][it={it}] bench: {cand}")
 
             # Feed per-sweep reducer output to the tracker:
             # - latest_metrics: last sweep + per-shape speedups and geomean vs best
@@ -592,32 +579,8 @@ class KernelOptimizer:
                 rollback.snapshot("perf-improved (on full parity)")
             elif tracker.stop_reason:
                 stop_reason = tracker.stop_reason
-                if VERBOSE:
-                    print(f"[kernel-agent][it={it}] Early stop {stop_reason}")
+                if VERBOSE: print(f"[kernel-agent][it={it}] Early stop {stop_reason}")
                 break
-
-
-            ###### phase specific prompt ######
-
-
-            # if VERBOSE: print(f"[kernel-agent][it={it}] Requesting 'optimize' patch from LLM")
-
-            # # i guess i can think of it that the only time phase header and constraints are shown in here
-            # # and all the previous llm calls were basically fixes in one from or another (e.g. patch fixes, grad-correctness fixes)
-            # # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
-            # # Pass only formatted text, not full dict, to reduce coupling with llm.py.
-            # grad_summary_text = grad_stats.get("summary_text", str(grad_stats))
-
-            # changed = self._llm_request_and_apply(
-            #     it, "optimize", bwd_fp=bwd_fp, fwd_fp=fwd_fp,
-            #     header=phase_text,
-            #     state_facts={"bench": cand, "grad_summary": grad_summary_text},
-            #     temperature=temp,
-            # )
-            # if not changed:
-            #     continue
-
-            # NOTE: any gradcheck stats are now stale (right after the patch was applied above)
 
             if VERBOSE: print(f"[kernel-agent][it={it}] End iteration")
 

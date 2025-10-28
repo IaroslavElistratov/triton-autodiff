@@ -136,23 +136,20 @@ def build_rag_block(
     VERBOSE = _verbose_check("KERNEL_AGENT_VERBOSE", "1")
 
     if not index_path or not os.path.exists(index_path):
-        if VERBOSE:
-            print(f"[kernel-agent][RAG] Index not found: {index_path}")
+        if VERBOSE: print(f"[kernel-agent][RAG] Index not found: {index_path}")
         return ""
 
     try:
         embeddings, documents, backward_docs, file_list, openai_model = _load_index(index_path)
     except Exception as e:
-        if VERBOSE:
-            print(f"[kernel-agent][RAG] Failed to load index: {type(e).__name__}: {e}")
+        if VERBOSE: print(f"[kernel-agent][RAG] Failed to load index: {type(e).__name__}: {e}")
         return ""
 
     # Embed the query using OpenAI API
     try:
         query_embedding = _embed_query(fwd_source, model=openai_model)
     except Exception as e:
-        if VERBOSE:
-            print(f"[kernel-agent][RAG] Failed to embed query: {type(e).__name__}: {e}")
+        if VERBOSE: print(f"[kernel-agent][RAG] Failed to embed query: {type(e).__name__}: {e}")
         return ""
 
     # Compute cosine similarities with all indexed embeddings
@@ -193,12 +190,10 @@ def build_rag_block(
     ranked = _dedupe_by_backward(ranked, backward_docs)[:top_k]
 
     if not ranked:
-        if VERBOSE:
-            print(f"[kernel-agent][RAG] No similar kernels found (min_sim={min_sim:.2f})")
+        if VERBOSE: print(f"[kernel-agent][RAG] No similar kernels found (min_sim={min_sim:.2f})")
         return ""
 
-    if VERBOSE:
-        print(f"[kernel-agent][RAG] Retrieved {len(ranked)} backward reference(s)")
+    if VERBOSE: print(f"[kernel-agent][RAG] Retrieved {len(ranked)} backward reference(s)")
 
     # Compose block under budget
     per_example_chars = max(200, token_budget_chars // max(1, len(ranked)))
@@ -212,15 +207,13 @@ def build_rag_block(
         bwd_full = backward_docs.get(fp, "")
         bwd_snip = _truncate(bwd_full, per_example_chars)
 
-        if VERBOSE:
-            print(f"[kernel-agent][RAG DEBUG] {fp}: bwd_full={len(bwd_full)} chars, bwd_snip={len(bwd_snip)} chars, per_example_chars={per_example_chars}")
+        if VERBOSE: print(f"[kernel-agent][RAG DEBUG] {fp}: bwd_full={len(bwd_full)} chars, bwd_snip={len(bwd_snip)} chars, per_example_chars={per_example_chars}")
 
         if bwd_snip:
             lines.append("Backward (reference):")
             lines.append(bwd_snip)
         else:
-            if VERBOSE:
-                print(f"[kernel-agent][RAG DEBUG] WARNING: bwd_snip is empty for {fp}!")
+            if VERBOSE: print(f"[kernel-agent][RAG DEBUG] WARNING: bwd_snip is empty for {fp}!")
 
     lines.append("\nAdaptation checklist for MY backward:")
     lines.append("- Match argument order, dtypes, tl.constexpr, grid mapping (program_id axes).")
