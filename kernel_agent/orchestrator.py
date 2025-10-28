@@ -32,7 +32,7 @@ class Config:
     patience_parity_restore: int = 2  # allow this many parity-regression iterations before restoring snapshot
     min_rel_improvement: float = 0.10   # require >= +10% throughput to accept
     # todo: a better way?
-    snippet_max_lines: int = 400        # bound context shown to the LLM
+    snippet_max_lines: int = 2000       # bound context shown to the LLM
 
 
 # Runtime exceptions (gradcheck/bench/compile child fails): handled once per iteration in run_with_fix;

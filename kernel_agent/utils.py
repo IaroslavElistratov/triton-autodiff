@@ -341,6 +341,10 @@ def _read_snippet(path: str, max_lines: int | None) -> str:
             lines = f.readlines()
         if max_lines is None:
             return "".join(lines)
+        if len(lines) > max_lines:
+            snippet = "".join(lines[:max_lines])
+            snippet += f"\n\n# ... [TRUNCATED: {len(lines) - max_lines} lines omitted] ...\n"
+            return snippet
         return "".join(lines[:max_lines])
     except Exception as e:
         return f"(snippet unavailable: {e})"
@@ -439,7 +443,12 @@ def redact_torch_fn(path: str, max_lines: int | None = None) -> str:
     if isinstance(max_lines, int) and max_lines > 0:
         # When cropping is requested, first reduce to the first `max_lines` lines
         # but do not alter internal formatting beyond that.
-        src = "".join(src.splitlines(True)[:max_lines])
+        lines = src.splitlines(True)
+        if len(lines) > max_lines:
+            src = "".join(lines[:max_lines])
+            src += f"\n\n# ... [TRUNCATED: {len(lines) - max_lines} lines omitted] ...\n"
+        else:
+            src = "".join(lines[:max_lines])
 
     # Normalize trailing newlines at EOF:
     # - Remove only newline characters to avoid extra blank lines
