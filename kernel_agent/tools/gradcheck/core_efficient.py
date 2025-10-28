@@ -392,6 +392,23 @@ def check_op_backward_numerical_sweep(
             # Continue to next shape (don't return immediately - test all shapes)
             continue
 
+        # Force any sticky CUDA errors to surface NOW before next iteration
+        # Explicit synchronize after each shape test to catch errors before next make_args().
+        # - Prevents misleading tracebacks: Error surfaces HERE (after kernel execution),
+        #   NOT at torch.empty() in next iteration's make_args() (wrong location)
+        # todo:
+        # - BUT traceback NOT precise: Points to synchronize() call, not the actual failing kernel line
+        #     (stack unwound by the time async error surfaces)
+        # Example: Illegal memory access in _attn_bwd kernel at iteration N:
+        #   Without this sync: Error appears at "torch.empty()" in iteration N+1 make_args()
+        #   With this sync: Error caught here after shape N test, before shape N+1 begins
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            # If CUDA error surfaces here, re-raise to propagate out of sweep loop
+            # This will be caught by worker.py and shown to LLM with filtered traceback
+            raise
+
     # FEATURE: Vacuous Truth Prevention
     # LOGIC:
     # - If user didn't specify ANY required shapes (num_required == 0) → User's fault

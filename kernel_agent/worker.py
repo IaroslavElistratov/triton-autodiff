@@ -99,9 +99,10 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         # - Hook loads stubs from raised.py → sets kernel._generated_{fwd,bwd}_stub
         # - Result: All subsequent calls use stubs from raised.py via proxy mechanism
         _op, bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
-        # Ensure any pending device work (e.g., preflight backward) is observed before exit,
-        # so device-side asserts surface in this child, not later in the parent.
-        # todo: but that seems to be device-wide
+
+        # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
+        # Prevents kernel bugs from surfacing at torch.empty() with misleading tracebacks.
+        # See _gradcheck_child:207-212 for detailed explanation with real example.
         _t.cuda.synchronize()
         q.put(bwd_fp)
         q.close(); q.join_thread()
@@ -198,6 +199,13 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # - Returns op that uses proxies pointing to these attributes
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
 
+        # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
+        # Real bug example (iterations 2-7): stride error in kernel → surfaced at torch.empty()
+        # Without sync: LLM sees "Error at torch.empty()" (misleading - input generation not broken)
+        # With sync: LLM sees "Error after compile_kernel()" (correct - points to actual kernel bug)
+        # Cost: Nearly free with CUDA_LAUNCH_BLOCKING=1 already enabled
+        _t.cuda.synchronize()
+
         sidecar = dict(ns)
 
         # Gradcheck calls op many times, each call:
@@ -233,10 +241,11 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
             eps=0.005,
             forward_only=forward_only
         )
-        try:
-            _t.cuda.synchronize()
-        except Exception:
-            pass
+        # Force async CUDA errors to surface - if this raises, outer except will handle it
+        _t.cuda.synchronize()
+        # # Note: GPU cleanup could be done here, but outer except/finally handles it
+        # # Try to clean up GPU state before exiting
+        # _t.cuda.empty_cache()
         q.put((bool(ok), stats))
         status_ok = True
     except BaseException as e:
@@ -324,12 +333,20 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Result: Benchmark ALWAYS uses stubs/kernels from raised.py, NOT user file
         op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
 
+        # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
+        # Real bug example (iterations 2-7): stride error in kernel → surfaced at torch.empty()
+        # Without sync: LLM sees "Error at torch.empty()" (misleading - input generation not broken)
+        # With sync: LLM sees "Error after compile_kernel()" (correct - points to actual kernel bug)
+        # Cost: Nearly free with CUDA_LAUNCH_BLOCKING=1 already enabled
+        _t.cuda.synchronize()
+
         sidecar = dict(ns)
         cand = bench_op(op, sidecar, mode="bwd")
-        try:
-            _t.cuda.synchronize()
-        except Exception:
-            pass
+        # Force async CUDA errors to surface - if this raises, outer except will handle it
+        _t.cuda.synchronize()
+        # # Note: GPU cleanup could be done here, but outer except/finally handles it
+        # # Try to clean up GPU state before exiting
+        # _t.cuda.empty_cache()
         q.put(cand)
         status_ok = True
     except BaseException as e:
