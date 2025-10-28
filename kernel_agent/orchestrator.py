@@ -431,7 +431,7 @@ class KernelOptimizer:
                     continue
 
                 # Check if reference validation passed
-                forward_match_ok, grad_stats = payload_gradcheck
+                forward_match_ok, validation_stats = payload_gradcheck
                 # In Phase 1, parity_ok means forward outputs match, not gradients
                 parity_ok = forward_match_ok  # Keep variable name for compatibility
 
@@ -445,10 +445,12 @@ class KernelOptimizer:
                     self.strategy.pytorch_reference_validated = False
                     if VERBOSE: print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference validation failed, will retry")
 
-                grad_summary_text = ""
+                # Extract formatted summary for Phase 1 (forward validation)
+                check_summary = validation_stats.get("summary_text", str(validation_stats))
+                check_stats = validation_stats
 
             else:
-                # Normal gradcheck for Phase 2 or other strategies
+                # Phase 2: Gradcheck (gradient validation via autograd)
                 # Clear forward-only flag for Phase 2
                 os.environ.pop("GRADCHECK_FORWARD_ONLY", None)
 
@@ -457,18 +459,18 @@ class KernelOptimizer:
                 child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, 0.25, "gradcheck_error")
                 if not child_ran_ok:
                     continue
-                # (grad_passed, grad_stats) can be just (None, ) don't assume it's a tuple
+                # Unpack gradcheck results
                 parity_ok, grad_stats = payload_gradcheck
                 if VERBOSE: print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
-                # Extract formatted summary_text for LLM prompt (gradcheck module pre-formatted it).
-                # Pass only formatted text, not full dict, to reduce coupling with llm.py.
-                grad_summary_text = grad_stats.get("summary_text", str(grad_stats))
+                # Extract formatted summary for Phase 2 (gradcheck)
+                check_summary = grad_stats.get("summary_text", str(grad_stats))
+                check_stats = grad_stats
 
             # Don't add gradcheck to history - it appears in state_facts when prompting,
             # and previous iterations' gradcheck results aren't useful for current fixes.
 
-            was_restored = rollback.maybe_snapshot_or_restore(grad_stats)
+            was_restored = rollback.maybe_snapshot_or_restore(check_stats)
 
             # Deferred phase advance gate: if last iteration applied a patch, only advance
             # now (before computing the phase header) if the current kernel passes the
@@ -547,7 +549,7 @@ class KernelOptimizer:
                     "init" if self.strategy.phase_just_advanced else "fix",
                     bwd_fp=bwd_fp, fwd_fp=fwd_fp,
                     header=phase_text if self.strategy.phase_just_advanced else phase_text + "\nONLY restore correctness to pass gradcheck.\n",
-                    state_facts={"grad_summary": grad_summary_text},
+                    state_facts={"check_summary": check_summary},
                     # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
                     temperature=0.25,
                 )
