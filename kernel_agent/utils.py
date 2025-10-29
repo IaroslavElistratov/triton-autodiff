@@ -34,7 +34,7 @@ class UserError(Exception):
     pass
 
 
-def filter_traceback_for_llm(tb_string: str) -> str:
+def filter_traceback_for_llm(tb_string: str, bwd_fp: str) -> str:
     """
     Filter traceback to show only relevant frames for LLM error fixing.
 
@@ -46,19 +46,35 @@ def filter_traceback_for_llm(tb_string: str) -> str:
        actual error occurs) might be in internal code (e.g., generated code calls triton.language.func()
        which throws internally). If we filter that out, LLM won't see the actual error location.
     3. Solution: Keep LAST frame always (actual error location) + keep frames from user-controlled
-       paths (generated/, test/, tools/) + skip middleware frames.
+       paths (generated backward file being edited) + skip middleware frames.
     4. This gives LLM: error location (last frame) + how user code led to it (user frames) without
        20 lines of triton/torch/autodiff internals.
 
+    Args:
+        tb_string: Formatted traceback string from format_exception()
+        bwd_fp: Path to generated backward file (e.g., "generated/abc123/raised.py")
+                Used for exact path matching to identify user-controlled frames.
+
+                FIX: Old prefix-based matching ('generated/' in path) was too aggressive -
+                it would hide generated frames in the skip marker when they should be shown to LLM.
+                This caused misleading tracebacks like:
+                    [...skipped 2 internal frames...]  ← Generated kernel frame hidden here!
+                    File "test/attention.py", line 235, in make_args
+                        q = torch.empty(...)  ← CUDA error surfaces here (misleading!)
+
+                New approach: Exact path matching ensures generated code frames (WHERE error actually
+                occurred) are ALWAYS shown to LLM.
+
     Examples of what gets filtered:
-    - KEPT: generated/abc123/raised.py (LLM-generated backward code - can modify)
-    - KEPT: kernel_agent/test/matmul.py (user forward code - shows call context)
-    - KEPT: kernel_agent/tools/gradcheck/core.py (user tools - shows what triggered error)
+    - KEPT: generated/abc123/raised.py (matches bwd_fp - LLM is editing this)
+    - KEPT: Last frame (shows actual error location)
     - FILTERED: kernel_agent/worker.py (infrastructure - LLM can't modify)
     - FILTERED: kernel_agent/utils.py (infrastructure - just plumbing)
     - FILTERED: triton/runtime/jit.py (framework - LLM can't modify)
     - FILTERED: triton/backends/autodiff/hooks.py (framework internals)
-    - KEPT: Last frame even if in filtered path (shows actual error location)
+
+    # todo: include this?
+    - [?] KEPT: kernel_agent/tools/gradcheck/core.py (user tools - shows what triggered error)
 
     Why string-based filtering instead of traceback object reconstruction (like TensorFlow/Django):
     1. Workers run in separate processes (multiprocessing) - traceback objects cannot be
@@ -69,17 +85,11 @@ def filter_traceback_for_llm(tb_string: str) -> str:
        for LLM consumption, so string output is the end goal anyway.
     4. String parsing is simpler and sufficient for this use case given the architecture constraints.
     """
+    import os
     lines = tb_string.split('\n')
 
-    # User-controlled paths that LLM can modify
-    # Note: 'test/' and 'tools/' match via substring check (f'/{prefix}' in path),
-    # so kernel_agent/test/*.py and kernel_agent/tools/*.py are still matched,
-    # but kernel_agent/utils.py, worker.py, orchestrator.py are excluded (infrastructure)
-    USER_CONTROLLED_PREFIXES = (
-        'generated/',
-        # 'test/',
-        # 'tools/',
-    )
+    # Normalize bwd_fp for exact path matching
+    bwd_fp_normalized = os.path.normpath(bwd_fp)
 
     # Parse traceback into frames
     frames = []
@@ -100,10 +110,22 @@ def filter_traceback_for_llm(tb_string: str) -> str:
                 frame_lines.append(lines[i])
                 i += 1
 
-            # Check if this frame is from user-controlled path
+            # Check if this frame is from the generated backward file being edited
+            # FIX: Exact path matching prevents overly aggressive filtering that was hiding
+            # generated kernel frames in skip markers, causing LLM to see misleading error locations
             file_path = line.split('"')[1] if '"' in line else ""
-            is_user_controlled = any(file_path.startswith(prefix) or f'/{prefix}' in file_path
-                                     for prefix in USER_CONTROLLED_PREFIXES)
+            is_user_controlled = False
+
+            if bwd_fp_normalized:
+                # Check if frame is from the generated file we're editing (exact path match)
+                frame_path_normalized = os.path.normpath(file_path)
+                # Match if paths are equal or if absolute frame path ends with relative bwd_fp
+                # Use os.sep to ensure we match at path boundaries (not substrings)
+                is_user_controlled = (
+                    frame_path_normalized == bwd_fp_normalized or
+                    frame_path_normalized.endswith(os.sep + bwd_fp_normalized) or
+                    frame_path_normalized.endswith('/' + bwd_fp_normalized)  # Handle both separators
+                )
 
             frames.append({
                 'lines': frame_lines,

@@ -261,6 +261,10 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         #   - AttributeError: accessing undefined variable in backward kernel
         #   - IndexError: out of bounds access in backward kernel logic
         #
+        # These structural errors show FULL FILTERED TRACEBACKS to LLM (via orchestrator).
+        # This is different from validation errors (dtype mismatches, numerical failures) which are
+        # caught inside check functions and only show ERROR MESSAGES (not tracebacks) via summary_text.
+        #
         # Note: Numerical failures (gradients numerically wrong by max_abs=0.05) are NOT exceptions.
         # Those complete successfully (no exception) and return (False, stats) above (exit code 0).
         # Orchestrator receives stats dict and shows it to LLM separately (not as filtered traceback).

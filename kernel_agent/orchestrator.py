@@ -219,13 +219,21 @@ class KernelOptimizer:
             # Example filtering result (hypothetical):
             #   Before: 15 frames (worker.py, utils.py, triton runtime, autodiff, torch internals, generated code, utils.py)
             #   After:  3 frames (test/attention.py:269, generated/raised.py:5 @triton.jit, utils.py:187 raise)
+            #
+            # use filter_traceback_for_llm here because this traceback IS shown directly to LLM.
+            # This handles STRUCTURAL exceptions that bubble up from workers (import failures,
+            # signature mismatches, etc.). These are different from VALIDATION errors caught
+            # in core_efficient.py check functions:
+            #   - Validation errors: Only error MESSAGE shown via summary_text (no traceback)
+            #   - Structural errors: Full FILTERED TRACEBACK shown to LLM (we filter here)
+            # Orchestrator does NOT re-filter validation error tracebacks - those never reach LLM.
             import traceback
             if hasattr(ce, 'worker_payload') and isinstance(ce.worker_payload, dict):
                 payload = ce.worker_payload
                 # Worker sent {"etype": "...", "emsg": "...", "traceback": "..."}
                 if "traceback" in payload:
-                    # Filter traceback to show only relevant frames (last frame + user-controlled paths)
-                    filtered_tb = filter_traceback_for_llm(payload['traceback'])
+                    # Filter traceback to show only relevant frames (generated file + last frame)
+                    filtered_tb = filter_traceback_for_llm(payload['traceback'], bwd_fp=self.bwd_fp)
                     err = f"{payload.get('etype', type(ce).__name__)}: {payload.get('emsg', str(ce))}\n\nTraceback:\n{filtered_tb}"
                 else:
                     err = f"{payload.get('etype', type(ce).__name__)}: {payload.get('emsg', str(ce))}"
@@ -233,7 +241,7 @@ class KernelOptimizer:
                 # Regular exception (not from worker) - capture traceback here
                 tb = "".join(traceback.format_exception(type(ce), ce, ce.__traceback__))
                 # Filter traceback to show only relevant frames
-                filtered_tb = filter_traceback_for_llm(tb)
+                filtered_tb = filter_traceback_for_llm(tb, bwd_fp=self.bwd_fp)
                 err = f"{type(ce).__name__}: {ce}\n\nTraceback:\n{filtered_tb}"
 
             self.patcher.remember(err_category, err)

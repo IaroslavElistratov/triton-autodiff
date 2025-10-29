@@ -9,9 +9,6 @@ import torch
 from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict, List
 import traceback
 
-# Import traceback filter to reduce LLM prompt noise (removes internal Triton/PyTorch frames)
-from ...utils import filter_traceback_for_llm
-
 Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
 
@@ -96,13 +93,16 @@ def check_forward_outputs_match(
     except Exception as e:
         # Non-OOM errors: return as failure with diagnostics
         full_tb = traceback.format_exc()
-        # Filter traceback to show only user code + error location (not 20+ internal frames)
-        filtered_tb = filter_traceback_for_llm(full_tb)
+        # Include exception type in error message (e.g., "CompilationError: <message>")
+        # Triton errors show code location but str(e) may not include WHAT error occurred,
+        # so prepend type (CompilationError, NameError, TypeError) giving LLM context.
+        # Example: "CompilationError: Both operands must be same dtype" vs just "at 51:14: dv += tl.dot(...) ^"
+        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         if verbose:
-            print(f"[Reference Check] Exception during forward validation: {e}")
-            print(filtered_tb)
-        stats["error"] = str(e)
-        stats["traceback"] = filtered_tb
+            print(f"[Reference Check] Exception during forward validation: {error_msg}")
+            print(full_tb)  # Raw traceback for debugging (printed here, not stored)
+        # NOTE: Only error message shown to LLM (via _format_summary_for_llm → summary_text)
+        stats["error"] = error_msg
         return False, stats
 
 
@@ -225,6 +225,13 @@ def check_op_backward_with_reference(
                 grad_errors.append(f"Input {i}: {e}")
                 if verbose:
                     print(f"[Reference Check] Input {i} gradient mismatch: {e}")
+            finally:
+                if verbose:
+                    # DEBUG: Print first 20 elements for manual inspection (not shown to LLM)
+                    triton_flat = t_inp.grad.flatten()[:20].cpu().tolist()
+                    ref_flat = r_inp.grad.flatten()[:20].cpu().tolist()
+                    print(f"  [DEBUG] Ground truth (ref) first 20: {ref_flat}")
+                    print(f"  [DEBUG] Model (triton) first 20:    {triton_flat}")
 
         stats["forward_match"] = forward_match
         stats["gradient_match"] = all_match
@@ -239,13 +246,14 @@ def check_op_backward_with_reference(
     except Exception as e:
         # Non-OOM errors: return as failure with diagnostics
         full_tb = traceback.format_exc()
-        # Filter traceback to show only user code + error location (not 20+ internal frames)
-        filtered_tb = filter_traceback_for_llm(full_tb)
+        # Include exception type in error message (e.g., "CompilationError: <message>")
+        # Example: "CompilationError: Both operands must be same dtype" vs just "at 51:14: dv += tl.dot(...) ^"
+        error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         if verbose:
-            print(f"[Reference Check] Exception during validation: {e}")
-            print(filtered_tb)
-        stats["error"] = str(e)
-        stats["traceback"] = filtered_tb
+            print(f"[Reference Check] Exception during validation: {error_msg}")
+            print(full_tb)  # Raw traceback for debugging (printed here, not stored)
+        # NOTE: Only error message shown to LLM (via _format_summary_for_llm → summary_text)
+        stats["error"] = error_msg
         return False, stats
 
 
@@ -462,6 +470,13 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
     """
     Format validation results into a clean summary for LLM prompts.
     Focus on failures and actionable errors - omit passed shapes.
+
+    This function extracts ERROR MESSAGES ONLY (not tracebacks) from stats.
+    - Uses stats["error"] (error message) ← shown to LLM
+    - Tracebacks NOT included in stats (printed directly in verbose mode for debugging)
+
+    Orchestrator calls this function to get summary_text, which is what LLM sees.
+    Only structural exceptions (that bubble up to orchestrator) show full tracebacks.
     """
     lines = []
 
