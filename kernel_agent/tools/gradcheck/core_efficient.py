@@ -61,12 +61,12 @@ def check_forward_outputs_match(
 
         # Check output arity (must have same number of outputs)
         if len(triton_out) != len(ref_out):
-            stats["error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            stats["structural_error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
             return False, stats
 
         # Check: forward outputs must match
         all_match = True
-        output_errors = []
+        forward_mismatches = []
 
         for i, (t_out, r_out) in enumerate(zip(triton_out, ref_out)):
             if isinstance(t_out, torch.Tensor) and isinstance(r_out, torch.Tensor):
@@ -78,12 +78,12 @@ def check_forward_outputs_match(
                         print(f"[Reference Check] Output {i} matches ✓ (max_diff={max_diff:.6f}, atol={atol})")
                 except AssertionError as e:
                     all_match = False
-                    output_errors.append(f"Output {i}: {e}")
+                    forward_mismatches.append(f"Output {i}: {e}")
                     if verbose:
                         print(f"[Reference Check] Output {i} mismatch: {e}")
 
         stats["forward_match"] = all_match
-        stats["output_errors"] = output_errors
+        stats["forward_mismatches"] = forward_mismatches
 
         return all_match, stats
 
@@ -105,7 +105,7 @@ def check_forward_outputs_match(
             print(f"[Reference Check] Exception during forward validation: {error_msg}")
             print(full_tb)  # Raw traceback for debugging (printed here, not stored)
         # NOTE: Only error message shown to LLM (via _format_summary_for_llm → summary_text)
-        stats["error"] = error_msg
+        stats["structural_error"] = error_msg
         return False, stats
 
 
@@ -161,7 +161,7 @@ def check_op_backward_with_reference(
         try:
             _triton_launch_counter.assert_launched(context="forward")
         except RuntimeError as e:
-            stats["error"] = str(e)
+            stats["structural_error"] = str(e)
             return False, stats
 
         # Forward pass - PyTorch reference
@@ -171,7 +171,7 @@ def check_op_backward_with_reference(
 
         # Check output arity (must have same number of outputs)
         if len(triton_out) != len(ref_out):
-            stats["error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            stats["structural_error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
             return False, stats
 
         # First check: forward outputs must match
@@ -187,7 +187,7 @@ def check_op_backward_with_reference(
                     break
 
         if not forward_match:
-            stats["error"] = "Forward outputs don't match between Triton and PyTorch reference"
+            stats["structural_error"] = "Forward outputs don't match between Triton and PyTorch reference"
             return False, stats
 
         # reset telemetry
@@ -202,7 +202,7 @@ def check_op_backward_with_reference(
         try:
             _triton_launch_counter.assert_launched(context="backward")
         except RuntimeError as e:
-            stats["error"] = str(e)
+            stats["structural_error"] = str(e)
             return False, stats
 
         # Backward pass - PyTorch reference
@@ -210,8 +210,8 @@ def check_op_backward_with_reference(
         ref_loss.backward()
 
         # Compare gradients
-        all_match = True
-        grad_errors = []
+        backward_match = True
+        backward_mismatches = []
 
         for i, (t_inp, r_inp) in enumerate(zip(triton_inputs, ref_inputs)):
             # Skip non-tensor or non-floating inputs
@@ -223,8 +223,8 @@ def check_op_backward_with_reference(
             r_has_grad = hasattr(r_inp, 'grad') and r_inp.grad is not None
 
             if t_has_grad != r_has_grad:
-                all_match = False
-                grad_errors.append(f"Input {i}: gradient presence mismatch (Triton grad={'present' if t_has_grad else 'None'}, reference grad={'present' if r_has_grad else 'None'})")
+                backward_match = False
+                backward_mismatches.append(f"Input {i}: gradient presence mismatch (Triton grad={'present' if t_has_grad else 'None'}, reference grad={'present' if r_has_grad else 'None'})")
                 if verbose:
                     print(f"[Reference Check] Input {i} gradient presence mismatch: Triton={'present' if t_has_grad else 'None'}, reference={'present' if r_has_grad else 'None'}")
                 continue
@@ -239,8 +239,8 @@ def check_op_backward_with_reference(
                 if verbose:
                     print(f"[Reference Check] Input {i} gradients match ✓")
             except AssertionError as e:
-                all_match = False
-                grad_errors.append(f"Input {i}: {e}")
+                backward_match = False
+                backward_mismatches.append(f"Input {i}: {e}")
                 if verbose:
                     print(f"[Reference Check] Input {i} gradient mismatch: {e}")
             finally:
@@ -252,10 +252,10 @@ def check_op_backward_with_reference(
                     print(f"  [DEBUG] Model (triton) first 20:    {triton_flat}")
 
         stats["forward_match"] = forward_match
-        stats["gradient_match"] = all_match
-        stats["grad_errors"] = grad_errors
+        stats["gradient_match"] = backward_match
+        stats["backward_mismatches"] = backward_mismatches
 
-        return all_match, stats
+        return backward_match, stats
 
     except torch.cuda.OutOfMemoryError:
         # Let OOM propagate to sweep level for proper optional shape handling
@@ -271,7 +271,7 @@ def check_op_backward_with_reference(
             print(f"[Reference Check] Exception during validation: {error_msg}")
             print(full_tb)  # Raw traceback for debugging (printed here, not stored)
         # NOTE: Only error message shown to LLM (via _format_summary_for_llm → summary_text)
-        stats["error"] = error_msg
+        stats["structural_error"] = error_msg
         return False, stats
 
 
@@ -489,12 +489,15 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
     Format validation results into a clean summary for LLM prompts.
     Focus on failures and actionable errors - omit passed shapes.
 
-    This function extracts ERROR MESSAGES ONLY (not tracebacks) from stats.
-    - Uses stats["error"] (error message) ← shown to LLM
-    - Tracebacks NOT included in stats (printed directly in verbose mode for debugging)
+    Error taxonomy:
+    - forward_mismatches / backward_mismatches: Numerical correctness failures (arrays)
+    - structural_error: Compilation, dtype, signature, telemetry errors (single message)
+    - OOM: Handled separately at sweep level
 
+    Tracebacks NOT included in stats (printed directly in verbose mode for debugging).
+    This function extracts ERROR MESSAGES ONLY (not tracebacks) from stats.
     Orchestrator calls this function to get summary_text, which is what LLM sees.
-    Only structural exceptions (that bubble up to orchestrator) show full tracebacks.
+    Only uncaught exceptions (that bubble up to orchestrator) show full tracebacks.
     """
     lines = []
 
@@ -519,24 +522,34 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
             shape_str = ", ".join(f"{k}={v}" for k, v in shape_params.items())
             lines.append(f"\n{required} Shape: {shape_str}")
 
-            # Extract error details
+            # Extract error details from shape stats
             shape_stats = shape_info.get("stats", {})
+
+            # Try numerical mismatches first (arrays), then structural errors (single message)
             if forward_only:
-                # Forward phase: show output mismatches
-                errors = shape_stats.get("output_errors", [])
-                for err in errors[:3]:  # Limit to first 3 outputs
-                    # Extract key info: which output and max diff
-                    lines.append(f"  {err.split(':')[0]}: mismatch")
-            else:
-                # Backward phase: show gradient mismatches OR compilation errors
-                errors = shape_stats.get("grad_errors", [])
-                if errors:
-                    for err in errors[:3]:  # Limit to first 3 inputs
+                # Forward phase: numerical mismatches or structural errors
+                numerical_failures = shape_stats.get("forward_mismatches", [])
+                structural_failure = shape_stats.get("structural_error")
+
+                if numerical_failures:
+                    # Show numerical mismatches (forward outputs don't match reference)
+                    for err in numerical_failures[:3]:  # Limit to first 3 outputs
                         lines.append(f"  {err.split(':')[0]}: mismatch")
-                elif "error" in shape_stats:
-                    # Compilation/runtime error (dtype mismatch, signature error, etc.)
-                    # Show full error message (not just first line) so model can see actual error type
-                    lines.append(f"  Error: {shape_stats['error']}")
+                elif structural_failure:
+                    # Show structural error (compilation, dtype, signature, telemetry)
+                    lines.append(f"  Error: {structural_failure}")
+            else:
+                # Backward phase: numerical mismatches or structural errors
+                numerical_failures = shape_stats.get("backward_mismatches", [])
+                structural_failure = shape_stats.get("structural_error")
+
+                if numerical_failures:
+                    # Show numerical mismatches (gradients don't match reference)
+                    for err in numerical_failures[:3]:  # Limit to first 3 inputs
+                        lines.append(f"  {err.split(':')[0]}: mismatch")
+                elif structural_failure:
+                    # Show structural error (compilation, dtype, signature, telemetry)
+                    lines.append(f"  Error: {structural_failure}")
 
     # OOM shapes - distinguish between required (problem) and optional (expected)
     oom_shapes = [s for s in stats["shape_details"] if s.get("oom")]
