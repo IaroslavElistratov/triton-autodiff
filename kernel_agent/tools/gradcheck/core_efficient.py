@@ -9,6 +9,9 @@ import torch
 from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict, List
 import traceback
 
+# Import telemetry counter to detect PyTorch/stub bypass
+from ...utils import _triton_launch_counter
+
 Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
 
@@ -139,10 +142,27 @@ def check_op_backward_with_reference(
         ref_inputs = [x.detach().clone().requires_grad_(True) if x.is_floating_point() else x
                      for x in test_inputs]
 
-        # Forward pass - Triton
+        # Guard against PyTorch/stub bypass: Ensure forward AND backward call Triton kernels
+        # LLM might write stubs using pure PyTorch (no Triton kernel calls),
+        # which would pass gradcheck but defeats the purpose.
+        # Solution: count Triton kernel launches and fail if zero.
+
+        # Install telemetry (idempotent - safe to call multiple times)
+        _triton_launch_counter.install()
+        # Forward pass - Triton (with telemetry)
+        _triton_launch_counter.reset()
+
         triton_out = triton_op(*triton_inputs, **test_kwargs)
         if not isinstance(triton_out, (list, tuple)):
             triton_out = (triton_out,)
+
+        # Verify that forward launched at least one Triton kernel
+        # Catch here because validation err, not structual err
+        try:
+            _triton_launch_counter.assert_launched(context="forward")
+        except RuntimeError as e:
+            stats["error"] = str(e)
+            return False, stats
 
         # Forward pass - PyTorch reference
         ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
@@ -170,22 +190,20 @@ def check_op_backward_with_reference(
             stats["error"] = "Forward outputs don't match between Triton and PyTorch reference"
             return False, stats
 
-        # TODO: Maybe add Triton kernel launch detection to prevent LLM from bypassing Triton entirely
-        # Problem: LLM might write backward_stub using pure PyTorch (no Triton kernel call),
-        # which would pass gradcheck but defeats the purpose.
-        #
-        # Potential solution: Hook into triton.runtime.jit.JITFunction.__call__ before backward pass:
-        #   1. Set flag kernel_launched = {"seen": False}
-        #   2. Wrap JITFunction.__call__ to set flag when any @triton.jit kernel executes
-        #   3. Call triton_loss.backward()
-        #   4. Check flag - if still False, return error "No Triton kernel detected during backward"
-        #   5. Restore original launcher in finally block
-        #
-        # This guards against reward-hacking.
+        # reset telemetry
+        _triton_launch_counter.reset()
 
         # Backward pass - Triton
         triton_loss = sum(o.sum() for o in triton_out if isinstance(o, torch.Tensor))
         triton_loss.backward()
+
+        # Verify that backward launched at least one Triton kernel
+        # Catch here because validation err, not structual err
+        try:
+            _triton_launch_counter.assert_launched(context="backward")
+        except RuntimeError as e:
+            stats["error"] = str(e)
+            return False, stats
 
         # Backward pass - PyTorch reference
         ref_loss = sum(o.sum() for o in ref_out if isinstance(o, torch.Tensor))

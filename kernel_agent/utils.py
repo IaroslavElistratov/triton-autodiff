@@ -161,6 +161,94 @@ def filter_traceback_for_llm(tb_string: str, bwd_fp: str) -> str:
     return result
 
 
+class _TritonLaunchCounter:
+    """
+    Triton kernel launch counter.
+
+    Guards against PyTorch/stub bypass by counting actual Triton kernel launches.
+    Reset before backward pass and check after to ensure backward launches Triton kernels.
+
+    Thread safety note:
+    - No lock on count increment: We only check (count == 0), so lost increments don't
+      create false negatives. If any launch happened, count > 0 regardless of races.
+    - Lock only in install() for idempotent monkey-patching.
+    """
+    def __init__(self):
+        self.count = 0
+        self._wrapped = False
+        self._orig_run = None
+        self._lock = threading.Lock()
+
+    def install(self):
+        """
+        Monkey-patch JITFunction.run to count launches.
+        Idempotent - safe to call multiple times (lock prevents double-patching).
+
+        Fails hard if Triton API changed (no silent degradation).
+        """
+        if self._wrapped:
+            return
+
+        with self._lock:
+            if self._wrapped:  # double-check after lock
+                return
+
+            from triton.runtime.jit import JITFunction
+            orig = JITFunction.run
+
+            # Fail hard if already wrapped by another instance (shouldn't happen with singleton)
+            if getattr(orig, '__telemetry_wrapped__', False):
+                raise RuntimeError(
+                    "Telemetry already installed by another instance. "
+                    "Multiple counter instances violate singleton pattern."
+                )
+
+            self._orig_run = orig
+            counter = self  # closure capture
+
+            def _run_with_count(self, *args, **kwargs):
+                # No lock needed: we only check count==0, lost increments don't matter
+                counter.count += 1
+                return counter._orig_run(self, *args, **kwargs)
+
+            # Mark as wrapped to prevent double-patching
+            _run_with_count.__telemetry_wrapped__ = True
+            JITFunction.run = _run_with_count
+            self._wrapped = True
+
+    def reset(self):
+        """Reset counter to zero. No lock needed (single write is atomic)."""
+        self.count = 0
+
+    def assert_launched(self, context="operation"):
+        """
+        Raise RuntimeError if no Triton kernel launches detected.
+
+        Args:
+            context: Description of the operation being checked (e.g., "backward")
+
+        Raises:
+            RuntimeError: If telemetry not installed or no launches detected
+        """
+        # Fail hard if install() was never called or failed
+        if not self._wrapped:
+            raise RuntimeError(
+                "Triton launch telemetry not installed; cannot verify kernel launches. "
+                "This indicates a setup issue."
+            )
+
+        # No lock needed: single read, and we only care about 0 vs non-zero
+        if self.count == 0:
+            raise RuntimeError(
+                f"No Triton kernel launches detected during {context}. "
+                "PyTorch/stub bypass detected - backward must call a @triton.jit kernel."
+            )
+
+
+# Module-level singleton
+_triton_launch_counter = _TritonLaunchCounter()
+
+
 def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     """
     Execute user's forward module, run its setup(), and return:
