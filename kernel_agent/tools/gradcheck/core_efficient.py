@@ -31,7 +31,7 @@ def check_forward_outputs_match(
     test_inputs: Sequence[Tensor],
     test_kwargs: Dict[str, Any],
     *,
-    # tolerances copied form triton tutorials
+    # tolerances copied from triton tutorials
     atol: float = 1e-2,
     rtol: float = 0.0,
     verbose: bool = True
@@ -58,10 +58,16 @@ def check_forward_outputs_match(
         triton_inputs = [x.detach().clone() for x in test_inputs]
         ref_inputs = [x.detach().clone() for x in test_inputs]
 
-        # Forward pass - Triton
+        # Forward pass - Triton (telemetry ensures stub truly calls Triton kernel)
+        _triton_launch_counter.install()
+        _triton_launch_counter.reset()
         triton_out = triton_op(*triton_inputs, **test_kwargs)
         if not isinstance(triton_out, (list, tuple)):
             triton_out = (triton_out,)
+        try:
+            _triton_launch_counter.assert_launched(context="forward")
+        except RuntimeError as e:
+            raise RuntimeError(f"Triton forward launch telemetry failure: {e}") from None
 
         # Forward pass - PyTorch reference
         ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
@@ -102,7 +108,7 @@ def check_forward_outputs_match(
         # NOTE: Naive reference impl can OOM, it's ok later we gonna omit errs on shapes marked as "required" in the user land.
         #
         # Let OOM propagate to sweep level for proper optional shape handling
-        # check_op_backward_numerical_sweep catches this and decides whether to skip optional shapes or fail required ones.
+        # check_op_backward_reference_sweep catches this and decides whether to skip optional shapes or fail required ones.
         raise
     except Exception as e:
         # Non-OOM errors: raise as failure
@@ -115,7 +121,7 @@ def check_forward_outputs_match(
         if verbose:
             print(f"[Reference Check] Exception during forward validation: {error_msg}")
             print(full_tb)
-            raise RuntimeError(f"Forward reference failure: {error_msg}") from None
+        raise RuntimeError(f"Forward reference failure: {error_msg}") from None
 
 
 def check_op_backward_with_reference(
@@ -295,38 +301,36 @@ def check_op_backward_with_reference(
         raise RuntimeError(f"Backward validation failure: {error_msg}") from None
 
 
-def check_op_backward_numerical_sweep(
+def check_op_backward_reference_sweep(
     my_op: Callable,
     sidecar: Dict[str, Any],
-    outputs: Any = "auto",
     *,
     atol: float = 1e-2,
     rtol: float = 0.0,
-    eps: float = 0.005,
     verbose: bool = True,
     forward_only: bool = False
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Main entry point for gradcheck using reference-based validation.
 
-    Validates Triton kernels against PyTorch reference implementation via autograd.
+    Validate Triton kernels against the PyTorch reference implementation via autograd.
 
     Args:
         my_op: Triton operation to test
         sidecar: Dict containing test configuration (SWEEP, make_args, pytorch_reference_impl)
-        outputs: Which outputs to check (unused, kept for compatibility)
         atol: Absolute tolerance for comparison
         rtol: Relative tolerance for comparison
-        eps: Step size (unused, kept for compatibility)
         verbose: Print detailed information
         forward_only: If True, only validate forward outputs (Phase 1)
 
     Returns:
         (all_passed, stats) where all_passed is True if all shapes pass
     """
+    # TODO(dtype-aware tolerances): tune atol/rtol per dtype once enough mismatch stats exist from real sweeps.
     # Get PyTorch reference implementation
     pytorch_ref = sidecar.get("pytorch_reference_impl")
     if pytorch_ref is None:
+        # TODO(fd_fallback): add optional finite-difference gradcheck when reference is unavailable.
         raise ValueError("pytorch_reference_impl not found in sidecar. "
                         "PyTorch reference must be provided for reference-based gradcheck.")
 
@@ -366,8 +370,8 @@ def check_op_backward_numerical_sweep(
             req_tag = "[REQUIRED]" if is_required else "[OPTIONAL]"
             print(f"\n[Reference Check] {req_tag} Testing shape {i+1}/{len(sweep)} ({validation_type}): {shape_params}")
 
-        # Generate test inputs
-        args, kwargs = make_args(shape_dict)
+        # Generate test inputs (strip helper metadata like required flag)
+        args, kwargs = make_args(shape_params)
 
         # Wrap in try-except for OOM handling (BOTH phases - see comment below)
         try:
@@ -490,12 +494,18 @@ def check_op_backward_numerical_sweep(
                 f"  1. Mark at least one small shape as required=True in SWEEP\n"
                 f"  2. Add smaller shapes to SWEEP (e.g., SEQ=128, required=True)\n"
             )
-            return False, {
+            failure_summary = dict(stats)
+            failure_summary.update({
                 "ok": False,
                 "error": error_msg,
                 "summary_text": error_msg,
-                "results": stats["shape_details"]
-            }
+                "results": stats["shape_details"],
+            })
+            # Do this because PerfTracker still inspects num_* keys even when this code path short-circuits here.
+            failure_summary["num_total"] = failure_summary.get("num_shapes", len(sweep))
+            failure_summary["num_passed"] = failure_summary.get("shapes_passed", 0)
+            failure_summary["num_failed"] = failure_summary.get("shapes_failed", 0)
+            return False, failure_summary
 
         # else: num_required > 0, but shapes_passed == 0
         # → Required shapes exist but all failed validation or OOMed
@@ -504,9 +514,13 @@ def check_op_backward_numerical_sweep(
         # → Fall through to normal return path for LLM retry with error details
 
     # Format summary for LLM
-    # I only surface the condensed summary_text to the orchestrator here, so the detailed per-shape
+    # Only surface the condensed summary_text to the orchestrator here, so the detailed per-shape
     # tracebacks stored in stats["shape_details"] never reach the prompt the model sees.
     stats["summary_text"] = _format_summary_for_llm(stats, forward_only)
+    # Do this because PerfTracker._full_parity consumes these aliases for gating.
+    stats["num_total"] = stats.get("num_shapes", 0)
+    stats["num_passed"] = stats.get("shapes_passed", 0)
+    stats["num_failed"] = stats.get("shapes_failed", 0)
 
     # Print minimal summary
     if verbose:
@@ -538,6 +552,9 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
     phase = "Forward" if forward_only else "Gradient"
     status = "PASSED" if stats["shapes_passed"] > 0 and stats["shapes_failed"] == 0 else "FAILED"
     lines.append(f"{phase} Validation: {status} ({stats['shapes_passed']}/{stats['num_shapes']} shapes passed)")
+    lines.append(
+        f"Totals: {int(stats.get('num_passed', 0))}/{int(stats.get('num_total', 0))} shapes passed"
+    )
 
     # Success case: early return with clean message
     if stats["shapes_failed"] == 0 and stats["shapes_passed"] > 0:

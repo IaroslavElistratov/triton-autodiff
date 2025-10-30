@@ -187,12 +187,9 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         from .utils import compile_kernel
         import torch as _t
 
-        # Import gradcheck function - uses PyTorch's torch.autograd.gradcheck
-        # Computes numerical gradients via finite differences: (f(x+eps) - f(x-eps))/(2*eps)
-        # Compares against analytical gradients from backward kernel
-        # Uses ONLY efficient Triton kernel (no naive torch_fn) → O(n) memory
+        # Validates Triton backward gradients against the PyTorch reference instead of finite differences
         from .tools.gradcheck.core_efficient import (
-            check_op_backward_numerical_sweep as gradcheck_fn,
+            check_op_backward_reference_sweep as gradcheck_fn,
         )
 
         # CRITICAL: compile_kernel runs FIRST in this child process:
@@ -238,10 +235,11 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         forward_only = os.environ.get("GRADCHECK_FORWARD_ONLY", "0") == "1"
 
         ok, stats = gradcheck_fn(
-            my_op=op, sidecar=sidecar, outputs="auto",
-            atol=atol, rtol=rtol,
-            eps=0.005,
-            forward_only=forward_only
+            my_op=op,
+            sidecar=sidecar,
+            atol=atol,
+            rtol=rtol,
+            forward_only=forward_only,
         )
         # Temporarily disable final unguarded synchronize here.
         # (Per-shape sync inside core_efficient.py already surfaced and recorded sticky CUDA faults;
