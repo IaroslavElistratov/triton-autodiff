@@ -16,24 +16,10 @@ from ...utils import _triton_launch_counter
 # Validation contract: “true” means gradients match the PyTorch reference.
 # Any other failure that prevents producing comparable tensors (runtime error, telemetry check, compile breakage)
 # raises immediately instead of pretending the sweep succeeded.
-
-class ValidationRuntimeError(RuntimeError):
-    """Raised when runtime failures prevent gradcheck from completing.
-
-    Subclass RuntimeError (instead of a generic Exception) to make the intent explicit: this
-    represents execution-time faults (CUDA asserts, telemetry checks, compile breakage) rather
-    than “gradients mismatched”. The worker wrapper catches it and surfaces the payload to
-    run_with_fix so structural issues are routed as hard failures instead of being mistaken for
-    parity mismatches.
-    """
-
-    def __init__(self,
-                 message: str,
-                 traceback_text: Optional[str] = None,
-                 summary: Optional[str] = None) -> None:
-        super().__init__(message)
-        self.traceback_text = traceback_text
-        self.summary = summary
+# Represents execution-time faults (CUDA asserts, telemetry checks, compile breakage) rather
+# than “gradients mismatched”. The worker wrapper catches it and surfaces the payload to
+# run_with_fix so structural issues are routed as hard failures instead of being mistaken for
+# parity mismatches.
 
 Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
@@ -85,9 +71,8 @@ def check_forward_outputs_match(
         # Check output arity (must have same number of outputs)
         if len(triton_out) != len(ref_out):
             msg = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
-            raise ValidationRuntimeError(
-                msg,
-                summary=f"Forward reference validation failed: {msg}",
+            raise RuntimeError(
+                f"Forward reference validation failed: {msg}",
             )
 
         # Check: forward outputs must match
@@ -130,11 +115,7 @@ def check_forward_outputs_match(
         if verbose:
             print(f"[Reference Check] Exception during forward validation: {error_msg}")
             print(full_tb)
-        raise ValidationRuntimeError(
-            error_msg,
-            traceback_text=full_tb,
-            summary=f"Forward reference failure: {error_msg}",
-        ) from e
+            raise RuntimeError(f"Forward reference failure: {error_msg}") from None
 
 
 def check_op_backward_with_reference(
@@ -190,10 +171,7 @@ def check_op_backward_with_reference(
             _triton_launch_counter.assert_launched(context="forward")
         except RuntimeError as e:
             msg = str(e)
-            raise ValidationRuntimeError(
-                msg,
-                summary=f"Triton forward launch telemetry failure: {msg}",
-            ) from e
+            raise RuntimeError(f"Triton forward launch telemetry failure: {msg}") from None
 
         # Forward pass - PyTorch reference
         ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
@@ -202,10 +180,7 @@ def check_op_backward_with_reference(
 
         if len(triton_out) != len(ref_out):
             msg = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
-            raise ValidationRuntimeError(
-                msg,
-                summary=f"Backward validation failed: {msg}",
-            )
+            raise RuntimeError(f"Backward validation failed: {msg}") from None
 
         # First check: forward outputs must match. A mismatch means the kernel executed but produced
         # different values, so we capture it in stats and let the parity path handle the fix.
@@ -250,10 +225,7 @@ def check_op_backward_with_reference(
             _triton_launch_counter.assert_launched(context="backward")
         except RuntimeError as e:
             msg = str(e)
-            raise ValidationRuntimeError(
-                msg,
-                summary=f"Triton backward launch telemetry failure: {msg}",
-            ) from e
+            raise RuntimeError(f"Triton backward launch telemetry failure: {msg}") from None
 
         # Backward pass - PyTorch reference
         ref_loss = sum(o.sum() for o in ref_out if isinstance(o, torch.Tensor))
@@ -320,11 +292,7 @@ def check_op_backward_with_reference(
         if verbose:
             print(f"[Reference Check] Exception during validation: {error_msg}")
             print(full_tb)
-        raise ValidationRuntimeError(
-            error_msg,
-            traceback_text=full_tb,
-            summary=f"Backward validation failure: {error_msg}",
-        ) from e
+        raise RuntimeError(f"Backward validation failure: {error_msg}") from None
 
 
 def check_op_backward_numerical_sweep(
@@ -470,21 +438,16 @@ def check_op_backward_numerical_sweep(
             # Continue to next shape (don't return immediately - test all shapes)
             continue
 
-        # we’re not swallowing ValidationRuntimeError. We catch the exception purely to enrich
-        # it with shape context before re-raising. Without that wrapper we’d only get
-        # “ValidationRuntimeError: cuda illegal access,” which is hard to debug when there
-        # are multiple shapes in the sweep. The block builds a message like: ValidationRuntimeError(...)  [shape: B=1, NUM_HEADS=8, ...]
-        # and then rethrows, preserving the original traceback (and summary if we had one). That
-        # augmented exception bubbles up to _gradcheck_child, which in turn hands it to run_with_fix,
-        # so the orchestrator still treats it as a hard runtime failure
-        except ValidationRuntimeError as err:
+        # we’re not swallowing RuntimeError. We catch the exception purely to enrich it with shape context
+        # before re-raising. Without that wrapper we’d only get “RuntimeError: cuda illegal access,” which is
+        # hard to debug when there are multiple shapes in the sweep. The block builds a message like:
+        # RuntimeError(...)  [shape: B=1, NUM_HEADS=8, ...]
+        # and then rethrows, preserving the original traceback. That augmented exception bubbles up to
+        # _gradcheck_child, which in turn hands it to run_with_fix, so the orchestrator still treats it as
+        # a hard runtime failure.
+        except RuntimeError as err:
             shape_str = ", ".join(f"{k}={v}" for k, v in shape_params.items())
-            summary = err.summary or f"Shape {shape_str}: {err}"
-            raise ValidationRuntimeError(
-                f"{err} [shape: {shape_str}]",
-                getattr(err, "traceback_text", None),
-                summary,
-            ) from err
+            raise RuntimeError(f"{err} [shape: {shape_str}]") from err
 
         # Force any sticky CUDA errors to surface NOW before next iteration
         # Explicit synchronize after each shape test to catch errors before next make_args().
@@ -502,11 +465,7 @@ def check_op_backward_numerical_sweep(
             sync_msg = f"{type(e).__name__}: {e}"
             if verbose:
                 print(f"[Reference Check] CUDA sync error after shape {i+1}: {sync_msg}")
-            raise ValidationRuntimeError(
-                f"CUDA sync error after shape {i+1}: {sync_msg}",
-                traceback.format_exc(),
-                f"CUDA sync error after shape {i+1}: {sync_msg}",
-            ) from e
+            raise RuntimeError(f"CUDA sync error after shape {i+1}: {sync_msg}") from e
 
     # FEATURE: Vacuous Truth Prevention
     # LOGIC:

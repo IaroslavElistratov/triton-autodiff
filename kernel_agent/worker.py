@@ -251,7 +251,7 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         q.put((bool(ok), stats))
         status_ok = True
     # comment:
-    # all exceptions including ValidationRuntimeError
+    # all exceptions (including the structural runtime errors raised by gradcheck helpers)
     except BaseException as e:
         # Catch exceptions during gradcheck and send traceback to parent for LLM.
         # Flow: child puts traceback in queue + exits with code 1 → parent raises RuntimeError
@@ -275,10 +275,6 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         import traceback
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         payload = {"etype": type(e).__name__, "emsg": str(e), "traceback": tb}
-        # optional summary from ValidationRuntimeError (if that's the err type being raised)
-        summary = getattr(e, "summary", None)
-        if summary:
-            payload["summary"] = summary
         q.put(payload)
     finally:
         try:
