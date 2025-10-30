@@ -191,7 +191,9 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Computes numerical gradients via finite differences: (f(x+eps) - f(x-eps))/(2*eps)
         # Compares against analytical gradients from backward kernel
         # Uses ONLY efficient Triton kernel (no naive torch_fn) → O(n) memory
-        from .tools.gradcheck.core_efficient import check_op_backward_numerical_sweep as gradcheck_fn
+        from .tools.gradcheck.core_efficient import (
+            check_op_backward_numerical_sweep as gradcheck_fn,
+        )
 
         # CRITICAL: compile_kernel runs FIRST in this child process:
         # - Executes fwd_fp (attention.py) → hook fires → loads stubs from raised.py
@@ -241,13 +243,15 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
             eps=0.005,
             forward_only=forward_only
         )
-        # Force async CUDA errors to surface - if this raises, outer except will handle it
-        _t.cuda.synchronize()
-        # # Note: GPU cleanup could be done here, but outer except/finally handles it
-        # # Try to clean up GPU state before exiting
-        # _t.cuda.empty_cache()
+        # Temporarily disable final unguarded synchronize here.
+        # (Per-shape sync inside core_efficient.py already surfaced and recorded sticky CUDA faults;
+        # a final global sync would simply re-raise the same accelerator error and replace the detailed
+        # per-shape stats with a generic synchronize traceback.)
+        # _t.cuda.synchronize()
         q.put((bool(ok), stats))
         status_ok = True
+    # comment:
+    # all exceptions including ValidationRuntimeError
     except BaseException as e:
         # Catch exceptions during gradcheck and send traceback to parent for LLM.
         # Flow: child puts traceback in queue + exits with code 1 → parent raises RuntimeError
@@ -270,7 +274,12 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Orchestrator receives stats dict and shows it to LLM separately (not as filtered traceback).
         import traceback
         tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        q.put({"etype": type(e).__name__, "emsg": str(e), "traceback": tb})
+        payload = {"etype": type(e).__name__, "emsg": str(e), "traceback": tb}
+        # optional summary from ValidationRuntimeError (if that's the err type being raised)
+        summary = getattr(e, "summary", None)
+        if summary:
+            payload["summary"] = summary
+        q.put(payload)
     finally:
         try:
             q.close(); q.join_thread()
@@ -403,5 +412,3 @@ def run_bench_child(fwd_fp: str, overwrite_fp: str | None):
         err.worker_payload = payload  # Attach payload dict as attribute
         raise err
     return payload  # cand dict
-
-

@@ -197,6 +197,14 @@ class KernelOptimizer:
     # expose the below method to "run and retry" which takes in a callable, so that in the orchestrator's loop I can call
     # self.run_with_fix(run_gradcheck_child) and then self.run_with_fix(run_bench_child) to restore compile-fix semantics
     def run_with_fix(self, it, fn, temperature, err_category):
+        # Design contract:
+        #   * Worker-side exceptions (crashes, telemetry, signature issues) bubble here, so we
+        #     filter the traceback and hand the LLM an immediate “fix” turn via the strategy’s
+        #     exception header.
+        #   * Only when the worker succeeds do we hand the payload back; parity=False is handled
+        #     later in the main loop, triggering the grad-mismatch prompt.
+        # This keeps runtime failures and pure grad mismatches on separate paths and avoids duplicate
+        # prompts for the same underlying fault.
         try:
             return True, fn()
         # raise only UserError, catch the rest of the errors
@@ -204,10 +212,6 @@ class KernelOptimizer:
             # User-facing forward-file error: do not loop, surface to caller
             raise ue
         except Exception as ce:
-
-            # for initial build (outside the optimization loop), bubble up
-            if it is None:
-                raise ce
 
             # Extract and filter traceback before showing to LLM.
             # Worker errors (from compile/gradcheck/bench children) attach structured payload with full traceback.
@@ -227,6 +231,7 @@ class KernelOptimizer:
             #   - Validation errors: Only error MESSAGE shown via summary_text (no traceback)
             #   - Structural errors: Full FILTERED TRACEBACK shown to LLM (we filter here)
             # Orchestrator does NOT re-filter validation error tracebacks - those never reach LLM.
+            # Only validation errs do, but not validation tracebacks.
             import traceback
             if hasattr(ce, 'worker_payload') and isinstance(ce.worker_payload, dict):
                 payload = ce.worker_payload
@@ -479,7 +484,8 @@ class KernelOptimizer:
                 parity_ok, grad_stats = payload_gradcheck
                 if VERBOSE: print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
-                # Extract formatted summary for Phase 2 (gradcheck)
+                # Extract formatted summary for Phase 2 (gradcheck). By design, reaching here means the kernel ran;
+                # only numerical mismatches (parity_ok == False) will trigger the fix branch below.
                 check_summary = grad_stats.get("summary_text", str(grad_stats))
                 check_stats = grad_stats
 

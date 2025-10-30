@@ -12,6 +12,29 @@ import traceback
 # Import telemetry counter to detect PyTorch/stub bypass
 from ...utils import _triton_launch_counter
 
+
+# Validation contract: “true” means gradients match the PyTorch reference.
+# Any other failure that prevents producing comparable tensors (runtime error, telemetry check, compile breakage)
+# raises immediately instead of pretending the sweep succeeded.
+
+class ValidationRuntimeError(RuntimeError):
+    """Raised when runtime failures prevent gradcheck from completing.
+
+    Subclass RuntimeError (instead of a generic Exception) to make the intent explicit: this
+    represents execution-time faults (CUDA asserts, telemetry checks, compile breakage) rather
+    than “gradients mismatched”. The worker wrapper catches it and surfaces the payload to
+    run_with_fix so structural issues are routed as hard failures instead of being mistaken for
+    parity mismatches.
+    """
+
+    def __init__(self,
+                 message: str,
+                 traceback_text: Optional[str] = None,
+                 summary: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.traceback_text = traceback_text
+        self.summary = summary
+
 Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
 
@@ -61,8 +84,11 @@ def check_forward_outputs_match(
 
         # Check output arity (must have same number of outputs)
         if len(triton_out) != len(ref_out):
-            stats["structural_error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
-            return False, stats
+            msg = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            raise ValidationRuntimeError(
+                msg,
+                summary=f"Forward reference validation failed: {msg}",
+            )
 
         # Check: forward outputs must match
         all_match = True
@@ -91,10 +117,10 @@ def check_forward_outputs_match(
         # NOTE: Naive reference impl can OOM, it's ok later we gonna omit errs on shapes marked as "required" in the user land.
         #
         # Let OOM propagate to sweep level for proper optional shape handling
-        # Sweep level will catch this and either fail (required) or skip (optional)
+        # check_op_backward_numerical_sweep catches this and decides whether to skip optional shapes or fail required ones.
         raise
     except Exception as e:
-        # Non-OOM errors: return as failure with diagnostics
+        # Non-OOM errors: raise as failure
         full_tb = traceback.format_exc()
         # Include exception type in error message (e.g., "CompilationError: <message>")
         # Triton errors show code location but str(e) may not include WHAT error occurred,
@@ -103,10 +129,12 @@ def check_forward_outputs_match(
         error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         if verbose:
             print(f"[Reference Check] Exception during forward validation: {error_msg}")
-            print(full_tb)  # Raw traceback for debugging (printed here, not stored)
-        # NOTE: Only error message shown to LLM (via _format_summary_for_llm → summary_text)
-        stats["structural_error"] = error_msg
-        return False, stats
+            print(full_tb)
+        raise ValidationRuntimeError(
+            error_msg,
+            traceback_text=full_tb,
+            summary=f"Forward reference failure: {error_msg}",
+        ) from e
 
 
 def check_op_backward_with_reference(
@@ -161,33 +189,52 @@ def check_op_backward_with_reference(
         try:
             _triton_launch_counter.assert_launched(context="forward")
         except RuntimeError as e:
-            stats["structural_error"] = str(e)
-            return False, stats
+            msg = str(e)
+            raise ValidationRuntimeError(
+                msg,
+                summary=f"Triton forward launch telemetry failure: {msg}",
+            ) from e
 
         # Forward pass - PyTorch reference
         ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
 
-        # Check output arity (must have same number of outputs)
         if len(triton_out) != len(ref_out):
-            stats["structural_error"] = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
-            return False, stats
+            msg = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            raise ValidationRuntimeError(
+                msg,
+                summary=f"Backward validation failed: {msg}",
+            )
 
-        # First check: forward outputs must match
+        # First check: forward outputs must match. A mismatch means the kernel executed but produced
+        # different values, so we capture it in stats and let the parity path handle the fix.
         forward_match = True
+        forward_mismatches = []
         for i, (t_out, r_out) in enumerate(zip(triton_out, ref_out)):
             if isinstance(t_out, torch.Tensor) and isinstance(r_out, torch.Tensor):
+                # comment:
+                # numeric mismatch errs are not raised (so child doesn't fails and orchestrator.run_with_fix doesn't trigger),
+                # instead the main orchestrator loop checks flag parity_ok (here named forward_match/backward_match) and if not, advances to the next iter
+                #
+                # If the kernel ran but produced a different output (which doesn't match with reference) we
+                # treat it as a numerical failure so the orchestrator can surface it via the parity branch
+                # instead of raising that err (which would trigger orchestrator's run_with_fix to re-prompt)
+                #
+                # Numerical mismatches fall through so the orchestrator can handle them via the parity branch.
                 try:
                     torch.testing.assert_close(t_out, r_out, atol=atol, rtol=rtol)
                 except AssertionError as e:
                     if verbose:
                         print(f"[Reference Check] Forward output {i} mismatch: {e}")
+                    forward_mismatches.append(f"Output {i}: {e}")
                     forward_match = False
                     break
 
         if not forward_match:
-            stats["structural_error"] = "Forward outputs don't match between Triton and PyTorch reference"
+            stats["forward_match"] = False
+            stats["forward_mismatches"] = forward_mismatches
+            stats["error"] = "Forward outputs don't match between Triton and PyTorch reference"
             return False, stats
 
         # reset telemetry
@@ -202,8 +249,11 @@ def check_op_backward_with_reference(
         try:
             _triton_launch_counter.assert_launched(context="backward")
         except RuntimeError as e:
-            stats["structural_error"] = str(e)
-            return False, stats
+            msg = str(e)
+            raise ValidationRuntimeError(
+                msg,
+                summary=f"Triton backward launch telemetry failure: {msg}",
+            ) from e
 
         # Backward pass - PyTorch reference
         ref_loss = sum(o.sum() for o in ref_out if isinstance(o, torch.Tensor))
@@ -238,6 +288,8 @@ def check_op_backward_with_reference(
                 torch.testing.assert_close(t_inp.grad, r_inp.grad, atol=atol, rtol=rtol)
                 if verbose:
                     print(f"[Reference Check] Input {i} gradients match ✓")
+            # comment:
+            # Numerical mismatches fall through so the orchestrator can handle them via the parity branch
             except AssertionError as e:
                 backward_match = False
                 backward_mismatches.append(f"Input {i}: {e}")
@@ -251,7 +303,6 @@ def check_op_backward_with_reference(
                     print(f"  [DEBUG] Ground truth (ref) first 20: {ref_flat}")
                     print(f"  [DEBUG] Model (triton) first 20:    {triton_flat}")
 
-        stats["forward_match"] = forward_match
         stats["gradient_match"] = backward_match
         stats["backward_mismatches"] = backward_mismatches
 
@@ -262,17 +313,18 @@ def check_op_backward_with_reference(
         # Sweep level will catch this and either fail (required) or skip (optional)
         raise
     except Exception as e:
-        # Non-OOM errors: return as failure with diagnostics
         full_tb = traceback.format_exc()
         # Include exception type in error message (e.g., "CompilationError: <message>")
         # Example: "CompilationError: Both operands must be same dtype" vs just "at 51:14: dv += tl.dot(...) ^"
         error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
         if verbose:
             print(f"[Reference Check] Exception during validation: {error_msg}")
-            print(full_tb)  # Raw traceback for debugging (printed here, not stored)
-        # NOTE: Only error message shown to LLM (via _format_summary_for_llm → summary_text)
-        stats["structural_error"] = error_msg
-        return False, stats
+            print(full_tb)
+        raise ValidationRuntimeError(
+            error_msg,
+            traceback_text=full_tb,
+            summary=f"Backward validation failure: {error_msg}",
+        ) from e
 
 
 def check_op_backward_numerical_sweep(
@@ -418,6 +470,22 @@ def check_op_backward_numerical_sweep(
             # Continue to next shape (don't return immediately - test all shapes)
             continue
 
+        # we’re not swallowing ValidationRuntimeError. We catch the exception purely to enrich
+        # it with shape context before re-raising. Without that wrapper we’d only get
+        # “ValidationRuntimeError: cuda illegal access,” which is hard to debug when there
+        # are multiple shapes in the sweep. The block builds a message like: ValidationRuntimeError(...)  [shape: B=1, NUM_HEADS=8, ...]
+        # and then rethrows, preserving the original traceback (and summary if we had one). That
+        # augmented exception bubbles up to _gradcheck_child, which in turn hands it to run_with_fix,
+        # so the orchestrator still treats it as a hard runtime failure
+        except ValidationRuntimeError as err:
+            shape_str = ", ".join(f"{k}={v}" for k, v in shape_params.items())
+            summary = err.summary or f"Shape {shape_str}: {err}"
+            raise ValidationRuntimeError(
+                f"{err} [shape: {shape_str}]",
+                getattr(err, "traceback_text", None),
+                summary,
+            ) from err
+
         # Force any sticky CUDA errors to surface NOW before next iteration
         # Explicit synchronize after each shape test to catch errors before next make_args().
         # - Prevents misleading tracebacks: Error surfaces HERE (after kernel execution),
@@ -430,10 +498,15 @@ def check_op_backward_numerical_sweep(
         #   With this sync: Error caught here after shape N test, before shape N+1 begins
         try:
             torch.cuda.synchronize()
-        except Exception:
-            # If CUDA error surfaces here, re-raise to propagate out of sweep loop
-            # This will be caught by worker.py and shown to LLM with filtered traceback
-            raise
+        except Exception as e:
+            sync_msg = f"{type(e).__name__}: {e}"
+            if verbose:
+                print(f"[Reference Check] CUDA sync error after shape {i+1}: {sync_msg}")
+            raise ValidationRuntimeError(
+                f"CUDA sync error after shape {i+1}: {sync_msg}",
+                traceback.format_exc(),
+                f"CUDA sync error after shape {i+1}: {sync_msg}",
+            ) from e
 
     # FEATURE: Vacuous Truth Prevention
     # LOGIC:
@@ -472,6 +545,8 @@ def check_op_backward_numerical_sweep(
         # → Fall through to normal return path for LLM retry with error details
 
     # Format summary for LLM
+    # I only surface the condensed summary_text to the orchestrator here, so the detailed per-shape
+    # tracebacks stored in stats["shape_details"] never reach the prompt the model sees.
     stats["summary_text"] = _format_summary_for_llm(stats, forward_only)
 
     # Print minimal summary
@@ -490,9 +565,8 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
     Focus on failures and actionable errors - omit passed shapes.
 
     Error taxonomy:
-    - forward_mismatches / backward_mismatches: Numerical correctness failures (arrays)
-    - structural_error: Compilation, dtype, signature, telemetry errors (single message)
-    - OOM: Handled separately at sweep level
+    - forward_mismatches / backward_mismatches: numerical correctness failures
+    - OOM entries are handled separately at sweep level
 
     Tracebacks NOT included in stats (printed directly in verbose mode for debugging).
     This function extracts ERROR MESSAGES ONLY (not tracebacks) from stats.
@@ -525,31 +599,19 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
             # Extract error details from shape stats
             shape_stats = shape_info.get("stats", {})
 
-            # Try numerical mismatches first (arrays), then structural errors (single message)
+            # At this point only numerical mismatches remain; all runtime failures raise and are handled via run_with_fix.
+            # note there can only be numeric mismatch errs and no structural errs
+            # all errs besides numeric mismatches -- should be raised so that
+            # child catches them and returns child_run_ok=False to run_with_fix
+            # causes to re-prompt llm
             if forward_only:
-                # Forward phase: numerical mismatches or structural errors
                 numerical_failures = shape_stats.get("forward_mismatches", [])
-                structural_failure = shape_stats.get("structural_error")
-
-                if numerical_failures:
-                    # Show numerical mismatches (forward outputs don't match reference)
-                    for err in numerical_failures[:3]:  # Limit to first 3 outputs
-                        lines.append(f"  {err.split(':')[0]}: mismatch")
-                elif structural_failure:
-                    # Show structural error (compilation, dtype, signature, telemetry)
-                    lines.append(f"  Error: {structural_failure}")
+                for err in numerical_failures[:3]:
+                    lines.append(f"  {err.split(':')[0]}: mismatch")
             else:
-                # Backward phase: numerical mismatches or structural errors
                 numerical_failures = shape_stats.get("backward_mismatches", [])
-                structural_failure = shape_stats.get("structural_error")
-
-                if numerical_failures:
-                    # Show numerical mismatches (gradients don't match reference)
-                    for err in numerical_failures[:3]:  # Limit to first 3 inputs
-                        lines.append(f"  {err.split(':')[0]}: mismatch")
-                elif structural_failure:
-                    # Show structural error (compilation, dtype, signature, telemetry)
-                    lines.append(f"  Error: {structural_failure}")
+                for err in numerical_failures[:3]:
+                    lines.append(f"  {err.split(':')[0]}: mismatch")
 
     # OOM shapes - distinguish between required (problem) and optional (expected)
     oom_shapes = [s for s in stats["shape_details"] if s.get("oom")]
