@@ -67,7 +67,9 @@ def check_forward_outputs_match(
         try:
             _triton_launch_counter.assert_launched(context="forward")
         except RuntimeError as e:
-            raise RuntimeError(f"Triton forward launch telemetry failure: {e}") from None
+            raise RuntimeError(
+                f"Forward validation failed: Triton forward launch telemetry error: {e}"
+            ) from None
 
         # Forward pass - PyTorch reference
         ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
@@ -76,10 +78,10 @@ def check_forward_outputs_match(
 
         # Check output arity (must have same number of outputs)
         if len(triton_out) != len(ref_out):
-            msg = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
+            msg = f"Triton produced {len(triton_out)} outputs, reference produced {len(ref_out)}"
             raise RuntimeError(
-                f"Forward reference validation failed: {msg}",
-            )
+                f"Forward validation failed: output arity mismatch ({msg})",
+            ) from None
 
         # Check: forward outputs must match
         all_match = True
@@ -89,10 +91,8 @@ def check_forward_outputs_match(
             if isinstance(t_out, torch.Tensor) and isinstance(r_out, torch.Tensor):
                 try:
                     torch.testing.assert_close(t_out, r_out, atol=atol, rtol=rtol)
-                    # Also compute actual max difference for transparency
-                    max_diff = (t_out - r_out).abs().max().item()
                     if verbose:
-                        print(f"[Reference Check] Output {i} matches ✓ (max_diff={max_diff:.6f}, atol={atol})")
+                        print(f"[Reference Check] Output {i} matches ✓ (atol={atol})")
                 except AssertionError as e:
                     all_match = False
                     forward_mismatches.append(f"Output {i}: {e}")
@@ -121,7 +121,7 @@ def check_forward_outputs_match(
         if verbose:
             print(f"[Reference Check] Exception during forward validation: {error_msg}")
             print(full_tb)
-        raise RuntimeError(f"Forward reference failure: {error_msg}") from None
+        raise RuntimeError(f"Forward validation failed: {error_msg}") from None
 
 
 def check_op_backward_with_reference(
@@ -177,7 +177,9 @@ def check_op_backward_with_reference(
             _triton_launch_counter.assert_launched(context="forward")
         except RuntimeError as e:
             msg = str(e)
-            raise RuntimeError(f"Triton forward launch telemetry failure: {msg}") from None
+            raise RuntimeError(
+                f"Backward validation precheck failed: Triton forward launch telemetry error: {msg}"
+            ) from None
 
         # Forward pass - PyTorch reference
         ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
@@ -185,8 +187,19 @@ def check_op_backward_with_reference(
             ref_out = (ref_out,)
 
         if len(triton_out) != len(ref_out):
-            msg = f"Output count mismatch: Triton returned {len(triton_out)} outputs, reference returned {len(ref_out)}"
-            raise RuntimeError(f"Backward validation failed: {msg}") from None
+            msg = f"Triton produced {len(triton_out)} outputs, reference produced {len(ref_out)}"
+            raise RuntimeError(
+                f"Backward validation precheck failed: forward arity mismatch ({msg})"
+            ) from None
+
+        # Only float outputs participate in backward; ints/bools can't build a grad graph
+        tensor_outputs = [
+            o for o in triton_out if isinstance(o, torch.Tensor) and o.is_floating_point()
+        ]
+        if not tensor_outputs:
+            raise RuntimeError(
+                "Backward validation precheck failed: no floating-point outputs to differentiate"
+            ) from None
 
         # First check: forward outputs must match. A mismatch means the kernel executed but produced
         # different values, so we capture it in stats and let the parity path handle the fix.
@@ -222,7 +235,13 @@ def check_op_backward_with_reference(
         _triton_launch_counter.reset()
 
         # Backward pass - Triton
-        triton_loss = sum(o.sum() for o in triton_out if isinstance(o, torch.Tensor))
+        # Build scalar loss from differentiable outputs only
+        triton_terms = [o.sum() for o in tensor_outputs]
+        if not triton_terms:
+            raise RuntimeError(
+                "Backward validation failed: no floating-point outputs contributed to the loss"
+            ) from None
+        triton_loss = sum(triton_terms)
         triton_loss.backward()
 
         # Verify that backward launched at least one Triton kernel
@@ -231,15 +250,29 @@ def check_op_backward_with_reference(
             _triton_launch_counter.assert_launched(context="backward")
         except RuntimeError as e:
             msg = str(e)
-            raise RuntimeError(f"Triton backward launch telemetry failure: {msg}") from None
+            raise RuntimeError(
+                f"Backward validation failed: Triton backward launch telemetry error: {msg}"
+            ) from None
 
         # Backward pass - PyTorch reference
-        ref_loss = sum(o.sum() for o in ref_out if isinstance(o, torch.Tensor))
+        # Mirror Triton loss: reference should backprop through the same float outputs.
+        ref_terms = [
+            o.sum()
+            for o in ref_out
+            if isinstance(o, torch.Tensor) and o.is_floating_point()
+        ]
+        if not ref_terms:
+            raise RuntimeError(
+                "Backward validation failed: reference produced no floating-point outputs to differentiate"
+            ) from None
+        ref_loss = sum(ref_terms)
         ref_loss.backward()
 
         # Compare gradients
         backward_match = True
         backward_mismatches = []
+
+        compared_any_grad = False
 
         for i, (t_inp, r_inp) in enumerate(zip(triton_inputs, ref_inputs)):
             # Skip non-tensor or non-floating inputs
@@ -249,6 +282,8 @@ def check_op_backward_with_reference(
             # Check gradient presence parity (both None or both not None)
             t_has_grad = hasattr(t_inp, 'grad') and t_inp.grad is not None
             r_has_grad = hasattr(r_inp, 'grad') and r_inp.grad is not None
+            if t_has_grad or r_has_grad:
+                compared_any_grad = True
 
             if t_has_grad != r_has_grad:
                 backward_match = False
@@ -264,6 +299,7 @@ def check_op_backward_with_reference(
             # Both have gradients - compare them
             try:
                 torch.testing.assert_close(t_inp.grad, r_inp.grad, atol=atol, rtol=rtol)
+                compared_any_grad = True
                 if verbose:
                     print(f"[Reference Check] Input {i} gradients match ✓")
             # comment:
@@ -283,6 +319,11 @@ def check_op_backward_with_reference(
 
         stats["gradient_match"] = backward_match
         stats["backward_mismatches"] = backward_mismatches
+
+        if not compared_any_grad:
+            raise RuntimeError(
+                "Backward validation failed: no differentiable inputs produced gradients"
+            ) from None
 
         return backward_match, stats
 
@@ -513,14 +554,14 @@ def check_op_backward_reference_sweep(
         all_passed = False  # Ensure we signal failure to orchestrator for LLM retry
         # → Fall through to normal return path for LLM retry with error details
 
+    # Alias counts for downstream consumers (PerfTracker, summary text, etc.)
+    stats["num_total"] = stats.get("num_shapes", 0)
+    stats["num_passed"] = stats.get("shapes_passed", 0)
+    stats["num_failed"] = stats.get("shapes_failed", 0)
     # Format summary for LLM
     # Only surface the condensed summary_text to the orchestrator here, so the detailed per-shape
     # tracebacks stored in stats["shape_details"] never reach the prompt the model sees.
     stats["summary_text"] = _format_summary_for_llm(stats, forward_only)
-    # Do this because PerfTracker._full_parity consumes these aliases for gating.
-    stats["num_total"] = stats.get("num_shapes", 0)
-    stats["num_passed"] = stats.get("shapes_passed", 0)
-    stats["num_failed"] = stats.get("shapes_failed", 0)
 
     # Print minimal summary
     if verbose:
