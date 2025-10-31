@@ -392,6 +392,10 @@ def check_op_backward_reference_sweep(
     if not make_args:
         raise ValueError("make_args not found in sidecar")
 
+    # Do this because optional crashes should fire only after required mismatches already surfaced.
+    # That reduces the chance an optional crash fires before you even gather the required mismatches.
+    sweep = sorted(sweep, key=lambda s: not s.get("required", True))
+
     stats = {
         "method": "reference",
         "validation_type": "forward_only" if forward_only else "full_gradcheck",
@@ -549,14 +553,41 @@ def check_op_backward_reference_sweep(
             partial_stats["num_failed"] = partial_stats.get("shapes_failed", 0)
 
             partial_summary = _format_summary_for_llm(partial_stats, forward_only)
+            mismatch_key = "forward_mismatches" if forward_only else "backward_mismatches"
+            req_mismatches = [
+                s for s in stats.get("shape_details", [])
+                if s.get("required", True)
+                and s.get("passed") is False
+                and not s.get("oom")
+                and s.get("stats", {}).get(mismatch_key)
+            ]
             notes = [
                 f"[shape: {shape_str}]",
                 progress_line,
                 # Preserve numeric/oom context alongside the traceback.
                 f"Details captured before aborting:\n{partial_summary}",
             ]
-            # downstream (worker -> orchestrator) only surfaces str(err), so inline the sweep summary here into the err msg
-            combined = f"{err}\n\n" + "\n\n".join(notes)
+            # When an OPTIONAL shape crashes after earlier REQUIRED numeric mismatches, the sweep still re-raises the runtime error. That promotes
+            # the optional crash to the top-level gradcheck_error=RuntimeError: ... illegal memory access headline, even though the primary issue in the same sweep is required-shape mismatch.
+            # This keeps the same exception type (so orchestrator behavior is unchanged) but flips the message priority so the banner
+            # starts with “REQUIRED shape(s) have numerical mismatches…”, which is what I want the model to fix first.
+            # (Otherwise it'd start with “illegal memory access…” (OOM) raised form running on an optional shape -- which is less important than mismatch on prior required shapes) 
+            #
+            # Optional crash hijacks the banner: when an OPTIONAL shape hits an illegal-memory-access OOM after earlier REQUIRED mismatches, we still re-raise that runtime error,
+            # so gradcheck_error=RuntimeError…illegal memory access becomes the headline even though the real problem is the required-shape mismatch.
+            # By restacking str(err) to lead with the aggregated summary, the exception type stays the same (orchestrator logic unchanged)
+            # but the banner now starts with “REQUIRED shape(s) have numerical mismatches…” and demotes the optional crash to secondary detail—stopping the model from chasing the wrong issue.
+            phase = "Forward" if forward_only else "Backward"
+
+            if req_mismatches and not is_required:
+                headline = (
+                    f"{phase} validation failed: {len(req_mismatches)} REQUIRED shape(s) have numerical mismatches. "
+                    f"An OPTIONAL shape then crashed: {type(err).__name__}: {err}"
+                )
+            else:
+                headline = f"{phase} validation failed: {type(err).__name__}: {err}"
+            combined = headline + "\n\n" + "\n\n".join(notes)
+
             # try:
             err.args = (combined,)
             # except Exception:
