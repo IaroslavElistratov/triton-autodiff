@@ -222,11 +222,9 @@ class MinimalLLMPatchProvider:
             strategy.workflow_section()
 
             + "\n### Allowed edits\n"
-            # Strategy-specific allowed edits
             + strategy.allowed_edits_section()
 
-            # Strategy-specific kernel details
-            + strategy.kernel_details_section()
+            # + strategy.kernel_details_section()
 
             + "\n### Patch requirements\n"
             "In each turn, you must call functions.apply_patch({patch: ...}) at most once, and only as your final action for that turn.\n"

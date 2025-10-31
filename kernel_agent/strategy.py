@@ -55,79 +55,45 @@ class BaseStrategy:
         return (
             "\n### Workflow context\n"
             "You are a Triton kernel optimizer. You are called as part of the workflow: generate initial backward pass -> [gradcheck -> optimize -> benchmark] the part in the brackets repeats in a for-loop. You are the 'optimize' step.\n"
-            "You will have multiple turns to refine the backward kernel.\n" # , so do not propose large overly-eager kernel rewrites.
+            "You will have multiple turns to refine the backward kernel.\n"
+            # , so do not propose large overly-eager kernel rewrites.
             "You will be provided a backward kernel which computes per-input gradients, use it as the starting point and make edits to improve its performance.\n"
             "You must adhere to user's Phase-specific goals and guardrails.\n"
             # "Do not try to derive backward mathematically from scratch this is hallucination- and error- prone, instead use the provided backward kernel and gradient annotations for your reference.\n"
         )
 
-    def kernel_details_section(self) -> str:
-        """Return initial kernel details for system prompt.
+    # def kernel_details_section(self) -> str:
+    #     """Return initial kernel details for system prompt.
 
-        Describes characteristics of the starting backward kernel that are specific
-        to how it was generated (compiler vs RAG vs other methods).
-        Override in subclasses or return empty string if not applicable.
-        """
-        return (
-            # todo: show this only in the 1st iter?
-            # comment: do not instruct to e.g. "for loops" or "remove atomics" -- this is handled in Phase[s]. Below is just general info only
-            "\n### Initial backward kernel details\n"
-            # " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
-            "* variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
-            "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened).\n"
-            # " * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
-            # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
-        )
+    #     Describes characteristics of the starting backward kernel that are specific
+    #     to how it was generated (compiler vs RAG vs other methods).
+    #     Override in subclasses or return empty string if not applicable.
+    #     """
+    #     return (
+    #         # "\n### Initial backward kernel details\n"
+    #         # " * signature: `backward_kernel(arg1, arg2, grad_arg1, grad_arg2)` for every *pointer* arg 'i' in inputs, there's a corresponding 'arg_i' containing pointer to gradient tensors wrt that input 'i').\n"
+    #         # "* variable names inside the kernel contain prefixes fwd_*, bwd_* -- the former means this is some intermediate value from the forward pass recomputed in backward, the latter means this is a value added by a derivative formula of some forward operator.\n"
+    #         # "* single-iteration unrolled: the initial backward kernel covers the gradients for exactly one iteration of the original forward loop (loop flattened).\n"
+    #         # " * single-iteration unroll: the forward loop is flattened; this backward kernel computes gradients for exactly one loop iteration (one tile/chunk) and does not iterate over the full extent used in the benchmark sweep.\n"
+    #         # " * single-iteration unroll: loops from the forward kernel are unrolled; the provided backward kernel corresponds to differentiated version of exactly one iteration of those loops.\n"
+    #     )
 
     def allowed_edits_section(self) -> str:
         """Return allowed edits constraints for system prompt.
 
         Describes what the LLM is allowed to modify in the backward kernel.
         Override in subclasses for strategy-specific constraints.
-
-        Compiler-generated kernels: Stub signature is correct, don't change it.
-        RAG-retrieved kernels: Stub signature may need adaptation to match forward.
         """
         return (
-            # "You must modify backward kernel; but preserve function names and pointer/mask semantics.\n"
             "The backward file contains the forward stub, backward Triton kernel, backward stub, and StubOverrideDCK class.\n"
             "You can edit: backward kernel, backward stub body, forward stub body, and StubOverrideDCK class.\n"
-            "Do NOT change stub signatures. Do not rename or move the file.\n"
-            "You must only have a single backward kernel and a single backward stub.\n"
-            # "You can edit _mk_block_ptr when it's present.\n"
+            "You must only have a single backward stub.\n"
+            "Do not rename or move the file.\n"
             "\n"
+            "You may edit stub and kernel signatures when required. Keep every call-site and signature consistent when you do so, restoring argument order and return structure to match the contract used by gradcheck.\n"
             "### CRITICAL: AVOID RECOMPUTING FORWARD INTERMEDIATES\n"
-            "\n"
-            "DETECT WASTE: Does backward_stub call forward_kernel to recompute intermediates?\n"
-            "  Pattern: forward_kernel[grid](..., intermediate_buffers, ...)  # ← Wasteful!\n"
-            "\n"
-            "FIX: Modify StubOverrideDCK class (at bottom of file) to save/restore intermediates.\n"
-            "\n"
-            "REQUIRED CHANGES:\n"
-            "\n"
-            "1. IN forward() METHOD - allocate, pass, and save intermediates:\n"
-            "   stats = torch.empty(...)  # Allocate intermediate buffers\n"
-            "   result = stub(*all_stub_inputs, stats=stats)  # Pass to stub\n"
-            "   ctx.save_for_backward(*ten, stats)  # SAVE intermediates (not just inputs!)\n"
-            "   ctx.num_input_tensors = len(ten)  # Track split point for retrieval\n"
-            "\n"
-            "2. IN backward() METHOD - retrieve and pass:\n"
-            "   stats, = saved[ctx.num_input_tensors:]  # RETRIEVE saved intermediates\n"
-            "   kw_up['stats'] = stats  # PASS to backward_stub\n"
-            "\n"
-            "3. UPDATE BOTH STUBS - accept intermediates as optional kwargs:\n"
-            "   def stub(..., stats=None):\n"
-            "       if stats is None: stats = torch.empty(...)\n"
-            "       forward_kernel[grid](..., stats, ...)\n"
-            "   \n"
-            "   def backward_stub(..., *, upstream_0, stats=None):\n"
-            "       if stats is None:  # Defensive fallback if DCK not modified\n"
-            "           stats = torch.empty(...)\n"
-            "           forward_kernel[grid](..., stats, ...)  # Recomputation (works but slow)\n"
-            "       backward_kernel[grid](..., stats, ...)\n"
-            "\n"
-            "Examples: stats=mean/rstd (LayerNorm), stats=(l_i,m_i,O) (attention), stats=rms (RMSNorm)\n"
-            "Multiple: ctx.save_for_backward(*ten, mean, rstd); then: mean, rstd = saved[num_input_tensors:]\n"
+            "Ensure forward() saves required intermediates and backward_stub consumes them; do not fall back to recomputing forward kernels inside backward_stub.\n"
+            "If you need new buffers, modify StubOverrideDCK to pass them while keeping existing stub signatures intact.\n"
             "\n"
         )
 
@@ -341,6 +307,7 @@ class RegularStrategy(BaseStrategy):
 #     # raise NotImplementedError("Phase 3 guardrails are not implemented")
 #     return True
 
+
 class RAGAdaptationStrategy(BaseStrategy):
     """Two-phase strategy for reference-based gradient validation.
 
@@ -351,15 +318,20 @@ class RAGAdaptationStrategy(BaseStrategy):
     loops, atomics, coalesce), RAG-retrieved kernels are already optimized and just
     need adaptation to the specific forward kernel.
     """
+
     def __init__(self, rag_fwd: Optional[str] = None, rag_bwd: Optional[str] = None):
         self.name = "rag_adaptation"
         # Phase index (0=reference generation, 1=backward generation)
         self.i = 0
-        self.phase_just_advanced = False  # Track if we just transitioned phases
+        # Track if we just transitioned phases
+        self.phase_just_advanced = False
 
         # Phase 1 state: PyTorch reference
-        self.pytorch_reference_code = None  # Source code of validated reference
-        self.pytorch_reference_validated = False  # Whether reference passed validation
+
+        # Source code of validated reference
+        self.pytorch_reference_code = None
+        # Whether reference passed validation
+        self.pytorch_reference_validated = False
 
         # Phase 2 state: RAG patterns (optional)
         self.rag_fwd = rag_fwd
@@ -394,14 +366,18 @@ class RAGAdaptationStrategy(BaseStrategy):
                 "You will have multiple turns to refine until outputs match.\n"
             )
         else:
-            # Phase 2: Generate backward kernel
+            ref_block_line = (
+                "A retrieved FWD+BWD pair is provided as a REFERENCE PATTERN (see reference section below).\n"
+                if self.phase_just_advanced
+                else "You already saw the retrieved FWD+BWD reference when entering Phase 2; reuse that pattern from memory (reference block hidden this turn).\n"
+            )
             return (
                 "\n### Workflow context\n"
                 "You are a Triton kernel adapter. Your task: write a backward kernel for YOUR forward (shown in working file).\n"
                 "You can try adapt a retrieved backward kernel to work with a specific forward kernel.\n"
                 "Workflow: RAG retrieval -> [write/adapt backward -> gradcheck] repeats until gradcheck passes on all shapes.\n"
                 "\n"
-                "A retrieved FWD+BWD pair is provided as a REFERENCE PATTERN (see reference section below).\n"
+                f"{ref_block_line}"
                 "The retrieved backward was written for a DIFFERENT forward kernel and needs adaptation/rewrite to compute correct gradients for THIS forward.\n"
                 "Your job: write backward for YOUR forward using the retrieved pair as a pattern guide.\n"
                 "\n"
@@ -414,9 +390,9 @@ class RAGAdaptationStrategy(BaseStrategy):
                 "You will have multiple turns to refine the adaptation. Adhere to Phase-specific adaptation goals.\n"
             )
 
-    def kernel_details_section(self) -> str:
-        """RAG kernels don't have compiler-specific characteristics, return empty."""
-        return ""
+    # def kernel_details_section(self) -> str:
+    #     """RAG kernels don't have compiler-specific characteristics, return empty."""
+    #     return ""
 
     def rag_reference_section(self, rag_fwd: str, rag_bwd: str) -> str:
         """Show RAG references only at Phase 2 entry (backward generation init).
@@ -536,7 +512,7 @@ END REFERENCE SECTION
 
             # RAG-specific adaptation instructions
             backward_specific = (
-            "The backward file contains BOTH the backward Triton kernel and a backward stub; you can (and likely should) edit both.\n"
+            "The backward file contains BOTH the backward Triton kernel and a backward stub.\n"
             "You can edit both the backward kernel and the backward stub (their signatures and bodies) to match YOUR forward kernel.\n"
             "The retrieved stub name/signature is from a DIFFERENT forward - you MUST adapt it to match YOUR forward's expectations.\n"
             "\n"
@@ -568,7 +544,7 @@ END REFERENCE SECTION
             "    return grad_inputs, None, None\n"
             "```\n"
             "\n"
-            "AFTER (triton autodiff raised.py - what you must create):\n"
+            "AFTER (what you must create):\n"
             "```\n"
             "# SIGNATURE CONTRACT comment shows exact function signature\n"
             "def backward_stub(...)  # Use exact signature from SIGNATURE CONTRACT\n"
@@ -578,6 +554,7 @@ END REFERENCE SECTION
             "    # Return exactly what SIGNATURE CONTRACT shows\n"
             "```\n"
             "\n"
+            # todo-now: outdated? becuase not llm has control over the StubOverwiteDck
             "### ARCHITECTURAL CONTEXT:\n"
             "\n"
             "Retrieved backward is torch.autograd.Function.backward\n"
@@ -690,16 +667,15 @@ END REFERENCE SECTION
                 "\n"
                 "Algorithm thinking: \"Is this kernel computing the CORRECT mathematical derivative?\"\n"
                 "Implementation thinking: \"Are the memory strides correct?\" ← Do this AFTER algorithm is right\n"
-                "═══════════════════════════════════════════════════════════════════════════════\n"
                 "\n"
                 "═══════════════════════════════════════════════════════════════════════════════\n"
                 "Before calling apply_patch, verify in your analysis:\n"
                 "═══════════════════════════════════════════════════════════════════════════════\n"
-                "☐ Understood what mathematical transformation RETRIEVED forward performs\n"
-                "☐ Understood what mathematical transformation YOUR forward performs\n"
-                "☐ Identified where the two algorithms diverge structurally\n"
-                "☐ Analyzed how each divergence affects the derivative (chain rule implications)\n"
-                "☐ Determined which gradient terms need to change based on algorithmic differences\n"
+                "- Understood what mathematical transformation RETRIEVED forward performs\n"
+                "- Understood what mathematical transformation YOUR forward performs\n"
+                "- Identified where the two algorithms diverge structurally\n"
+                "- Analyzed how each divergence affects the derivative (chain rule implications)\n"
+                "- Determined which gradient terms need to change based on algorithmic differences\n"
                 "\n"
                 "If you skip directly to implementation details (strides, offsets, block sizes),\n"
                 "you will waste iterations fixing wrong things.\n"
@@ -873,4 +849,3 @@ def guardrails_check_phase1(backward_fp: str) -> bool:
     except OSError:
         # Hold at Phase 1 if we can't verify
         return False
-
