@@ -6,7 +6,7 @@ to validate Triton backward kernels via autograd gradients.
 """
 
 import torch
-from typing import Callable, Sequence, Tuple, Union, Optional, Any, Dict, List
+from typing import Callable, Sequence, Tuple, Any, Dict, List
 import traceback
 
 # Import telemetry counter to detect PyTorch/stub bypass
@@ -23,6 +23,14 @@ from ...utils import _triton_launch_counter
 
 Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
+
+def _is_cuda_oom(err: BaseException) -> bool:
+    # Normalize CUDA OOM detection so sweep bookkeeping handles host/child OOM the same way.
+    try:
+        oom_type = getattr(torch.cuda, "OutOfMemoryError", ())
+    except Exception:
+        oom_type = ()
+    return isinstance(err, oom_type) or "out of memory" in str(err).lower()
 
 
 def check_forward_outputs_match(
@@ -483,6 +491,13 @@ def check_op_backward_reference_sweep(
             # Continue to next shape (don't return immediately - test all shapes)
             continue
 
+
+        # keep the original runtime exception but augment it with a summary of everything that happened before the crash ###
+        # Trap the runtime error, log the failing shape into the running stats, build a progress summary (with pass/fail counts plus
+        # the LLM-friendly detail string), and then re-raise the same exception after rewriting err.args so str(err) already contains
+        # that context. When the orchestrator sees the crash, the traceback now carries both the raw runtime failure and the aggregated
+        # results for all shapes that ran before the blow-up.
+        #
         # we’re not swallowing RuntimeError. We catch the exception purely to enrich it with shape context
         # before re-raising. Without that wrapper we’d only get “RuntimeError: cuda illegal access,” which is
         # hard to debug when there are multiple shapes in the sweep. The block builds a message like:
@@ -491,8 +506,58 @@ def check_op_backward_reference_sweep(
         # _gradcheck_child, which in turn hands it to run_with_fix, so the orchestrator still treats it as
         # a hard runtime failure.
         except RuntimeError as err:
-            shape_str = ", ".join(f"{k}={v}" for k, v in shape_params.items())
-            raise RuntimeError(f"{err} [shape: {shape_str}]") from err
+
+            # This fixes the "llm only sees the last crash line" problem
+            # let llm see both the crash and prior per-shape results (processed 3/4, failed=1).
+            #
+            # Capture the crash before aborting so a late illegal access (shape 3 in our repro)
+            # still shows that shapes 1-2 already succeeded (as oppose to only showing "err on shape 3")
+
+            # Keep shape strings deterministic so prompts diff cleanly across retries.
+            shape_str = ", ".join(f"{k}={shape_params[k]}" for k in sorted(shape_params))
+            is_oom_runtime = _is_cuda_oom(err)
+
+            stats.setdefault("shape_details", []).append({
+                "shape": dict(shape_params),
+                "required": bool(is_required),
+                "passed": False,
+                # Keep the crash reason so summaries show what already broke
+                "stats": {"error": str(err)},
+            })
+            if is_oom_runtime:
+                stats["shapes_oom"] = stats.get("shapes_oom", 0) + 1
+            else:
+                stats["shapes_failed"] = stats.get("shapes_failed", 0) + 1
+
+            processed = len(stats["shape_details"])
+            planned = len(sweep)
+            progress_line = (
+                f"Sweep progress before failure: processed {processed}/{planned} shapes "
+                f"(passed={stats.get('shapes_passed', 0)}, "
+                f"failed={stats.get('shapes_failed', 0)}, "
+                f"oom={stats.get('shapes_oom', 0)})."
+            )
+
+            # Alias counts for downstream consumers (PerfTracker, summary text, etc.)
+            partial_stats = dict(stats)
+            partial_stats["num_total"] = partial_stats.get("num_shapes", planned)
+            partial_stats["num_passed"] = partial_stats.get("shapes_passed", 0)
+            partial_stats["num_failed"] = partial_stats.get("shapes_failed", 0)
+
+            partial_summary = _format_summary_for_llm(partial_stats, forward_only)
+            notes = [
+                f"[shape: {shape_str}]",
+                progress_line,
+                # Preserve numeric/oom context alongside the traceback.
+                f"Details captured before aborting:\n{partial_summary}",
+            ]
+            # downstream (worker -> orchestrator) only surfaces str(err), so inline the sweep summary here into the err msg
+            combined = f"{err}\n\n" + "\n\n".join(notes)
+            # try:
+            err.args = (combined,)
+            # except Exception:
+            #     pass
+            raise err
 
         # Force any sticky CUDA errors to surface NOW before next iteration
         # Explicit synchronize after each shape test to catch errors before next make_args().
