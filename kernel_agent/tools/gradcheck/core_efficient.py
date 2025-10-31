@@ -514,14 +514,14 @@ def check_op_backward_reference_sweep(
 
     # FEATURE: Vacuous Truth Prevention
     # LOGIC:
-    # - If user didn't specify ANY required shapes (num_required == 0) → User's fault
-    # - If user specified required shapes (num_required > 0) but all failed/OOMed → LLM's fault
+    # - If user didn't specify ANY required shapes (num_required == 0) -> User's fault
+    # - If user specified required shapes (num_required > 0) but all failed/OOMed -> LLM's fault
     if stats["shapes_passed"] == 0:
         num_required = sum(1 for s in sweep if s.get("required", True))
 
         if num_required == 0:
             # User's fault: No required shapes in SWEEP
-            # All shapes are optional → vacuous truth (nothing was REQUIRED to pass)
+            # All shapes are optional -> vacuous truth (nothing was REQUIRED to pass)
             phase_name = "Phase 1" if forward_only else "Phase 2"
             error_msg = (
                 f"No shapes validated in {phase_name}!\n"
@@ -549,10 +549,10 @@ def check_op_backward_reference_sweep(
             return False, failure_summary
 
         # else: num_required > 0, but shapes_passed == 0
-        # → Required shapes exist but all failed validation or OOMed
-        # → LLM's fault (implementation needs fixing)
+        # -> Required shapes exist but all failed validation or OOMed
+        # -> LLM's fault (implementation needs fixing)
         all_passed = False  # Ensure we signal failure to orchestrator for LLM retry
-        # → Fall through to normal return path for LLM retry with error details
+        # -> Fall through to normal return path for LLM retry with error details
 
     # Alias counts for downstream consumers (PerfTracker, summary text, etc.)
     stats["num_total"] = stats.get("num_shapes", 0)
@@ -621,14 +621,24 @@ def _format_summary_for_llm(stats: Dict[str, Any], forward_only: bool) -> str:
             # all errs besides numeric mismatches -- should be raised so that
             # child catches them and returns child_run_ok=False to run_with_fix
             # causes to re-prompt llm
+
+            # Previously we compressed each mismatch to a single “Input 0: mismatch” line, so the LLM did know about magnitudes, indices, or NaN issues.
+            # Now we copy over the full multi-line assert_close text (max diff, offending index) with indentation so the prompt carries the actionable data.
+            # And when a shape terminates due to a structural error (like illegal memory access) we splice that message into the summary too. Combined,
+            # the model sees both numeric deltas and structural crash context instead of a bare “mismatch” placeholder.
+
             if forward_only:
                 numerical_failures = shape_stats.get("forward_mismatches", [])
                 for err in numerical_failures[:3]:
-                    lines.append(f"  {err.split(':')[0]}: mismatch")
+                    for j, detail in enumerate(err.splitlines()):
+                        prefix = "  " if j == 0 else "    "  # Surface full assert-close details (max diff, index) for the LLM.
+                        lines.append(f"{prefix}{detail}")
             else:
                 numerical_failures = shape_stats.get("backward_mismatches", [])
                 for err in numerical_failures[:3]:
-                    lines.append(f"  {err.split(':')[0]}: mismatch")
+                    for j, detail in enumerate(err.splitlines()):
+                        prefix = "  " if j == 0 else "    "  # Same for gradient mismatches so prompts include actionable slices.
+                        lines.append(f"{prefix}{detail}")
 
     # OOM shapes - distinguish between required (problem) and optional (expected)
     oom_shapes = [s for s in stats["shape_details"] if s.get("oom")]
