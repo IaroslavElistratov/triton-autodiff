@@ -249,7 +249,8 @@ class KernelOptimizer:
                 filtered_tb = filter_traceback_for_llm(tb, bwd_fp=self.bwd_fp)
                 err = f"{type(ce).__name__}: {ce}\n\nTraceback:\n{filtered_tb}"
 
-            self.patcher.remember(err_category, err)
+            # skip recording gradcheck_error here to avoid showing the same crash twice in the upcoming prompt state.
+            # self.patcher.remember(err_category, err)
             if VERBOSE: print(f"[kernel-agent][it={it}] {err_category}: {err}")
 
             # One fix attempt for this iteration. Do not re-run fn() here.
