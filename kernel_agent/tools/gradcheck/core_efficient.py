@@ -488,6 +488,10 @@ def check_op_backward_reference_sweep(
             req_tag = "[REQUIRED]" if is_required else "[OPTIONAL]"
             if verbose:
                 print(f"[Reference Check] {req_tag} Shape {i+1} OOMed in {phase_name}")
+            if is_required:
+                # Required shapes must force a retry; treat their OOMs as failures, not skips.
+                stats["shapes_failed"] += 1
+                all_passed = False
             # Continue to next shape (don't return immediately - test all shapes)
             continue
 
