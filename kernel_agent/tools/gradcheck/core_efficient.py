@@ -13,6 +13,24 @@ import traceback
 from ...utils import _triton_launch_counter
 
 
+def _clone_for_validation(obj, *, require_grad: bool):
+    """Deep-clone tensors in args/kwargs for validation."""
+    if isinstance(obj, torch.Tensor):
+        out = obj.detach().clone()
+        if require_grad and out.is_floating_point():
+            out.requires_grad_(True)
+        return out
+    if isinstance(obj, dict):
+        return {k: _clone_for_validation(v, require_grad=require_grad) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clone_for_validation(v, require_grad=require_grad) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_clone_for_validation(v, require_grad=require_grad) for v in obj)
+    if isinstance(obj, set):
+        return {_clone_for_validation(v, require_grad=require_grad) for v in obj}
+    return obj
+
+
 # Validation contract: “true” means gradients match the PyTorch reference.
 # Any other failure that prevents producing comparable tensors (runtime error, telemetry check, compile breakage)
 # raises immediately instead of pretending the sweep succeeded.
@@ -62,14 +80,16 @@ def check_forward_outputs_match(
     stats = {}
 
     try:
-        # Clone inputs for both paths
-        triton_inputs = [x.detach().clone() for x in test_inputs]
-        ref_inputs = [x.detach().clone() for x in test_inputs]
+        # Clone inputs/kwargs for both paths
+        triton_inputs = [_clone_for_validation(x, require_grad=False) for x in test_inputs]
+        ref_inputs = [_clone_for_validation(x, require_grad=False) for x in test_inputs]
+        triton_kwargs = _clone_for_validation(test_kwargs, require_grad=False)
+        ref_kwargs = _clone_for_validation(test_kwargs, require_grad=False)
 
         # Forward pass - Triton (telemetry ensures stub truly calls Triton kernel)
         _triton_launch_counter.install()
         _triton_launch_counter.reset()
-        triton_out = triton_op(*triton_inputs, **test_kwargs)
+        triton_out = triton_op(*triton_inputs, **triton_kwargs)
         if not isinstance(triton_out, (list, tuple)):
             triton_out = (triton_out,)
         try:
@@ -80,7 +100,7 @@ def check_forward_outputs_match(
             ) from None
 
         # Forward pass - PyTorch reference
-        ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
+        ref_out = pytorch_ref(*ref_inputs, **ref_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
 
@@ -160,10 +180,10 @@ def check_op_backward_with_reference(
 
     try:
         # Clone inputs for both paths
-        triton_inputs = [x.detach().clone().requires_grad_(True) if x.is_floating_point() else x
-                        for x in test_inputs]
-        ref_inputs = [x.detach().clone().requires_grad_(True) if x.is_floating_point() else x
-                     for x in test_inputs]
+        triton_inputs = [_clone_for_validation(x, require_grad=True) for x in test_inputs]
+        ref_inputs = [_clone_for_validation(x, require_grad=True) for x in test_inputs]
+        triton_kwargs = _clone_for_validation(test_kwargs, require_grad=True)
+        ref_kwargs = _clone_for_validation(test_kwargs, require_grad=True)
 
         # Guard against PyTorch/stub bypass: Ensure forward AND backward call Triton kernels
         # LLM might write stubs using pure PyTorch (no Triton kernel calls),
@@ -175,7 +195,7 @@ def check_op_backward_with_reference(
         # Forward pass - Triton (with telemetry)
         _triton_launch_counter.reset()
 
-        triton_out = triton_op(*triton_inputs, **test_kwargs)
+        triton_out = triton_op(*triton_inputs, **triton_kwargs)
         if not isinstance(triton_out, (list, tuple)):
             triton_out = (triton_out,)
 
@@ -190,7 +210,7 @@ def check_op_backward_with_reference(
             ) from None
 
         # Forward pass - PyTorch reference
-        ref_out = pytorch_ref(*ref_inputs, **test_kwargs)
+        ref_out = pytorch_ref(*ref_inputs, **ref_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
 
@@ -375,7 +395,10 @@ def check_op_backward_reference_sweep(
     Returns:
         (all_passed, stats) where all_passed is True if all shapes pass
     """
-    # TODO(dtype-aware tolerances): tune atol/rtol per dtype once enough mismatch stats exist from real sweeps.
+    # TODO: (dtype-aware tolerances): tune atol/rtol per dtype once enough mismatch stats exist from real sweeps.
+    # Make tolerances dtype‑aware (e.g., bf16: rtol=1e‑2), expose tols_by_dtype in sidecar, and/or allow
+    # per‑output overrides when a particular head is known noisy
+
     # Get PyTorch reference implementation
     pytorch_ref = sidecar.get("pytorch_reference_impl")
     if pytorch_ref is None:
@@ -423,11 +446,12 @@ def check_op_backward_reference_sweep(
             req_tag = "[REQUIRED]" if is_required else "[OPTIONAL]"
             print(f"\n[Reference Check] {req_tag} Testing shape {i+1}/{len(sweep)} ({validation_type}): {shape_params}")
 
-        # Generate test inputs (strip helper metadata like required flag)
-        args, kwargs = make_args(shape_params)
-
         # Wrap in try-except for OOM handling (BOTH phases - see comment below)
         try:
+
+            # Generate test inputs (strip helper metadata like required flag)
+            args, kwargs = make_args(shape_params)
+
             # Choose validation function based on phase
             if forward_only:
                 # Phase 1: Only validate forward outputs
