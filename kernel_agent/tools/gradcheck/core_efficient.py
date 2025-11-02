@@ -11,6 +11,11 @@ import traceback
 
 # Import telemetry counter to detect PyTorch/stub bypass
 from ...utils import _triton_launch_counter
+from ..backward_naive.aot_capture import (
+    attach_aot_capture,
+    ensure_backward_aot_capture,
+    wrap_reference_with_aot,
+)
 
 
 def _clone_for_validation(obj, *, require_grad: bool):
@@ -99,8 +104,14 @@ def check_forward_outputs_match(
                 f"Forward validation failed: Triton forward launch telemetry error: {e}"
             ) from None
 
+        # wrap the freshly validated reference now so Phase 2's first backward prompt already
+        # has FX graphs before gradcheck reruns the reference;
+        # I'm wrapping with AOT-Autograd here so that by the time we advance to the next phase (2nd phase)
+        # we already have reference backward graph (so that we can attach this to the very first prompt of the 2nd phase)
+        ref_callable, aot_capture = wrap_reference_with_aot(pytorch_ref, verbose)
+
         # Forward pass - PyTorch reference
-        ref_out = pytorch_ref(*ref_inputs, **ref_kwargs)
+        ref_out = ref_callable(*ref_inputs, **ref_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
 
@@ -129,6 +140,12 @@ def check_forward_outputs_match(
 
         stats["forward_match"] = all_match
         stats["forward_mismatches"] = forward_mismatches
+
+        ensure_backward_aot_capture(ref_callable, aot_capture, test_inputs, test_kwargs, verbose)
+        if verbose and aot_capture.get("backward_graph"):
+            print("[AOT Capture] backward graph FX:")
+            print(aot_capture["backward_graph"])
+        attach_aot_capture(stats, aot_capture)
 
         return all_match, stats
 
