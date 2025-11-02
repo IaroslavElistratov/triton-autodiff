@@ -11,10 +11,7 @@ import traceback
 
 # Import telemetry counter to detect PyTorch/stub bypass
 from ...utils import _triton_launch_counter
-from ..backward_naive.aot_capture import (
-    finalize_aot_capture,
-    wrap_reference_with_aot,
-)
+from ..backward_naive.aot_capture import capture_reference_backward
 
 
 def _clone_for_validation(obj, *, require_grad: bool):
@@ -103,14 +100,8 @@ def check_forward_outputs_match(
                 f"Forward validation failed: Triton forward launch telemetry error: {e}"
             ) from None
 
-        # wrap the freshly validated reference now so Phase 2's first backward prompt already
-        # has FX graphs before gradcheck reruns the reference;
-        # I'm wrapping with AOT-Autograd here so that by the time we advance to the next phase (2nd phase)
-        # we already have reference backward graph (so that we can attach this to the very first prompt of the 2nd phase)
-        ref_callable, aot_capture = wrap_reference_with_aot(pytorch_ref, verbose)
-
-        # Forward pass - PyTorch reference
-        ref_out = ref_callable(*ref_inputs, **ref_kwargs)
+        # Forward pass - PyTorch reference (no AOT wrapping yet)
+        ref_out = pytorch_ref(*ref_inputs, **ref_kwargs)
         if not isinstance(ref_out, (list, tuple)):
             ref_out = (ref_out,)
 
@@ -140,14 +131,19 @@ def check_forward_outputs_match(
         stats["forward_match"] = all_match
         stats["forward_mismatches"] = forward_mismatches
 
-        finalize_aot_capture(
-            ref_callable,
-            aot_capture,
-            test_inputs,
-            test_kwargs,
-            stats=stats,
-            verbose=verbose,
-        )
+        # NOTE: generates reference bwd on first success only
+        if all_match and not stats.get("aot_reference"):
+            # wrap the freshly validated reference now so Phase 2's first backward prompt already
+            # has FX graphs before gradcheck reruns the reference;
+            # I'm wrapping with AOT-Autograd here so that by the time we advance to the next phase (2nd phase)
+            # we already have reference backward graph (so that we can attach this to the very first prompt of the 2nd phase)
+            capture_reference_backward(
+                pytorch_ref,
+                test_inputs,
+                test_kwargs,
+                stats=stats,
+                verbose=verbose,
+            )
 
         return all_match, stats
 

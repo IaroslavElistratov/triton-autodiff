@@ -21,7 +21,6 @@ Tensor = torch.Tensor
 # graph will have additional nodes -- from forward -- so the bwd graph will no longer
 # be 1:1 clean differentiated fwd, which will likely confuse the llm);
 # the backward FX graph remains a straight differentiated version of the forward without min-cut rematerialization
-
 def _stash_only_partition(
     joint_module: torch.fx.GraphModule,
     joint_inputs,
@@ -29,7 +28,7 @@ def _stash_only_partition(
     num_fwd_outputs: int,
     **kw,
 ) -> tuple[torch.fx.GraphModule, torch.fx.GraphModule]:
-    """Partition helper that forces stash-only behavior (no rematerialization)."""
+    """Default partition with recompute tags stripped."""
     for node in joint_module.graph.nodes:
         node.meta.pop("recompute", None)
     return default_partition(
@@ -40,11 +39,15 @@ def _stash_only_partition(
     )
 
 
-def wrap_reference_with_aot(
+def capture_reference_backward(
     pytorch_ref: Callable,
-    verbose: bool,
+    test_inputs: Sequence[Tensor],
+    test_kwargs: Dict[str, Any],
+    *,
+    stats: Dict[str, Any],
+    verbose: bool = False,
 ) -> Tuple[Callable, Dict[str, Any]]:
-    """Wrap pytorch_ref with AOTAutograd and capture FX graphs when possible."""
+    """Wrap reference with AOTAutograd, run probe fwd/bwd, and return capture dict."""
     capture: Dict[str, Any] = {}
     ref_callable = pytorch_ref
     try:
@@ -55,11 +58,13 @@ def wrap_reference_with_aot(
             return gm
 
         def _bw_compiler(gm, _):
-            txt = str(gm.graph)
-            capture["backward_graph"] = txt
+            # print generated python code instead of fx graph
+            # https://github.com/pytorch/pytorch/blob/0674e0a0f14775f920296e9dfb8b61e4960bf99d/torch/fx/graph.py#L1745
+            # https://github.com/pytorch/pytorch/blob/0674e0a0f14775f920296e9dfb8b61e4960bf99d/torch/fx/graph.py#L432-L858
+            capture["backward_graph"] = gm.code
             if verbose:
                 print("[AOT Capture] backward graph FX:")
-                print(txt)
+                print(gm.code)
             return gm
 
         def _partition(joint_module, flat_inputs, *, num_fwd_outputs, **kw):
@@ -81,58 +86,26 @@ def wrap_reference_with_aot(
         capture["error"] = f"{type(err).__name__}: {err}"
         if verbose:
             print(f"[Reference Check] AOTAutograd capture disabled: {capture['error']}")
+        return ref_callable, capture
 
-    return ref_callable, capture
-
-
-def _populate_backward_graph(
-    ref_callable: Callable,
-    capture: Dict[str, Any],
-    test_inputs: Sequence[Tensor],
-    test_kwargs: Dict[str, Any],
-    verbose: bool = False,
-) -> None:
-    """Run a lightweight backward pass to populate missing backward FX graphs."""
-    # AOTAutograd only fills capture["backward_graph"] after a backward actually runs;
-    # Phase 0 hasn't triggered that yet, so run a cheap backward here to produce the graph
-    if "forward_graph" not in capture or capture.get("backward_graph"):
-        return
-    capture_inputs = [_clone_for_capture(x, require_grad=True) for x in test_inputs]
-    capture_kwargs = _clone_for_capture(test_kwargs, require_grad=True)
+    # Run probe forward/backward once to populate backward graph if needed
+    inputs = [_clone_for_capture(x, require_grad=True) for x in test_inputs]
+    kwargs = _clone_for_capture(test_kwargs, require_grad=True)
     try:
-        capture_out = ref_callable(*capture_inputs, **capture_kwargs)
-        if not isinstance(capture_out, (list, tuple)):
-            capture_out = (capture_out,)
-        capture_terms = [
-            o for o in capture_out if isinstance(o, torch.Tensor) and o.is_floating_point()
-        ]
-        if capture_terms:
-            (sum(t.sum() for t in capture_terms)).backward()
+        out = ref_callable(*inputs, **kwargs)
+        if not isinstance(out, (list, tuple)):
+            out = (out,)
+        terms = [o for o in out if isinstance(o, torch.Tensor) and o.is_floating_point()]
+        if terms:
+            (sum(t.sum() for t in terms)).backward()
     except Exception as err:
         capture.setdefault("backward_error", f"{type(err).__name__}: {err}")
 
-    if verbose and capture.get("backward_graph"):
-        print("[AOT Capture] backward graph FX:")
-        print(capture["backward_graph"])
-
-
-def finalize_aot_capture(
-    ref_callable: Callable,
-    capture: Dict[str, Any],
-    test_inputs: Sequence[Tensor],
-    test_kwargs: Dict[str, Any],
-    *,
-    stats: Dict[str, Any] | None = None,
-    verbose: bool = False,
-) -> Dict[str, Any]:
-    """Populate backward graph (if needed) and optionally attach capture metadata."""
-    _populate_backward_graph(ref_callable, capture, test_inputs, test_kwargs, verbose)
-    if stats is not None:
-        stats["aot_reference"] = {
-            key: _truncate_graph_dump(val) if isinstance(val, str) else val
-            for key, val in capture.items()
-        }
-    return capture
+    stats["aot_reference"] = {
+        key: _truncate_graph_dump(val) if isinstance(val, str) else val
+        for key, val in capture.items()
+    }
+    return ref_callable, capture
 
 
 def _clone_for_capture(obj: Any, *, require_grad: bool) -> Any:
