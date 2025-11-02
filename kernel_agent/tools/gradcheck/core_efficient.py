@@ -12,8 +12,7 @@ import traceback
 # Import telemetry counter to detect PyTorch/stub bypass
 from ...utils import _triton_launch_counter
 from ..backward_naive.aot_capture import (
-    attach_aot_capture,
-    ensure_backward_aot_capture,
+    finalize_aot_capture,
     wrap_reference_with_aot,
 )
 
@@ -141,11 +140,14 @@ def check_forward_outputs_match(
         stats["forward_match"] = all_match
         stats["forward_mismatches"] = forward_mismatches
 
-        ensure_backward_aot_capture(ref_callable, aot_capture, test_inputs, test_kwargs, verbose)
-        if verbose and aot_capture.get("backward_graph"):
-            print("[AOT Capture] backward graph FX:")
-            print(aot_capture["backward_graph"])
-        attach_aot_capture(stats, aot_capture)
+        finalize_aot_capture(
+            ref_callable,
+            aot_capture,
+            test_inputs,
+            test_kwargs,
+            stats=stats,
+            verbose=verbose,
+        )
 
         return all_match, stats
 
