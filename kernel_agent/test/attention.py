@@ -1,14 +1,12 @@
 # %%
 # Copied from official triton tutorial (before blackwell support):
 # https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
+# Credits: OpenAI kernel team
+# Extra Credits:
+# * Original flash attention paper (https://arxiv.org/abs/2205.14135)
+# * Rabe and Staats (https://arxiv.org/pdf/2112.05682v2.pdf)
 
-# CHANGE LOG
-#   - non causal only (so no need for the 2nd call to _attn_fwd_inner)
-#   - made kernels args that are used as loop bounds -- tl.constexpr
-#     - start_m
-#     - almost all args to _attn_fwd
 
-# %%
 import pytest
 import torch
 
@@ -18,15 +16,76 @@ import triton.language as tl
 from triton.backends.autodiff import autodiff
 
 
-
 DEVICE = torch.device("cuda:0")
 
 
+def is_hip():
+    return triton.runtime.driver.active.get_current_target().backend == "hip"
+
+
+@triton.jit
+def _attn_fwd_inner(acc, l_i, m_i, q,  #
+                    K_block_ptr, V_block_ptr,  #
+                    start_m, qk_scale,  #
+                    BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr, BLOCK_N: tl.constexpr,  #
+                    STAGE: tl.constexpr, offs_m: tl.constexpr, offs_n: tl.constexpr,  #
+                    N_CTX: tl.constexpr, fp8_v: tl.constexpr):
+    # range of values handled by this stage
+    if STAGE == 1:
+        lo, hi = 0, start_m * BLOCK_M
+    elif STAGE == 2:
+        lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
+        lo = tl.multiple_of(lo, BLOCK_M)
+    # causal = False
+    else:
+        lo, hi = 0, N_CTX
+    K_block_ptr = tl.advance(K_block_ptr, (0, lo))
+    V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
+    # loop over k, v and update accumulator
+    for start_n in range(lo, hi, BLOCK_N):
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        # -- compute qk ----
+        k = tl.load(K_block_ptr)
+        qk = tl.dot(q, k)
+        if STAGE == 2:
+            mask = offs_m[:, None] >= (start_n + offs_n[None, :])
+            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+            m_ij = tl.maximum(m_i, tl.max(qk, 1))
+            qk -= m_ij[:, None]
+        else:
+            m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+            qk = qk * qk_scale - m_ij[:, None]
+        p = tl.math.exp2(qk)
+        l_ij = tl.sum(p, 1)
+        # -- update m_i and l_i
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        # -- update output accumulator --
+        acc = acc * alpha[:, None]
+        # update acc
+        v = tl.load(V_block_ptr)
+        if fp8_v:
+            p = p.to(tl.float8e5)
+        else:
+            p = p.to(tl.float16)
+        acc = tl.dot(p, v, acc)
+        # update m_i and l_i
+        m_i = m_ij
+        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+    return acc, l_i, m_i
+
+
+# We don't run auto-tuning every time to keep the tutorial fast. Keeping
+# the code below and commenting out the equivalent parameters is convenient for
+# re-tuning.
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
     for BM in [64, 128]\
     for BN in [32, 64]\
-    for s in ([3, 4, 7])\
+    # comment: upstream compiler err on ada
+    # for s in ([1] if is_hip() else [3, 4, 7])\
+    for s in ([1] if is_hip() else [3, 4])\
     for w in [4, 8]\
 ]
 
@@ -39,69 +98,19 @@ def keep(conf):
     return True
 
 
+@triton.autotune(list(filter(keep, configs)), key=["N_CTX", "HEAD_DIM"])
 @triton.jit
-def _attn_fwd_inner(acc, l_i, m_i, q,  #
-                    K_block_ptr, V_block_ptr,  #
-                    start_m, qk_scale,  #
-                    BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr, BLOCK_N: tl.constexpr,  #
-                    STAGE: tl.constexpr, offs_m: tl.constexpr, offs_n: tl.constexpr,  #
-                    N_CTX: tl.constexpr):
-    # range of values handled by this stage
-    # causal = False
-    lo, hi = 0, N_CTX
-
-    K_block_ptr = tl.advance(K_block_ptr, (0, lo))
-    V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
-    # loop over k, v and update accumulator
-    for start_n in range(lo, hi, BLOCK_N):
-        start_n = tl.multiple_of(start_n, BLOCK_N)
-        # -- compute qk ----
-        k = tl.load(K_block_ptr)
-        qk = tl.dot(q, k)
-
-        m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-        qk = qk * qk_scale - m_ij[:, None]
-
-        p = tl.math.exp2(qk)
-        l_ij = tl.sum(p, 1)
-        # -- update m_i and l_i
-        alpha = tl.math.exp2(m_i - m_ij)
-        l_i = l_i * alpha + l_ij
-        # -- update output accumulator --
-        acc = acc * alpha[:, None]
-        # update acc
-        v = tl.load(V_block_ptr)
-        p = p.to(tl.float16)
-        acc = tl.dot(p, v, acc)
-        # update m_i and l_i
-        m_i = m_ij
-        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
-        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
-    return acc, l_i, m_i
-
-
-
-# todo: rm do_not_specialize
-@triton.jit(do_not_specialize=["stride_qz", "stride_qh", "stride_qm", "stride_qk",  "stride_kn", "stride_kk",  "stride_vk", "stride_vn",  "stride_om", "stride_on", "Z", "H"]) # , "N_CTX"
-def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
+def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
               stride_qz, stride_qh, stride_qm, stride_qk,  #
-              stride_kn, stride_kk,  #
-              stride_vk, stride_vn,  #
-              stride_om, stride_on,  #
-              Z, H, N_CTX: tl.constexpr,  #
+              stride_kz, stride_kh, stride_kn, stride_kk,  #
+              stride_vz, stride_vh, stride_vk, stride_vn,  #
+              stride_oz, stride_oh, stride_om, stride_on,  #
+              Z, H, N_CTX,  #
               HEAD_DIM: tl.constexpr,  #
               BLOCK_M: tl.constexpr,  #
               BLOCK_N: tl.constexpr,  #
               STAGE: tl.constexpr  #
               ):
-    """
-    explanation of the forward kernel
-    basically (ignoring batch and num_heads dims and is_casual flag):
-    - each kernel instance gets a tile of Q (it holds on to that tile/slice of Q for the duration of the kernel)
-    - each kernel instance then splits K and V (by BLOCK_SIZE_N), and loops over the resulting number of tiles (in K, and V) -- red loop
-    - to compute a tile_q@tile_k@tile_v, and accumulate these results (across the iterations of the red loop) into a private buffer, which eventually (after the last iteration of the RED loop) is a tile Out
-    """
-
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
@@ -118,13 +127,14 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
         block_shape=(BLOCK_M, HEAD_DIM),
         order=(1, 0),
     )
+    v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
     V_block_ptr = tl.make_block_ptr(
         base=V + qvk_offset,
         shape=(N_CTX, HEAD_DIM),
         strides=(stride_vk, stride_vn),
         offsets=(0, 0),
         block_shape=(BLOCK_N, HEAD_DIM),
-        order=(1, 0),
+        order=v_order,
     )
     K_block_ptr = tl.make_block_ptr(
         base=K + qvk_offset,
@@ -154,27 +164,35 @@ def _attn_fwd(Q, K, V, sm_scale: tl.constexpr, M, Out,  #
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
     q = tl.load(Q_block_ptr)
-
+    # stage 1: off-band
+    # For causal = True, STAGE = 3 and _attn_fwd_inner gets 1 as its STAGE
     # For causal = False, STAGE = 1, and _attn_fwd_inner gets 3 as its STAGE
-    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
-                                    start_m, qk_scale,  #
-                                    BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                    4 - STAGE, offs_m, offs_n, N_CTX
-                                    )
-
+    if STAGE & 1:
+        acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
+                                        start_m, qk_scale,  #
+                                        BLOCK_M, HEAD_DIM, BLOCK_N,  #
+                                        4 - STAGE, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
+                                        )
+    # stage 2: on-band
+    if STAGE & 2:
+        # barrier makes it easier for compielr to schedule the
+        # two loops independently
+        acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
+                                        start_m, qk_scale,  #
+                                        BLOCK_M, HEAD_DIM, BLOCK_N,  #
+                                        2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
+                                        )
     # epilogue
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
-
     m_ptrs = M + off_hz * N_CTX + offs_m
     tl.store(m_ptrs, m_i)
     tl.store(O_block_ptr, acc.to(Out.type.element_ty))
 
 
 
-
-@autodiff(_attn_fwd, idxs_buffers=(4, 5))
-def stub(q, k, v, causal=False, sm_scale=0.5, BLOCK_M=16, BLOCK_N=16):
+# @autodiff(_attn_fwd, idxs_buffers=(4, 5))
+def stub(q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
     # when v is in float8_e5m2 it is transposed.
@@ -183,30 +201,25 @@ def stub(q, k, v, causal=False, sm_scale=0.5, BLOCK_M=16, BLOCK_N=16):
     assert HEAD_DIM_K in {16, 32, 64, 128, 256}
     o = torch.empty_like(q)
     stage = 3 if causal else 1
-    # print("stage: ", stage)
+    extra_kern_args = {}
+    # Tuning for AMD target
+    if is_hip():
+        waves_per_eu = 3 if HEAD_DIM_K <= 64 else 2
+        extra_kern_args = {"waves_per_eu": waves_per_eu, "allow_flush_denorm": True}
 
-    grid = (triton.cdiv(q.shape[2], BLOCK_M), q.shape[0] * q.shape[1], 1)
-    # print("grid: ", grid)
-
+    grid = lambda args: (triton.cdiv(q.shape[2], args["BLOCK_M"]), q.shape[0] * q.shape[1], 1)
     M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
     _attn_fwd[grid](
         q, k, v, sm_scale, M, o,  #
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-        # k.stride(0), k.stride(1),
-        k.stride(2), k.stride(3),  #
-        # v.stride(0), v.stride(1),
-        v.stride(2), v.stride(3),  #
-        # o.stride(0), o.stride(1),
-        o.stride(2), o.stride(3),  #
-
-        q.shape[0],  # Z
-        q.shape[1],  # H
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
+        q.shape[0], q.shape[1],  #
         N_CTX=q.shape[2],  #
         HEAD_DIM=HEAD_DIM_K,  #
         STAGE=stage,  #
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-    )
+        **extra_kern_args)
 
     return o
 
