@@ -398,6 +398,7 @@ class KernelOptimizer:
 
         device = get_user_device_info()
         stop_reason = "max_iters"
+        final_benchmark_metrics = None
 
         # optimization loop
         for it in range(self.cfg.max_iters):
@@ -518,31 +519,6 @@ class KernelOptimizer:
             # if we just advanced to next phase, this will give the prompt of the new phase
             phase_text, temp = self.strategy.current_phase(parity_ok)
 
-            # RAG-only mode: stop immediately after parity is achieved IN PHASE 2
-            # Retrieved kernels are already optimized - once adapted to pass gradcheck, no further optimization needed
-            # Only terminate if we're in Phase 2 (backward generation), not Phase 1 (reference validation)
-            # Don't terminate using stale parity_ok after phase advance!
-            # TIMING: This reflects phase AFTER advance (may have just changed above)
-            #
-            # CORNER CASE: Phase Just Advanced
-            # SEMANTIC CONFUSION without self.strategy.phase_just_advanced tracking:
-            #   parity_ok=True means "Phase 1 passed" (BEFORE advance)
-            #   in_phase2=True means "now in Phase 2" (AFTER advance)
-            #   -> Would misinterpret as "Phase 2 passed" and terminate prematurely!
-            # When phase advances (e.g., 0->1), parity_ok is from OLD phase (forward validation)
-            # We must NOT terminate using stale results - need to generate code for NEW phase first
-            #
-            # If just advanced phases - parity_ok is from the previous phase!
-            # Will call LLM to generate initial code for new phase, then validate
-            # Skip termination check (parity_ok is stale from previous phase)
-            if parity_ok and (self.strategy.i == 1) and not self.strategy.phase_just_advanced:
-                # TIMING: Safe to terminate - parity_ok and in_phase2 are from same context (no advance)
-                # Both refer to Phase 1: validation passed AND still in Phase 1
-                # Only terminate if we're in Phase 1 AND we have fresh Phase 1 validation results
-                stop_reason = "rag_parity_achieved"
-                if VERBOSE: print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all SWEEP shapes (backward gradients validated)")
-                break
-
             # Previously skipped LLM call after phase advance, causing immediate gradcheck
             # on unimplemented backward stub. Now correctly generate initial code for new phases.
             # Call LLM after phase advance (to generate initial code) OR after parity failure (to fix)
@@ -607,6 +583,32 @@ class KernelOptimizer:
                 if VERBOSE: print(f"[kernel-agent][it={it}] Early stop {stop_reason}")
                 break
 
+            # RAG-only mode: stop immediately after parity is achieved IN PHASE 2
+            # Retrieved kernels are already optimized - once adapted to pass gradcheck, no further optimization needed
+            # Only terminate if we're in Phase 2 (backward generation), not Phase 1 (reference validation)
+            # Don't terminate using stale parity_ok after phase advance!
+            # TIMING: This reflects phase AFTER advance (may have just changed above)
+            #
+            # CORNER CASE: Phase Just Advanced
+            # SEMANTIC CONFUSION without self.strategy.phase_just_advanced tracking:
+            #   parity_ok=True means "Phase 1 passed" (BEFORE advance)
+            #   in_phase2=True means "now in Phase 2" (AFTER advance)
+            #   -> Would misinterpret as "Phase 2 passed" and terminate prematurely!
+            # When phase advances (e.g., 0->1), parity_ok is from OLD phase (forward validation)
+            # We must NOT terminate using stale results - need to generate code for NEW phase first
+            #
+            # If just advanced phases - parity_ok is from the previous phase!
+            # Will call LLM to generate initial code for new phase, then validate
+            # Skip termination check (parity_ok is stale from previous phase)
+            if parity_ok and (self.strategy.i == 1) and not self.strategy.phase_just_advanced:
+                # TIMING: Safe to terminate - parity_ok and in_phase2 are from same context (no advance)
+                # Both refer to Phase 1: validation passed AND still in Phase 1
+                # Only terminate if we're in Phase 1 AND we have fresh Phase 1 validation results
+                stop_reason = "rag_parity_achieved"
+                if VERBOSE: print(f"[kernel-agent][it={it}] RAG adaptation complete - parity achieved on all required SWEEP shapes (backward gradients validated)")
+                final_benchmark_metrics = cand
+                break
+
             if VERBOSE: print(f"[kernel-agent][it={it}] End iteration")
 
         return {
@@ -615,4 +617,5 @@ class KernelOptimizer:
             "backward_fp": bwd_fp,
             "device_info": device,
             "stop_reason": stop_reason,
+            "final_benchmark_metrics": final_benchmark_metrics,
         }
