@@ -1,131 +1,7 @@
 import runpy
 import inspect, functools
 
-from .common import *
 from .bwd_sig_comment import build_signature_comment_from_stub_analysis, generate_backward_stub_with_scaffolding
-
-
-# todo: replace the two subprocess helpers with import-first calls
-# the two helpers below are ugly -- reorganize the package so that you can just
-# import "raise" and "emit_stub" functions instead of needing to call them via subprocess.run
-def raise_to_triton_lang(ttir_path: str):
-    out_dir = os.path.dirname(ttir_path)
-    os.makedirs(out_dir, exist_ok=True)
-    # Assume TRITON_AUTODIFF_DIR points to the subdir 'triton_autodiff'.
-    # The top-level 'kernel_agent' lives one level up from there.
-    repo_root = os.path.abspath(os.path.join(dir, ".."))
-    raise_py = os.path.join(repo_root, "kernel_agent", "tools", "backward_naive", "raise.py")
-    proc = subprocess.run([sys.executable, raise_py, ttir_path],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
-        print(proc.stderr)
-        raise RuntimeError(f"raise.py failed on {ttir_path}")
-    dst = os.path.join(out_dir, "raised.py")
-    with open(dst, "w") as f:
-        f.write(proc.stdout)
-    return dst
-
-def emit_stub_to_file(
-    raised_py_path: str,
-    stub_src: str,
-    stub_name: str,
-    fwd_kernel_name: str,
-    bwd_kernel_sym: str,
-    idxs_buffers,
-    idx_folded,
-    signature_key: str,
-):
-    # Assume TRITON_AUTODIFF_DIR points to 'triton_autodiff' and locate tools one level up
-    repo_root = os.path.abspath(os.path.join(dir, ".."))
-    emit_stub_py = os.path.join(repo_root, "kernel_agent", "tools", "backward_naive", "emit_stub.py")
-    proc = subprocess.run(
-        [
-            sys.executable,
-            emit_stub_py,
-            stub_src,
-            stub_name,
-            fwd_kernel_name,
-            bwd_kernel_sym,
-            repr(tuple(idxs_buffers)),
-            repr(tuple(idx_folded)),
-            signature_key,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if proc.returncode != 0:
-        print(proc.stderr)
-        raise RuntimeError(f"emit_stub.py failed for {raised_py_path}")
-    code = proc.stdout
-    # append into raised.py
-    print("writting stub to ", raised_py_path)
-    with open(raised_py_path, "a") as f:
-        f.write("\n")
-        f.write(code)
-        f.write("\n")
-    return code
-
-
-
-def load_raised_jit(raised_py_path):
-  """
-  Import generated raised.py and return the first @triton.jit JITFunction found.
-  """
-  import importlib.util, sys, uuid
-  from triton.runtime.jit import JITFunction
-
-  mod_name = f"autodiff_raised_{uuid.uuid4().hex[:8]}"
-  spec = importlib.util.spec_from_file_location(mod_name, raised_py_path)
-  mod = importlib.util.module_from_spec(spec)
-  sys.modules[mod_name] = mod
-  assert spec.loader is not None, f"Failed to load spec for {raised_py_path}"
-  spec.loader.exec_module(mod)
-
-  candidates = [obj for obj in vars(mod).values() if isinstance(obj, JITFunction)]
-  if not candidates:
-      raise RuntimeError(f"No @triton.jit kernel found in {raised_py_path}")
-  return candidates[0]
-
-# Context for per-call override of backward kernel path
-_AD_OVERWRITE_FP = contextvars.ContextVar("ad_overwrite_fp", default=None)
-# capture artifacts produced by the autodiff hook
-_AD_ARTIFACTS = contextvars.ContextVar("ad_artifacts", default=None)
-
-@contextlib.contextmanager
-def autodiff_overwrite_fp(path: str):
-  token = _AD_OVERWRITE_FP.set(path)
-  assert str(path).endswith(".py"), "backward overwrite expects a triton-lang (not ttir) kernel"
-  try:
-    yield
-  finally:
-    _AD_OVERWRITE_FP.reset(token)
-
-@contextlib.contextmanager
-def record_autodiff_artifacts():
-  """
-  Capture backward file pointer (raised.py) for the current trace.
-  Usage:
-      with record_autodiff_artifacts():
-          ... launch a Triton kernel once ...
-      bwd_fp = get_last_bwd_fp()
-  """
-  token = _AD_ARTIFACTS.set(None)
-  try:
-    yield
-  finally:
-    _AD_ARTIFACTS.reset(token)
-
-def get_last_bwd_fp() -> Optional[str]:
-  """
-  Return the most recent backward file pointer (raised.py path) produced by the autodiff hook.
-  None if no kernels were traced yet in this process.
-  """
-  return _AD_ARTIFACTS.get()
-
-
-
-
 
 
 
@@ -200,44 +76,7 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         if not hasattr(jit_fn, "_compile_signature"):
             jit_fn._compile_signature = compile_dict["signature"]
 
-        # run the mlir pass to generate TTIR,
-        # and then raise that ttir to triton-lang
-        # (via raise_to_triton_lang below)
-        if not raised_py_path:
-            run_mlir_pass(f"generated/{dir_name}")
-            bwd_fp = f"generated/{dir_name}/out.ttir"
-
-            # 4) create callable python fn for bwd
-
-            ### generate kernel ###
-
-            raised_py_path = raise_to_triton_lang(bwd_fp)
-
-            ### generate stub ###
-
-            # folded indices (positional) were already computed in your hook
-            idx_folded = list(p[0] for p in compile_dict["constants"])  # works with current structure
-            # which fwd-call args carry upstream
-            idxs_bufs = getattr(jit_fn, "idxs_buffers", ())
-
-            # user stub lives in the same module as their kenrel
-            stub_src = get_stub_src_from_module(mod_name, stub_name)
-
-            # generate and append via CLI script
-            emit_stub_to_file(
-                raised_py_path,
-                stub_src,
-                stub_name,
-                jit_fn.fn.__name__,
-                f"backward_{jit_fn.fn.__name__}",
-                tuple(idxs_bufs),
-                tuple(idx_folded),
-                builtins.repr(compile_dict["signature"]),
-            )
-
-            # expose artifacts in context store
-            # publish raised.py as the backward file pointer
-            _AD_ARTIFACTS.set(raised_py_path)
+        assert raised_py_path
 
         # compile_kernel(..., overwrite_fp=...) path already re‑executes the user module, runs setup(),
         # and attaches the edited stub from the on disk generated/[sha]/raised.py even when the JIT hook doesn't fire
@@ -348,45 +187,14 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         # Try loading custom DCK first (new raised.py files)
         CustomDCK = raised_module.get("StubOverrideDCK")
-        if CustomDCK:
-            # New path: LLM-editable DCK in raised.py
-            setattr(jit_fn, "_CustomDCK", CustomDCK)
-        # todo: remove
-        else:
-            # Fallback: old raised.py without DCK (backward compat)
-            # Load stubs for framework StubOverrideDCK (tuple-based)
+        assert CustomDCK
+        # New path: LLM-editable DCK in raised.py
+        setattr(jit_fn, "_CustomDCK", CustomDCK)
 
-            # Load both forward and backward stubs from raised.py
-            # Enforce consistent naming: backward stub must be named backward_{stub_name}
-            # Compiler mode generates this name automatically
-            # RAG mode: LLM must rename retrieved stub to match this convention
-            bwd_stub_name = f"backward_{stub_name}"
-            bwd_stub = raised_module.get(bwd_stub_name)
-            if not bwd_stub:
-                raise KeyError(f"Backward stub '{bwd_stub_name}' not found in {raised_py_path}")
-
-            fwd_stub = raised_module.get(stub_name)
-            if not fwd_stub:
-                raise KeyError(f"Forward stub '{stub_name}' not found in {raised_py_path}")
-
-            assert callable(bwd_stub)
-            assert callable(fwd_stub)
-
-            # Old path: _bwd_stub_proxy uses these at runtime
-            setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
-            setattr(jit_fn, "_generated_fwd_stub", fwd_stub)
         # remember path on the kernel for future retraces. We avoid relying on the
         # thread‑local ContextVar because it is reset after setup() and can point to
         # artifacts of a different kernel if multiple kernels are traced interleaved
         setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
-
-        # if overwrite_fp is provided then raise the kernel stored in the provided file
-        # bwd_jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
-        # print("bwd_jit_fn._raised", bwd_jit_fn._raised)
-
-        # jit_fn._raised = load_raised_jit(raised_py_path)    # JITFunction
-        # print("jit_fn._raised", jit_fn._raised)
-
 
 
         # comment:
@@ -422,50 +230,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 # as many fwd signatures as possible)
 triton.knobs.runtime.jit_post_compile_hook = my_post_hook
 
-
-# todo: remove
-# same as DifferentiatedCompiledKernel (DCK), but operating on the level of stubs (not on the lvel of kernels as DCK does);
-# useful to provide llm with ability to overwirte stubs
-class StubOverrideDCK(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, stubs, *all_stub_inputs):
-        fwd_stub, bwd_stub = stubs
-        out = fwd_stub(*all_stub_inputs)
-        ten = [x for x in all_stub_inputs if isinstance(x, torch.Tensor)]
-        ctx.save_for_backward(*ten)
-        ctx.non_ten = [x for x in all_stub_inputs if not isinstance(x, torch.Tensor)]
-        ctx.is_ten = [isinstance(x, torch.Tensor) for x in all_stub_inputs]
-        ctx.bwd_stub = bwd_stub
-        return out
-
-    @staticmethod
-    def backward(ctx, *upstreams): # wrt stub outputs
-
-        # reconstruct all fwd kernel args
-        it_t = iter(ctx.saved_tensors)
-        it_n = iter(ctx.non_ten)
-        all_inps = [next(it_t) if t else next(it_n) for t in ctx.is_ten]
-
-        # in emit_stub.py i made upstream args (to the generated bwd stub) to be keyword only
-        # and then appended the added upstream_* args to the end bwd stub's arg list.
-        # becuase I want to preserve defult args which user orig stub might have,
-        # and not break python’s rule that non‑default params cannot follow defaulted ones
-        kw_up = {f"upstream_{i}": g for i, g in enumerate(upstreams)}
-        # call bwd stub with all fwd stub inputs + upstream grads
-        grads_for_tensors = ctx.bwd_stub(*all_inps, **kw_up)
-
-        # todo: layernorm tests fail because retrun order mismatches -- my code expects outputs
-        # of the stub be in same order as inputs to the stub;
-        # IOW: wrapper expects the backward stub to return one gradient per tensor
-        # input parameter of the stub, in the stub’s declaration order
-        if len(grads_for_tensors) != sum(ctx.is_ten):
-            raise RuntimeError("Backward stub must return one grad per tensor input (in stub order).")
-
-        # align to forward inputs (Tensor -> grad, non‑Tensor -> None)
-        it_g = iter(grads_for_tensors)
-        per_input = [next(it_g) if t else None for t in ctx.is_ten]
-        return (None, *per_input)  # first arg (stubs tuple) has no grad
 
 import sys, importlib, inspect, textwrap
 
