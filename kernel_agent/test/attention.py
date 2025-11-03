@@ -191,7 +191,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
 
 
 
-# @autodiff(_attn_fwd, idxs_buffers=(4, 5))
+@autodiff(_attn_fwd, idxs_buffers=(4, 5))
 def stub(q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]
@@ -226,31 +226,26 @@ def stub(q, k, v, causal, sm_scale):
 
 
 SWEEP = [
-    # todo: use these instead
-    # "HEAD_DIM": 64
-
-    # {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": N, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5}
+    # {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": N, "HEAD_DIM": 64, "causal": False, "sm_scale": 0.5, "required": True if N <= 1024 else False}
     # for N in (16, 1024, 2048, 4096, 8192, 16384)
-    # # for N in (16, 32, )
-
 
     # Must validate (small shapes fit in memory)
-    {"B": 1, "NUM_HEADS": 8, "SEQ_LEN": 128, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": True},
-    {"B": 2, "NUM_HEADS": 16, "SEQ_LEN": 1024, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": True},
+    {"B": 1, "NUM_HEADS": 8, "SEQ_LEN": 128, "HEAD_DIM": 64, "causal": False, "sm_scale": 0.5, "required": True},
+    {"B": 2, "NUM_HEADS": 16, "SEQ_LEN": 1024, "HEAD_DIM": 64, "causal": False, "sm_scale": 0.5, "required": True},
 
     # Optional (may OOM on naive reference)
-    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 4096, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": False},
-    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 8192, "HEAD_DIM": 16, "causal": False, "sm_scale": 0.5, "required": False},
+    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 4096, "HEAD_DIM": 64, "causal": False, "sm_scale": 0.5, "required": False},
+    {"B": 4, "NUM_HEADS": 32, "SEQ_LEN": 8192, "HEAD_DIM": 64, "causal": False, "sm_scale": 0.5, "required": False},
 ]
 
-def make_args(dims, device="cuda", dtype=torch.float16):
+def make_args(dims, device=DEVICE, dtype=torch.float16):
+    dims = dict(dims)  # defensive copy so callers can reuse the input dict
     B, NUM_HEADS, SEQ_LEN, HEAD_DIM = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
-    q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-    k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
-    v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=DEVICE).normal_(mean=0.0, std=0.5)
+    q = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=device).normal_(mean=0.0, std=0.5)
+    k = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=device).normal_(mean=0.0, std=0.5)
+    v = torch.empty((B, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device=device).normal_(mean=0.0, std=0.5)
     # Return kwargs dict with flags from SWEEP (causal, sm_scale)
-    kernel_params = ["causal", "sm_scale"]
-    kwargs = {k: dims[k] for k in kernel_params if k in dims}
+    kwargs = {key: dims[key] for key in ("causal", "sm_scale") if key in dims}
     return (q, k, v), kwargs
 
 def flops(dims, mode):
@@ -263,6 +258,16 @@ def flops(dims, mode):
 
 
 def setup():
-    (q, k, v), _ = make_args(SWEEP[0])
-    stub(q, k, v)
+    (q, k, v), extra = make_args(SWEEP[0])
+    stub(q, k, v, **extra)
 
+
+if __name__ == "__main__":
+    # Run stub over every sweep entry so I can catch signature or compile errors quickly.
+    setup()
+    # for shape in SWEEP:
+    #     dims = {k: v for k, v in shape.items() if k != "required"}
+    #     (q, k, v), kwargs = make_args(dims)
+    #     print(f"[attention test] compiling stub with dims={dims}")
+    #     stub(q, k, v, **kwargs)
+    #     torch.cuda.synchronize()
