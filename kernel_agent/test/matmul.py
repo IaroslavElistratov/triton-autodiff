@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from triton.backends.autodiff import autodiff
+from kernel_agent.autodiff import autodiff
 
 
 torch.manual_seed(0)
@@ -79,7 +79,7 @@ def kernel(
     tl.store(c_ptrs, c)
 
 
-@autodiff(kernel=kernel, idxs_buffers=2)
+@autodiff(kernel=kernel, idxs_buffers=(0, 1))
 def stub(
         a,
         b,

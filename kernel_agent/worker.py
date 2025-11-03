@@ -5,50 +5,27 @@ import traceback
 
 import sys
 
-# ============================================================================
-# KERNEL AGENT WORKER EXECUTION FLOW (RAG MODE)
-# ============================================================================
-#
+from .generate_initial import wrap_with_kwargs
+
+
 # High-level workflow:
 #
-# 0. Orchestrator retrieves backward kernel from RAG index → writes to raised.py (backward only)
+# 0. Orchestrator writes raised.py (forward copy + editable backward scaffold) before
+#    any worker starts. Rollback snapshots that file between iterations.
 #
-# 1. Orchestrator spawns child process → calls compile_kernel(fwd_fp=attention.py, overwrite_fp=raised.py)
-#    - compile_kernel EXECUTES attention.py (forward file), NOT raised.py
-#    - overwrite_fp tells hook: "use this backward file, skip MLIR passes"
+# 1. Each worker child calls compile_kernel(fwd_fp=..., generated_fp=raised.py).
+#    compile_kernel imports the forward module to build the "sidecar" namespace
+#    (make_args, SWEEP, etc.) we need for gradcheck/bench; it no longer patches
+#    the stub at runtime.
 #
-# 2. Inside compile_kernel:
-#    - runpy.run_path(attention.py) creates fresh kernel objects, runs @autodiff decorator
-#    - @autodiff creates proxies (_fwd_stub_proxy, _bwd_stub_proxy) that late-bind to stubs
-#    - Proxies needed because decorator runs at import time (backward doesn't exist yet)
-#    - setup() calls stub → triggers kernel compilation → hook fires
+# 2. Import raised.py directly, fetch StubOverrideDCK and the orchestrator-supplied stub name,
+#    and create a wrapper that mirrors the stub signature but forwards into StubOverrideDCK.apply.
+#    The original stub inside raised.py stays untouched; only the worker holds the wrapper.
 #
-# 3. Hook (in api/new.py) executes during kernel compilation:
-#    - Prepends forward kernel+stub source to raised.py (now has both forward and backward)
-#    - Loads both stubs: runpy.run_path(raised.py) → creates separate namespace
-#    - Sets attributes: kernel._generated_fwd_stub = fwd_stub_from_raised
-#                       kernel._generated_bwd_stub = bwd_stub_from_raised
-#
-# 4. Proxy mechanism enables runtime binding:
-#    - First call: proxy uses original stub from attention.py (triggers compilation)
-#    - After hook: proxy uses stub from raised.py (getattr(kernel, "_generated_fwd_stub"))
-#    - This stub calls kernels from raised.py namespace (different JITFunction objects)
-#    - LLM edits to raised.py take effect immediately via proxy redirection
-#
-# 5. Gradcheck/benchmark execute in SAME child process:
-#    - They call op(q, k, v) many times
-#    - Each call → proxy → uses stub from raised.py (set by hook in step 3)
-#    - Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, not from user file
-#
-# 6. Across iterations:
-#    - Each iteration spawns fresh child → compile_kernel runs AGAIN
-#    - Hook fires AGAIN → reloads edited raised.py → sets attributes in new child
-#    - Gradcheck uses newly loaded stubs (LLM edits picked up)
-#
-# Key insight: Process-local attributes are fine because compile_kernel recreates them
-# in every child before gradcheck runs. No state needs to persist across processes.
-#
-# ============================================================================
+# 3. Gradcheck/benchmark call that wrapper; it binds kwargs/defaults, hands the positional tuple to
+#    StubOverrideDCK.apply, and therefore executes whatever the LLM last wrote to raised.py without
+#    altering the stub definition itself.
+
 
 # Dedicated timeouts for long-running child tasks (env-overridable)
 GRADCHECK_TIMEOUT_S = float(os.environ.get("TB_GRADCHECK_TIMEOUT_S", "180"))
@@ -56,12 +33,53 @@ BENCH_TIMEOUT_S     = float(os.environ.get("TB_BENCH_TIMEOUT_S", "180"))
 
 
 
+def _load_generated_op(generated_fp: str):
+    import runpy
+
+    # Execute generated/raised.py so I inspect its namespace (forward copy, backward stub, StubOverrideDCK).
+    ns = runpy.run_path(generated_fp)
+
+    # StubOverrideDCK is the autograd bridge the generated file exports. Without it I cannot run backward.
+    override_cls = ns.get("StubOverrideDCK")
+    if override_cls is None:
+        raise RuntimeError("StubOverrideDCK missing from generated backward file")
+
+    target_stub_name = os.environ.get("KERNEL_AGENT_STUB_NAME")
+    if not target_stub_name:
+        raise RuntimeError("KERNEL_AGENT_STUB_NAME env var missing; orchestrator must pass stub name")
+
+    candidate = ns.get(target_stub_name)
+    if not callable(candidate):
+        raise RuntimeError(
+            f"Autodiff stub '{target_stub_name}' not found or not callable in {generated_fp}"
+        )
+
+    # Rely solely on this orchestrator-provided name so the worker ignores the forward module's stub and always executes raised.py edits.
+    stub_name = target_stub_name
+    stub_fn = candidate
+
+    # Wrap the generated stub so kwargs/defaults still work, but bodies go through StubOverrideDCK.apply().
+    # Autograd Function.apply only accepts positional args, so we preserve the original signature
+    # (including keyword-only parameters and defaults) via inspect.signature.bind(). This happens in
+    # the worker only; the original forward module isn’t modified.
+    #
+    # Important: i do NOT overwrite the stub living in raised.py. This helper creates a thin wrapper
+    # that mirrors the stub's signature and forwards into StubOverrideDCK.apply. The gradcheck/bench children
+    # call that wrapper so kwargs/defaults bind correctly before apply() (which only accepts positional args).
+    # Because the wrapper sits purely in the worker, the actual stub definition inside raised.py remains untouched.
+    #
+    # IOW: only borrow the stub’s signature (and call it to bind kwargs/defaults), then hand the positional tuple
+    # off to StubOverrideDCK.apply; the stub inside raised.py stays untouched
+    op = wrap_with_kwargs(stub_fn, override_cls)
+    return stub_name, op, ns
+
+
 # these aren't called in the main loop anymore, because each (run_gradcheck_child, run_bench_child) already create an agent
 # so from inside run_gradcheck_child and run_bench_child can just directly call compile_kernel (will run in the main process as which e.g. run_gradcheck_child spawned)
 # these are only called once outside the main loop
 
 
-def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
+def _compile_child(fwd_fp: str, generated_fp: str, q):
     """
     Child process worker for the compile probe.
 
@@ -89,16 +107,15 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
             q.put({"etype": "RuntimeError", "emsg": "no_cuda"})
             q.close(); q.join_thread()
             os._exit(1)
-        # Reconstruct everything fresh in the child; this triggers the same
-        # compile path and the in-process backward preflight inside compile_kernel.
+
+        # Reconstruct everything fresh in the child so any CUDA faults stay isolated.
         # Capture bwd_fp to return to the parent (ns is not pickleable; return only bwd_fp).
-        #
-        # FLOW: compile_kernel executes fwd_fp (user's forward file), NOT overwrite_fp:
-        # - runpy.run_path(fwd_fp) creates fresh kernel objects, runs @autodiff
-        # - setup() triggers compilation → hook fires → prepends forward to raised.py
-        # - Hook loads stubs from raised.py → sets kernel._generated_{fwd,bwd}_stub
-        # - Result: All subsequent calls use stubs from raised.py via proxy mechanism
-        _op, bwd_fp, _ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        # FLOW: compile_kernel executes fwd_fp (user's forward file), not the generated backward path:
+        # - runpy.run_path(fwd_fp) creates fresh kernel objects, runs @autodiff (tags stub)
+        # - setup() runs once, compiling the Triton kernel and populating make_args / SWEEP
+        # - The returned stub is still the user stub; later wrap it so calls route through StubOverrideDCK.apply
+        # todo: since i now create generated file form orchestrator -- seems don't need to call compile_kernel just to get bwd_fp -- that seems legacy path
+        _usr_stub, bwd_fp, _ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
         # Prevents kernel bugs from surfacing at torch.empty() with misleading tracebacks.
@@ -127,7 +144,7 @@ def _compile_child(fwd_fp: str, overwrite_fp: str | None, q):
         # Hard-exit to guarantee isolation; parent inspects exit code and status
         os._exit(1)
 
-def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
+def run_compile_child(fwd_fp: str, generated_fp: str):
     """
     Spawn a short-lived child that runs compile_kernel(...) as a probe.
 
@@ -141,7 +158,7 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
     ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
     q = ctx.Queue(1)
     # Use non-daemon child so resources flush cleanly; explicitly join below.
-    p = ctx.Process(target=_compile_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
+    p = ctx.Process(target=_compile_child, args=(fwd_fp, generated_fp, q), daemon=False)
     p.start()
     try:
         payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
@@ -174,7 +191,7 @@ def run_compile_child(fwd_fp: str, overwrite_fp: str | None = None):
 
 
 
-def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
+def _gradcheck_child(fwd_fp: str, generated_fp: str, q):
     # Mark worker so compile_kernel can run preflight safely here only.
     os.environ["KERNEL_AGENT_WORKER"] = "gradcheck"
     # Prevent compile_kernel from spawning another probe child recursively.
@@ -192,11 +209,10 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
             check_op_backward_reference_sweep as gradcheck_fn,
         )
 
-        # CRITICAL: compile_kernel runs FIRST in this child process:
-        # - Executes fwd_fp (attention.py) → hook fires → loads stubs from raised.py
-        # - Sets kernel._generated_{fwd,bwd}_stub in THIS process
-        # - Returns op that uses proxies pointing to these attributes
-        op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        # CRITICAL: compile_kernel runs FIRST in this child process to materialize the
+        # forward namespace (make_args, SWEEP, etc.). I later load StubOverrideDCK from raised.py
+        # and call the wrapper produced by _load_generated_op so tests route through StubOverrideDCK.apply().
+        _usr_stub, _, ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
         # Real bug example (iterations 2-7): stride error in kernel → surfaced at torch.empty()
@@ -207,26 +223,12 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
 
         sidecar = dict(ns)
 
-        # Gradcheck calls op many times, each call:
-        # - op(q, k, v) → proxy → getattr(kernel, "_generated_fwd_stub")
-        # - Uses stub from raised.py (loaded by hook above)
-        # - Stub calls kernels from raised.py namespace (different JITFunction objects)
-        # Result: Gradcheck ALWAYS uses stubs/kernels from raised.py, NOT user file
-
-        # on subsequent iterations, overwrite_fp="raised.py" points to LLM-edited file containing pytorch_reference_impl
-        if overwrite_fp:
-            try:
-                import runpy
-                bwd_ns = runpy.run_path(overwrite_fp)
-                pytorch_ref = bwd_ns.get("pytorch_reference_impl")
-                if pytorch_ref:
-                    # todo: cleanup previously was using sidecar as pointer to user file which contains (SEEP, make_args, etc) but now bc pytorch_reference_impl does not live in user code, doing this which is ugly
-                    sidecar["pytorch_reference_impl"] = pytorch_ref
-                    if os.environ.get("KERNEL_AGENT_VERBOSE"):
-                        print(f"[gradcheck] Loaded pytorch_reference_impl from {overwrite_fp}")
-            except Exception as e:
-                if os.environ.get("KERNEL_AGENT_VERBOSE"):
-                    print(f"[gradcheck] Could not load pytorch_reference_impl: {e}")
+        _, op, raised_ns = _load_generated_op(generated_fp)
+        pytorch_ref = raised_ns.get("pytorch_reference_impl")
+        if pytorch_ref:
+            sidecar["pytorch_reference_impl"] = pytorch_ref
+            if os.environ.get("KERNEL_AGENT_VERBOSE"):
+                print(f"[gradcheck] Loaded pytorch_reference_impl from {generated_fp}")
 
         # Reference mode tolerances (compare against PyTorch autograd gradients)
         atol, rtol = 1e-2, 0.0
@@ -283,10 +285,10 @@ def _gradcheck_child(fwd_fp: str, overwrite_fp: str | None, q):
         os._exit(0 if status_ok else 1)
 
 
-def run_gradcheck_child(fwd_fp: str, overwrite_fp: str | None):
+def run_gradcheck_child(fwd_fp: str, generated_fp: str):
     ctx = mp.get_context("spawn")
     q = ctx.Queue(1)
-    p = ctx.Process(target=_gradcheck_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
+    p = ctx.Process(target=_gradcheck_child, args=(fwd_fp, generated_fp, q), daemon=False)
     p.start()
     try:
         # Queue returns only the payload (parity_ok, stats)
@@ -320,7 +322,7 @@ def run_gradcheck_child(fwd_fp: str, overwrite_fp: str | None):
     return payload  # (ok: bool, stats: dict)
 
 
-def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
+def _bench_child(fwd_fp: str, generated_fp: str, q):
     os.environ["KERNEL_AGENT_WORKER"] = "bench"
     # Prevent compile_kernel from spawning another probe child recursively.
     os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
@@ -333,12 +335,10 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         from .tools.benchmark import bench_op
         import torch as _t
 
-        # CRITICAL: compile_kernel runs FIRST in this child process:
-        # - Executes fwd_fp (attention.py) → hook fires → loads stubs from raised.py
-        # - Sets kernel._generated_{fwd,bwd}_stub in THIS process
-        # - Returns op that uses proxies pointing to these attributes
-        # Result: Benchmark ALWAYS uses stubs/kernels from raised.py, NOT user file
-        op, _, ns = compile_kernel(fwd_fp, overwrite_fp=overwrite_fp)
+        # CRITICAL: compile_kernel runs FIRST in this child process to materialize the
+        # forward namespace. I later replace op with the wrapper from _load_generated_op so execution routes
+        # through StubOverrideDCK.apply without touching the stub definition in raised.py.
+        _usr_stub, _, ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
         # Real bug example (iterations 2-7): stride error in kernel → surfaced at torch.empty()
@@ -348,6 +348,12 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         _t.cuda.synchronize()
 
         sidecar = dict(ns)
+
+        # compile_kernel still returns the original user stub; swapping in _load_generated_op
+        # replaces it with the wrapped raised.py stub, ensuring the benchmark exercise
+        # matches the code gradcheck validated
+        _, op, _ = _load_generated_op(generated_fp)
+
         cand = bench_op(op, sidecar, mode="bwd")
         # Force async CUDA errors to surface - if this raises, outer except will handle it
         _t.cuda.synchronize()
@@ -374,10 +380,10 @@ def _bench_child(fwd_fp: str, overwrite_fp: str | None, q):
         os._exit(0 if status_ok else 1)
 
 
-def run_bench_child(fwd_fp: str, overwrite_fp: str | None):
+def run_bench_child(fwd_fp: str, generated_fp: str):
     ctx = mp.get_context("spawn")
     q = ctx.Queue(1)
-    p = ctx.Process(target=_bench_child, args=(fwd_fp, overwrite_fp, q), daemon=False)
+    p = ctx.Process(target=_bench_child, args=(fwd_fp, generated_fp, q), daemon=False)
     p.start()
     try:
         # Queue returns only the payload (benchmark summary)

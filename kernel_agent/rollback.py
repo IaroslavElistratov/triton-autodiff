@@ -7,15 +7,16 @@ from .utils import _env_truthy
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
 
 class Rollback:
-    """Lock-wins snapshot manager for the backward kernel file.
+    """Lock-wins snapshot manager for the generated backward file.
 
-    - Snapshots the current kernel to a sidecar file on improved parity/perf
+    - Snapshots the current file to a sidecar on improved parity/perf
     - Restores from that snapshot on plateau/regress (e.g., patience stop)
     - Tracks best parity coverage across iterations
     """
-    def __init__(self, backward_fp: str, patience_parity_restore: int = 0, *, strategy, chain) -> None:
-        self.backward_fp = backward_fp
-        self.lock_fp = f"{backward_fp}.lock"
+
+    def __init__(self, generated_fp: str, patience_parity_restore: int = 0, *, strategy, chain) -> None:
+        self.generated_fp = generated_fp
+        self.lock_fp = f"{generated_fp}.lock"
         self.best_pass_count: int = 0
         self._parity_regress_streak: int = 0
         self._patience_parity_restore: int = patience_parity_restore
@@ -42,8 +43,8 @@ class Rollback:
         Keeping it here avoids duplicate try/except noise and centralizes logging.
         """
         try:
-            shutil.copyfile(self.backward_fp, self.lock_fp)
-            msg = f"snapshot: {self.backward_fp} -> {self.lock_fp}"
+            shutil.copyfile(self.generated_fp, self.lock_fp)
+            msg = f"snapshot: {self.generated_fp} -> {self.lock_fp}"
             if note:
                 msg += f" ({note})"
             self._log(msg)
@@ -70,8 +71,8 @@ class Rollback:
         """
         try:
             if os.path.isfile(self.lock_fp):
-                shutil.copyfile(self.lock_fp, self.backward_fp)
-                self._log(f"restore: {self.lock_fp} -> {self.backward_fp}")
+                shutil.copyfile(self.lock_fp, self.generated_fp)
+                self._log(f"restore: {self.lock_fp} -> {self.generated_fp}")
                 # If we saved a phase index, restore it now so policy state matches the restored kernel
                 if self._strategy.name == "rag_adaptation":
                     # Restore phase index and reset validation flag if rolling back to Phase 1

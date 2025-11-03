@@ -211,7 +211,7 @@ class MinimalLLMPatchProvider:
     def propose_patch(self, *, phase: str,
                       strategy,
                       fwd_fp: str,
-                      bwd_fp: str,
+                      generated_fp: str,
                       state_facts=None,
                       it: int = 0) -> str:
 
@@ -257,11 +257,11 @@ class MinimalLLMPatchProvider:
         # For RAG-only mode: working file contains USER FWD + backward stub skeleton
         if hasattr(strategy, 'i') and strategy.name == "rag_adaptation" and strategy.i == 0:
             # Phase 1 (i=0): Generating PyTorch reference - hide backward stub skeleton
-            working_file_snippet = _read_snippet(bwd_fp, self.snippet_max_lines)
+            working_file_snippet = _read_snippet(generated_fp, self.snippet_max_lines)
             working_file_snippet = strip_backward_section(working_file_snippet)
         else:
             # Phase 2+ (i>=1): Generating backward kernel - filter out pytorch_reference_impl and test helpers
-            working_file_snippet = redact_torch_fn(bwd_fp, self.snippet_max_lines)
+            working_file_snippet = redact_torch_fn(generated_fp, self.snippet_max_lines)
 
         # RAG reference block
         # Strategy has stored rag_fwd and rag_bwd from retrieved kernel
@@ -375,7 +375,7 @@ class MinimalLLMPatchProvider:
         # Ensure target file line points to requested file (fix any mismatched path)
         # Normalize the file header so the model doesn't spend
         # tokens on it and we avoid target-path drift in apply
-        patch_text = _ensure_update_file_target(patch_text, bwd_fp)
+        patch_text = _ensure_update_file_target(patch_text, generated_fp)
         return patch_text
 
 

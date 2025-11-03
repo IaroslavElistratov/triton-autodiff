@@ -96,7 +96,7 @@ def main() -> None:
     )
     print("Latest metrics:", out.get("latest_metrics", {}))  # last sweep with per-shape + speedups
     print("Best metrics:", out.get("best_metrics", {}))      # accepted snapshot + ever_max_tflops
-    print("Best backward file:", out["backward_fp"])
+    print("Best generated file:", out["generated_fp"])
     print("Device:", out["device_info"])
     if out.get("stop_reason"):
         print("Stop reason:", out["stop_reason"])

@@ -249,15 +249,21 @@ class _TritonLaunchCounter:
 _triton_launch_counter = _TritonLaunchCounter()
 
 
-def compile_kernel(file_path: str, overwrite_fp: str | None = None):
+def compile_kernel(file_path: str, generated_fp: str | None = None):
     """
     Execute user's forward module, run its setup(), and return:
         (op_fn, backward_file_pointer, module_namespace)
 
     - file_path: path to the original forward user file (e.g., matmul.py)
-    - overwrite_fp: path to an existing _raised.py with edited bwd kernel+stub.
+    - generated_fp: path to an existing _raised.py with edited bwd kernel+stub.
       If provided, do not re-run the MLIR pass; reuse that file instead.
     """
+
+    # CRITICAL: Every worker starts by calling compile_kernel to materialize the live
+    # forward stub and the sidecar namespace (make_args, SWEEP, etc.). Gradcheck/bench
+    # then immediately swap that stub for the StubOverrideDCK wrapper loaded from
+    # raised.py. If this function stops returning the user stub + namespace, the
+    # worker pipeline breaks regardless of what lives in raised.py.
 
     # probe compile in a spawned child before using a newly edited backward in‑process.
     # Needed because if LLM edits introduce OOB or device faults, running compile+preflight
@@ -280,7 +286,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
         try:
             # Import here to avoid circular import when worker imports utils.
             from .worker import run_compile_child
-            run_compile_child(file_path, overwrite_fp=overwrite_fp)
+            run_compile_child(file_path, generated_fp=generated_fp)
         except Exception as e:
             # surface as CompileError so the orchestrator can prompt the LLM to fix
             tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
@@ -299,9 +305,8 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
     def exec_module(src: str) -> dict[str, Any]:
         import types, sys  # local to avoid polluting module scope
         module_name = "__kernel_agent_user__"
-        # previsoly, the hook crashed due to fwd_stub.__module__ being None because user code was executed in a plain dict,
-        # changed utils.exec_module to create a real module (types.ModuleType("__kernel_agent_user__")), insert it into
-        # sys.modules, and execute code in that module’s dict. This guarantees functions (including the stub) have a valid __module__
+        # Run user code inside a real module so functions get a stable __module__.
+        # (Historically a plain dict caused __module__ = None and downstream crashes.)
         mod = types.ModuleType(module_name)
         mod.__file__ = file_path
         sys.modules[module_name] = mod
@@ -347,7 +352,7 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
             "Expected your code to define (1) top-level kernel decorated with @triton.jit and (2) a stub function decorated with @autodiff, e.g.:\n"
             "@triton.jit\n"
             "def my_kernel(...): ...\n\n"
-            "@autodiff(kernel=my_kernel, ...)\n"
+            "@autodiff(...)\n"
             "def stub(...): ...\n"
         )
 
@@ -360,28 +365,8 @@ def compile_kernel(file_path: str, overwrite_fp: str | None = None):
 
     bwd_fp = None
     def _exec_setup():
-        nonlocal bwd_fp
-        if overwrite_fp:
-            # Use the canonical backend re-export to control overwrite path
-            from triton.backends.autodiff import autodiff_overwrite_fp
-            # this adds the "overwrite_fp" argument to my autograd function
-            # so that the hook knows to use the backward from "overwrite_fp",
-            # and not the backward created by my mlir pass
-            with autodiff_overwrite_fp(overwrite_fp):
-                # execute the function body in the same namespace so it can populate
-                # names like `compiled_kernel` directly into `ns`
-                exec(setup_fn.__code__, ns, ns)
-                # not used, keeping for clarity
-                bwd_fp = overwrite_fp
-        else:
-            # Record/collect the generated backward path via backend re-export
-            from triton.backends.autodiff import record_autodiff_artifacts, get_last_bwd_fp
-            with record_autodiff_artifacts():
-                exec(setup_fn.__code__, ns, ns)
-                # record path to the last generated/selected backward before context resets
-                bwd_fp = get_last_bwd_fp()
+        exec(setup_fn.__code__, ns, ns)
 
-    # comment: this triggers my callback
     try:
         run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
     except BaseException as e:
@@ -568,70 +553,6 @@ def redact_torch_fn(path: str, max_lines: int | None = None) -> str:
     if src:
         src = src + "\n"
     return src
-
-
-# def try_make_slice_payload(text: str) -> Optional[str]:
-#     """
-#     Optional fast path for chunked reads of the generated TTIR file.
-
-#     Input (text): JSON string possibly containing:
-#       {"slice": {"digest": "<digest10|full>", "offset": int, "limit": int}}
-
-#     On success: returns a JSON payload string with fields
-#       {"digest", "path", "offset", "limit", "data"}
-#     If the request is not a slice request, returns None.
-#     Raises ValueError on malformed slice requests.
-#     """
-#     try:
-#         obj = json.loads(text)
-#     except Exception:
-#         return None
-
-#     if not isinstance(obj, dict):
-#         return None
-
-#     # Support both legacy {"slice": {...}} and direct parameter objects used by the
-#     # triton_backward.slice function-call interface.
-#     if "slice" in obj:
-#         s = obj["slice"] or {}
-#     else:
-#         # When called via function interface the JSON itself IS the slice payload.
-#         s = obj
-
-#     digest = str(s.get("digest", "")).strip()
-#     if not digest:
-#         raise ValueError("slice.digest is required")
-#     digest10 = digest[:10]
-#     offset = int(s.get("offset", 0))
-#     limit = int(s.get("limit", 64 * 1024))
-#     if offset < 0 or limit <= 0:
-#         raise ValueError("slice.offset must be >= 0 and slice.limit must be > 0")
-
-#     out_path = f"generated/{digest10}/out.ttir"
-#     with open(out_path, "rb") as fh:
-#         fh.seek(offset)
-#         chunk = fh.read(limit)
-
-#     payload = json.dumps({
-#         "digest": digest10,
-#         "path": out_path,
-#         "offset": offset,
-#         "limit": limit,
-#         "data": chunk.decode("utf-8", "replace"),
-#     })
-#     return payload
-
-# if fmt == "json" or (fmt == "raw" and len(backward_code.encode("utf-8")) > MAX_RAW_BYTES):
-# fwd_ttir = compiled_kernel.asm["ttir"]
-# digest10 = hashlib.sha256(fwd_ttir.encode()).hexdigest()[:10]
-# path = f"generated/{digest10}/out.ttir"
-# payload_dict: dict[str, Any] = {"digest": digest10, "path": path}
-# if fmt == "raw":
-#     payload_dict["note"] = (
-#         f"raw TTIR exceeded {MAX_RAW_BYTES} bytes; returning json pointer instead. "
-#         "Use triton_backward.slice to read windows."
-#     )
-# payload = json.dumps(payload_dict)
 
 
 

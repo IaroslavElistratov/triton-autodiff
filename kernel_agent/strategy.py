@@ -1,8 +1,12 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
-import os
 
 from .utils import _env_truthy
+from .rag import _load_index, _embed_query, _cosine
 
 
 # Default verbose ON unless explicitly disabled
@@ -154,6 +158,47 @@ class RAGAdaptationStrategy(BaseStrategy):
         # Phase 2 state: RAG patterns (optional)
         self.rag_fwd = rag_fwd
         self.rag_bwd = rag_bwd
+        # Store retrieval metadata when orchestrator calls retrieve_references
+        self.last_retrieval = {}
+
+    def retrieve_references(self, redacted_forward: str) -> dict:
+        """Retrieve reference forward/backward code snippets via embeddings."""
+        index_path = Path(__file__).parent / "kernel_embeddings.pkl"
+        min_sim = float(os.environ.get("KERNEL_AGENT_RAG_MIN_SIM", "0.75"))
+
+        try:
+            embeddings, documents, backward_docs, file_list, openai_model = _load_index(str(index_path))
+            query_embedding = _embed_query(redacted_forward, model=openai_model)
+        except Exception as e:
+            raise ValueError(f"Failed to load RAG index or embed query: {e}")
+
+        best_match = None
+        best_similarity = -1.0
+        for fp in file_list:
+            sim = _cosine(query_embedding, embeddings[fp])
+            if sim >= min_sim and sim > best_similarity:
+                content = backward_docs.get(fp, "")
+                if content:
+                    best_match = fp
+                    best_similarity = sim
+
+        if not best_match:
+            raise ValueError(
+                f"No similar kernels found in RAG index (similarity >= {min_sim:.2f}). "
+                "Try lowering --min-sim threshold."
+            )
+
+        forward_ref = documents.get(best_match, "")
+        backward_ref = backward_docs.get(best_match, "")
+
+        payload = {
+            "forward": forward_ref,
+            "backward": backward_ref,
+            "match_path": best_match,
+            "similarity": best_similarity,
+        }
+        self.last_retrieval = payload
+        return payload
 
     def workflow_section(self) -> str:
         """Return workflow context based on current phase."""
@@ -632,9 +677,9 @@ def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
 # todo-now: the guarrails for this should be "gradcheck passes on single shape". And actaully gradrails for phase 1 is also IMPLCITILY assuuming passing all the shapes -- but currently this logic is hidden in the loop strcuture
 #   ==> i think better to refactor and paass gradcheck stats here to the gurarails check as well -- so that guradrails_ checks below can decdie wearther ot  incrrmer or not based on weather that e.g. 1 shaep passeed; or all shaeps passed
 # todo: assert no change in counts of tl.load, tl.store, tl.atomic_, and forbid edits to stub/kernel signatures
-def guardrails_check_phase0(backward_fp: str) -> bool:
+def guardrails_check_phase0(generated_fp: str) -> bool:
     try:
-        with open(backward_fp, "r", encoding="utf-8", errors="ignore") as f:
+        with open(generated_fp, "r", encoding="utf-8", errors="ignore") as f:
             for ln in f:
                 s = ln.lstrip()
                 if not s or s.startswith("#"):
@@ -646,7 +691,7 @@ def guardrails_check_phase0(backward_fp: str) -> bool:
     except OSError:
         return False
 
-def guardrails_check_phase1(backward_fp: str) -> bool:
+def guardrails_check_phase1(generated_fp: str) -> bool:
     """
     Phase-1 (Refactor only) guardrail: return True if the current backward
     kernel contains at least one Python 'for' loop (heuristic: a line starting
@@ -655,7 +700,7 @@ def guardrails_check_phase1(backward_fp: str) -> bool:
     Rationale: only allow advancing to Phase 2 after loops were reintroduced.
     """
     try:
-        with open(backward_fp, "r", encoding="utf-8", errors="ignore") as f:
+        with open(generated_fp, "r", encoding="utf-8", errors="ignore") as f:
             for ln in f:
                 s = ln.lstrip()
                 if not s or s.startswith("#"):

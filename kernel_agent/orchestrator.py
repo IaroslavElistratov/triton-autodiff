@@ -13,6 +13,7 @@ from .strategy import make_strategy
 from .rollback import Rollback
 from .tools.benchmark import PerfTracker
 from .rag import _load_index, _embed_query, _cosine
+from .generate_initial import write_initial_backward
 
 
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
@@ -64,7 +65,7 @@ class KernelOptimizer:
         it: int,
         stage: str,
         *,
-        bwd_fp: str,
+        generated_fp: str,
         fwd_fp: str,
         header: str,
         state_facts: dict,
@@ -106,7 +107,7 @@ class KernelOptimizer:
                     phase=header,
                     strategy=self.strategy,
                     fwd_fp=fwd_fp,
-                    bwd_fp=bwd_fp,
+                    generated_fp=generated_fp,
                     state_facts=state_facts,
                     it=it,
                 )
@@ -124,14 +125,14 @@ class KernelOptimizer:
             # the OSS patcher (gpt_oss.tools.apply_patch) calls apply_commit(...) -> write_file(...), which
             # opens the target with text mode "wt" and writes directly (no transaction/rollback). If an
             # exception occurs mid‑write, the file can be left truncated or partially written
-            existed_before, prev_bytes = save_file_bytes(bwd_fp)
+            existed_before, prev_bytes = save_file_bytes(generated_fp)
             err_apply: str | None = None
             try:
                 _apply_patch_raw(patch)
             # don't shadow err_apply
             except Exception as exc:
                 # restore to pre‑apply bytes to avoid leaving a partial file when apply fails midway
-                restore_err = restore_file_bytes(bwd_fp, existed_before, prev_bytes)
+                restore_err = restore_file_bytes(generated_fp, existed_before, prev_bytes)
                 if restore_err and VERBOSE:
                     print(f"[kernel-agent][it={it}] restore error: {type(restore_err).__name__}: {restore_err}")
 
@@ -157,7 +158,7 @@ class KernelOptimizer:
             return False
 
         # 2) Apply (with one repair attempt on apply error)
-        before = _read_bytes(bwd_fp)
+        before = _read_bytes(generated_fp)
         err_apply = _apply_once(patch)
 
         # Perform one immediate apply-error retry inside _llm_request_and_apply;
@@ -186,7 +187,7 @@ class KernelOptimizer:
                 return False
 
         # 3) Change detection
-        after = _read_bytes(bwd_fp)
+        after = _read_bytes(generated_fp)
         changed = (after != before)
         # don't keep full patch in breadcrumbs to reduce token overhead
         self.patcher.remember(f"apply.{stage}", ("patch applied successfully" if changed else "no-change"))
@@ -238,7 +239,7 @@ class KernelOptimizer:
                 # Worker sent {"etype": "...", "emsg": "...", "traceback": "..."}
                 if "traceback" in payload:
                     # Filter traceback to show only relevant frames (generated file + last frame)
-                    filtered_tb = filter_traceback_for_llm(payload['traceback'], bwd_fp=self.bwd_fp)
+                    filtered_tb = filter_traceback_for_llm(payload['traceback'], self.generated_fp)
                     err = f"{payload.get('etype', type(ce).__name__)}: {payload.get('emsg', str(ce))}\n\nTraceback:\n{filtered_tb}"
                 else:
                     err = f"{payload.get('etype', type(ce).__name__)}: {payload.get('emsg', str(ce))}"
@@ -246,7 +247,7 @@ class KernelOptimizer:
                 # Regular exception (not from worker) - capture traceback here
                 tb = "".join(traceback.format_exception(type(ce), ce, ce.__traceback__))
                 # Filter traceback to show only relevant frames
-                filtered_tb = filter_traceback_for_llm(tb, bwd_fp=self.bwd_fp)
+                filtered_tb = filter_traceback_for_llm(tb, self.generated_fp)
                 err = f"{type(ce).__name__}: {ce}\n\nTraceback:\n{filtered_tb}"
 
             # skip recording gradcheck_error here to avoid showing the same crash twice in the upcoming prompt state.
@@ -260,7 +261,7 @@ class KernelOptimizer:
             self._llm_request_and_apply(
                 it,
                 "fix",
-                bwd_fp=self.bwd_fp,
+                generated_fp=self.generated_fp,
                 fwd_fp=self.fwd_fp,
                 header=header,
                 state_facts={err_category: err},
@@ -282,8 +283,6 @@ class KernelOptimizer:
         if not os.path.isfile(fwd_fp):
             raise FileNotFoundError(f"forward file not found: {fwd_fp}")
 
-        # Set run start time for hook to distinguish within-run vs cross-run
-        # Hook uses this to decide: regenerate skeleton (new run) vs preserve LLM edits (same run)
         import time
         os.environ["KERNEL_AGENT_START_TIME"] = str(time.time())
 
@@ -294,82 +293,55 @@ class KernelOptimizer:
 
         # Set fwd_fp early so run_with_fix can use it if it needs to call _llm_request_and_apply
         self.fwd_fp = fwd_fp
-        self.bwd_fp = None  # Will be set after initialization
-
-        # Backward kernel initialization: retrieve similar backward from RAG index
-        # in api.py mlir passes are not called, because:
-        #   1. Orchestrator writes retrieved backward to raised.py (here)
-        #   2. First compile: compile_kernel(fwd_fp, overwrite_fp=raised_py)
-        #     - bc overwrite_fp is set, MLIR generation is NOT called
+        self.generated_fp = None  # Will be set after initialization
 
         # RAG initialization: retrieve most similar backward kernel
         if VERBOSE:
             print("[kernel-agent] Using RAG to retrieve initial backward kernel")
             print("[kernel-agent] Strategy: RAGAdaptationStrategy (two-phase: reference then backward)")
 
-        # Get the forward source for embedding
-        fwd_source = redact_torch_fn(fwd_fp, None)
-        if not fwd_source or not fwd_source.strip():
+        # Retrieve reference pairs via strategy helper (only used for prompt context)
+        redacted_fwd = redact_torch_fn(fwd_fp, None)
+        if not redacted_fwd or not redacted_fwd.strip():
             raise ValueError(f"Forward kernel file is empty or could not be read: {fwd_fp}")
 
-        # Retrieve most similar backward kernel using existing rag.py internal functions
-        index_path = Path(__file__).parent / "kernel_embeddings.pkl"
-        min_sim = float(os.environ.get("KERNEL_AGENT_RAG_MIN_SIM", "0.75"))
-
-        # Load index and embed query (same logic as build_rag_block)
-        try:
-            embeddings, documents, backward_docs, file_list, openai_model = _load_index(str(index_path))
-            query_embedding = _embed_query(fwd_source, model=openai_model)
-        except Exception as e:
-            raise ValueError(f"Failed to load RAG index or embed query: {e}")
-
-        # Find best match above threshold
-        best_match = None
-        best_similarity = -1.0
-        best_content = None
-        for fp in file_list:
-            sim = _cosine(query_embedding, embeddings[fp])
-            if sim >= min_sim and sim > best_similarity:
-                content = backward_docs.get(fp, "")
-                if content:  # Only consider if backward exists
-                    best_match = fp
-                    best_similarity = sim
-                    best_content = content
-
-        if not best_match:
-            raise ValueError(f"No similar kernels found in RAG index (similarity >= {min_sim:.2f}). "
-                           "Try lowering --min-sim threshold.")
-
-        # Store RAG FWD+BWD for use in Phase 2 (backward generation)
-        # RAGAdaptationStrategy shows these only in Phase 2, not Phase 1
-        retrieved_fwd = documents.get(best_match, "")
-        retrieved_bwd = best_content
+        retrieved = self.strategy.retrieve_references(redacted_fwd)
+        self.strategy.rag_fwd = retrieved.get("forward", "")
+        self.strategy.rag_bwd = retrieved.get("backward", "")
 
         if VERBOSE:
-            print(f"[kernel-agent] Retrieved backward from '{best_match}' (similarity: {best_similarity:.3f})")
-            print(f"[kernel-agent] Retrieved FWD: {len(retrieved_fwd)} chars, BWD: {len(retrieved_bwd)} chars")
+            match_path = retrieved.get("match_path", "<unknown>")
+            similarity = retrieved.get("similarity", float("nan"))
+            print(f"[kernel-agent] Retrieved backward from '{match_path}' (similarity: {similarity:.3f})")
+            print(f"[kernel-agent] Retrieved reference FWD: {len(self.strategy.rag_fwd)} chars")
+            print(f"[kernel-agent] Retrieved reference BWD: {len(self.strategy.rag_bwd)} chars")
 
-        # Store RAG references on strategy (used in Phase 2 prompts)
-        self.strategy.rag_fwd = retrieved_fwd
-        self.strategy.rag_bwd = retrieved_bwd
-
-        # Set backward file path (file will be generated by compile hook on first run)
-        # Hook has access to compile_signature, so it can generate proper skeleton
-        # with correct tensor parameters identified via call-site analysis
-        digest = hashlib.sha256(fwd_source.encode()).hexdigest()[:10]
+        # Set backward file path (write_initial_backward seeds the scaffold immediately)
+        digest = hashlib.sha256(redacted_fwd.encode()).hexdigest()[:10]
         gen_dir = f"generated/{digest}"
         os.makedirs(gen_dir, exist_ok=True)
-        bwd_fp = f"{gen_dir}/raised.py"
+        generated_fp = f"{gen_dir}/raised.py"
+
+        # Seed raised.py before launching any workers so rollback snapshots and child
+        # imports always see a complete scaffold.
+        generated = write_initial_backward(
+            forward_path=fwd_fp,
+            dst_path=generated_fp,
+        )
+
+        self.stub_info = generated
+
+        os.environ["KERNEL_AGENT_STUB_NAME"] = generated.stub_name
 
         if VERBOSE:
-            print(f"[kernel-agent] Backward file path: {bwd_fp}")
-            print(f"[kernel-agent] File will be generated by compile hook with proper scaffolding")
+            print(f"[kernel-agent] Backward file path: {generated_fp}")
+            print(f"[kernel-agent] Wrote initial backward scaffold for stub '{generated.stub_name}'")
 
-        self.bwd_fp = bwd_fp
+        self.generated_fp = generated_fp
 
         # Rollback manager: owns the lock-wins snapshot and pass-count tracking
         rollback = Rollback(
-            bwd_fp,
+            generated_fp,
             self.cfg.patience_parity_restore,
             strategy=self.strategy,
             chain=self.patcher._sampler._chain,
@@ -392,7 +364,7 @@ class KernelOptimizer:
                               patience_perf_stop=self.cfg.patience_perf_stop)
 
         if VERBOSE:
-            print(f"[kernel-agent] Initial backward path: {bwd_fp}")
+            print(f"[kernel-agent] Initial backward path: {generated_fp}")
             print(f"[kernel-agent] Using accept-eq policy: will accept >= 1.0x speedup (baseline performance)")
 
 
@@ -448,7 +420,7 @@ class KernelOptimizer:
 
                 # Run validation (gradcheck will only check forward outputs)
                 def _run_reference_validation():
-                    return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
+                    return run_gradcheck_child(fwd_fp, generated_fp)
                 child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_reference_validation, 0.25, "reference_validation_error")
                 if not child_ran_ok:
                     continue
@@ -478,7 +450,7 @@ class KernelOptimizer:
                 os.environ.pop("GRADCHECK_FORWARD_ONLY", None)
 
                 def _run_gradcheck_child():
-                    return run_gradcheck_child(fwd_fp, overwrite_fp=bwd_fp)
+                    return run_gradcheck_child(fwd_fp, generated_fp)
                 child_ran_ok, payload_gradcheck = self.run_with_fix(it, _run_gradcheck_child, 0.25, "gradcheck_error")
                 if not child_ran_ok:
                     continue
@@ -506,13 +478,16 @@ class KernelOptimizer:
             # using parity from the previous kernel, it misalignes prompts and flips SWEEP early.
 
             # Check for phase advancement and handle any transitions
-            self.strategy.maybe_advance(bwd_fp, payload_gradcheck)
+            self.strategy.maybe_advance(generated_fp, payload_gradcheck)
 
             # Reset conversation chain when advancing from Phase 0 to Phase 1
             # Phase 0 shows the LLM how to write PyTorch reference implementation
             # Phase 1 must start with a FRESH conversation to avoid bias toward PyTorch code
             # Without this reset, LLM remembers Phase 0 and writes pure PyTorch backward instead of Triton
             if self.strategy.phase_just_advanced:
+                if self.strategy.i == 1:
+                    rollback.best_pass_count = 0
+                    rollback._parity_regress_streak = 0
                 if VERBOSE: print(f"[kernel-agent][it={it}] Phase transition detected (0→1), resetting conversation chain to start fresh")
                 self.patcher._sampler._chain.restore_anchor(None)
 
@@ -546,7 +521,7 @@ class KernelOptimizer:
                 self._llm_request_and_apply(
                     it,
                     "init" if self.strategy.phase_just_advanced else "fix",
-                    bwd_fp=bwd_fp, fwd_fp=fwd_fp,
+                    generated_fp=generated_fp, fwd_fp=fwd_fp,
                     header=phase_text if self.strategy.phase_just_advanced else phase_text + "\nONLY restore correctness to pass gradcheck.\n",
                     state_facts={"check_summary": check_summary},
                     # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
@@ -564,7 +539,7 @@ class KernelOptimizer:
 
             # Benchmark in an isolated child process
             def _run_bench_child():
-                return run_bench_child(fwd_fp, overwrite_fp=bwd_fp)
+                return run_bench_child(fwd_fp, generated_fp)
             child_ran_ok, cand = self.run_with_fix(it, _run_bench_child, temp, "bench_error")
             if not child_ran_ok:
                 continue
@@ -614,7 +589,7 @@ class KernelOptimizer:
         return {
             "best_metrics": tracker.best_metrics,
             "latest_metrics": tracker.latest_metrics,
-            "backward_fp": bwd_fp,
+            "generated_fp": generated_fp,
             "device_info": device,
             "stop_reason": stop_reason,
             "final_benchmark_metrics": final_benchmark_metrics,

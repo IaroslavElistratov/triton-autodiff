@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
-from triton.backends.autodiff import autodiff
+from kernel_agent.autodiff import autodiff
 
 # torch.manual_seed(20)
 # # torch.set_printoptions(sci_mode=False, linewidth=1000)
@@ -68,7 +68,7 @@ def _layer_norm_fwd_fused(
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
-@autodiff(kernel=_layer_norm_fwd_fused, idxs_buffers=(1,4,5))
+@autodiff(kernel=_layer_norm_fwd_fused, idxs_buffers=(0, 1, 2))
 def stub(x, weight, bias, eps=1e-5):
     # allocate output
     y = torch.empty_like(x)
