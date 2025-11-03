@@ -4,6 +4,141 @@ import inspect, functools
 from .bwd_sig_comment import build_signature_comment_from_stub_analysis, generate_backward_stub_with_scaffolding
 
 
+# todo-now:
+# mv to orchestrator.py populating initial raise.py; and keep the hook only basically monkey patching user's stub in the user code file to make it call the code from raised.py
+
+
+# Prepend forward kernel+stub source to raised.py so both are in one file.
+# Benefits:
+# - Namespace isolation solved: backward can call forward kernels (both in same namespace)
+# - LLM can edit both: enables coordination (e.g., forward saves intermediates, backward uses them)
+# - Runtime binding: load both stubs from raised.py, edits take effect at runtime
+
+# # todo: cleanup
+# # the "key" arg is just a python string with input signatures of the kernel
+# # but I want some folder name -- one way is to hash it
+# hash_object = hashlib.sha256(key.encode())
+# dir_name = hash_object.hexdigest()[:10]
+# if VERBOSE: print("dir_name: ", dir_name)
+
+# os.makedirs(f"generated/{dir_name}", exist_ok=True)
+
+
+# # FIRST TRACE: Generate complete skeleton from scratch
+
+# if VERBOSE:
+#     print(f"[hook] First trace for {stub_name}, generating fresh skeleton")
+
+# # Get forward source and strip @autodiff decorator
+# fwd_source = get_fwd_source_from_module(mod_name)
+# if not fwd_source or not fwd_source.strip():
+#     raise RuntimeError(f"Failed to extract forward source for {stub_name}")
+
+# # Strip @autodiff decorator from forward source
+# # Original forward file has decorator that creates proxies - we don't need it in raised.py
+# import re
+# fwd_source = re.sub(r'^@autodiff.*$\n?', '', fwd_source, flags=re.MULTILINE)
+
+# # Generate signature comment using call-site analysis
+# sig_comment = build_signature_comment_from_stub_analysis(
+#     stub_name,
+#     fwd_source,
+#     jit_fn.fn.__name__,
+#     jit_fn._compile_signature
+# )
+
+# # Generate backward_stub skeleton with proper scaffolding
+# stub_skeleton = generate_backward_stub_with_scaffolding(
+#     stub_name,
+#     fwd_source,
+#     jit_fn.fn.__name__,
+#     jit_fn._compile_signature
+# )
+
+# # Generate DCK template
+# dck_content = gen_dck_template(stub_name)
+
+# # todo: Compiler mode: preserve compiler-generated backward (from MLIR)
+# # currently overwrites compiler generated stub with the stub_skeleton
+
+# # Build complete file content
+# raised_content = (
+#     "# ============================================================\n"
+#     "# Forward kernel and stub (copied from user file)\n"
+#     "# Backward can call these to recompute intermediates\n"
+#     "# ============================================================\n\n"
+#     f"{fwd_source}\n\n"
+#     "# ============================================================\n"
+#     "# Backward kernel and stub\n"
+#     "# ============================================================\n"
+#     f"{sig_comment}\n"
+#     f"{stub_skeleton}\n\n"
+#     f"{dck_content}"
+# )
+
+# # Write complete skeleton to file
+# with open(raised_py_path, "w") as f:
+#     f.write(raised_content)
+
+# if VERBOSE:
+#     print(f"[hook] Generated skeleton: {raised_py_path}")
+
+
+
+
+
+
+
+
+
+
+
+# def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
+#     jit_fn = fn.jit_function
+
+#     if already_compiled or not hasattr(jit_fn, "_is_fwd_kernel"):
+#         return True
+
+#     raised_py_path = _AD_OVERWRITE_FP.get()
+#     if not raised_py_path:
+#         raise RuntimeError(
+#             "autodiff hook requires overwrite_fp – call your kernel under "
+#             "triton.backends.autodiff.autodiff_overwrite_fp(path_to_raised_py)."
+#         )
+#     if not os.path.isfile(raised_py_path):
+#         raise FileNotFoundError(f"raised.py not found at {raised_py_path}")
+
+#     mod_name, stub_name = jit_fn._autodiff_stub_info
+
+#     if VERBOSE:
+#         print(f"[hook] loading raised.py for {stub_name} from {raised_py_path}")
+
+#     raised_module = runpy.run_path(raised_py_path)
+
+#     custom_dck = raised_module.get("StubOverrideDCK")
+#     bwd_stub_name = f"backward_{stub_name}"
+#     bwd_stub = raised_module.get(bwd_stub_name)
+#     fwd_stub = raised_module.get(stub_name)
+
+#     if custom_dck:
+#         setattr(jit_fn, "_CustomDCK", custom_dck)
+
+#     if bwd_stub and callable(bwd_stub):
+#         setattr(jit_fn, "_generated_bwd_stub", bwd_stub)
+#     if fwd_stub and callable(fwd_stub):
+#         setattr(jit_fn, "_generated_fwd_stub", fwd_stub)
+
+#     if not custom_dck and (bwd_stub is None or fwd_stub is None):
+#         raise RuntimeError(
+#             f"{raised_py_path} is missing StubOverrideDCK and forward/backward stubs "
+#             f"for '{stub_name}'."
+#         )
+
+#     setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
+
+#     return True
+
+
 
 def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
     jit_fn = fn.jit_function  # JITFunction
@@ -14,174 +149,24 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
 
         if VERBOSE: print(f"[my hook] compile hook triggered on the fwd JITFunction: {fn.name}")
 
-        compile_dict = compile
-        # bwd_jit_fn = jit_fn._bwd_kernel
-
-        # 1) extract fwd_compiled_kernel
-
-        device = driver.active.get_current_device()
-        fwd_kernel_cache, target, backend, _binder = jit_fn.device_caches[device]
-        # bwd_kernel_cache, target, backend, _binder = bwd_jit_fn.device_caches[device]
-
-        # get the kernel using the same key
-        fwd_compiled_kernel = fwd_kernel_cache[key]
-
-        # 2) write fwd IR
-
-        # todo: cleanup
-        # the "key" arg is just a python string with input signatures of the kernel
-        # but I want some folder name -- one way is to hash it
-        hash_object = hashlib.sha256(key.encode())
-        dir_name = hash_object.hexdigest()[:10]
-        if VERBOSE: print("dir_name: ", dir_name)
-
-        os.makedirs(f"generated/{dir_name}", exist_ok=True)
-        with open(f"generated/{dir_name}/inp.ttir", "w") as f:
-          f.write(fwd_compiled_kernel.asm['ttir'])
-
-        # 3) autodiff
-
-        # optionally override via context manager;
-        # this is runtime overwrite
         raised_py_path = _AD_OVERWRITE_FP.get()
+        if not raised_py_path:
+            raise RuntimeError(
+                "autodiff hook requires overwrite_fp – call your kernel under "
+                "triton.backends.autodiff.autodiff_overwrite_fp(path_to_raised_py)."
+            )
+        if not os.path.isfile(raised_py_path):
+            raise FileNotFoundError(f"raised.py not found at {raised_py_path}")
 
-        # new API installs a Python-level backward stub on the forward JITFunction, so backward
-        # is not tied to a single forward specialization.
-        # To allow retracing: enforce a single shared backward kernel+stub across all
-        # forward traces (in other words, require callers to use autodiff_overwrite_fp).
-        # Without the assert below, each new forward signature will silently create
-        # a separate backward kernel+stub for each fwd trace, so multi-shape gradcheck
-        # (e.g. passing different N_CTX to fwd attention kernel) will pass
-        # **but for the wrong reason** (per-trace backward pairs).
-        # Instead I want to enforce the following behavior: first trace passes; second trace
-        # fails until the single backward kernel+stub is generalized by the llm to handle the
-        # new shape as well
-        if len(fwd_kernel_cache) > 1:
-            # for call sight clarity: if no explicit overwrite is provided, fall back to the
-            # last artifacts captured in‑process. This keeps a single shared backward across
-            # retraces without requiring the caller to use the context manager;
-            # To stash/read the previous bwd_fp, use a per‑kernel persistent pointer instead of
-            # the short‑lived ContextVar (_AD_ARTIFACTS), the ContextVar is intentionally reset
-            # at the end of record_autodiff_artifacts() to avoid cross‑kernel contamination,
-            # so it is usually None here, instead read the last installed path from the JITFunction._generated_bwd_stub_path
-            # Check if attribute exists (might not exist if previous compilation failed before setting it)
-            if not raised_py_path and hasattr(jit_fn, "_generated_bwd_stub_path"):
-                raised_py_path = jit_fn._generated_bwd_stub_path
 
-            assert raised_py_path, "Forward kernel retraces, but backward overwrite is not provided. Aborting to avoid creating another backward kernel + stub pair."
-
-        mod_name, stub_name = jit_fn._autodiff_stub_info
 
         # Store compile signature for later use (needed for RAG path)
         if not hasattr(jit_fn, "_compile_signature"):
-            jit_fn._compile_signature = compile_dict["signature"]
+            jit_fn._compile_signature = compile["signature"]
 
-        assert raised_py_path
-
-        # compile_kernel(..., overwrite_fp=...) path already re‑executes the user module, runs setup(),
-        # and attaches the edited stub from the on disk generated/[sha]/raised.py even when the JIT hook doesn't fire
-        # because the forward specialization is cached. Allows for reload without re‑running the MLIR pass
-
-        # ensure the bwd stub is installed on the forward JITFunction when overwrite_fp is used
-        # so StubOverrideDCK.backward can find it without regenerating. The hook already does this
-        # on fresh generations; we add a defensive install here for overwrite path
-
-        # Common prepending + stub loading for both compiler and RAG modes
-        # Prepend forward kernel+stub source to raised.py so both are in one file.
-        # Benefits:
-        # - Namespace isolation solved: backward can call forward kernels (both in same namespace)
-        # - LLM can edit both: enables coordination (e.g., forward saves intermediates, backward uses them)
-        # - Runtime binding: load both stubs from raised.py, edits take effect at runtime
-
-
-        # detect if this is the first trace for this kernel in the current run
-        #
-        # note: cannot rely on "len(fwd_kernel_cache) == 1" because each iteration spawns
-        # fresh worker process, process starts with empty cache -> len==1 on EVERY iteration;
-        # on another hand can't check for "not os.path.exists" because the path may exist but from
-        # previous program run
-        start_time = float(os.environ.get("KERNEL_AGENT_START_TIME", "0"))
-        if os.path.exists(raised_py_path):
-            file_mtime = os.path.getmtime(raised_py_path)
-            is_first_trace = (file_mtime < start_time)  # File is stale from previous run
-        else:
-            is_first_trace = True  # File doesn't exist yet
-
-        if is_first_trace:
-            # FIRST TRACE: Generate complete skeleton from scratch
-
-            if VERBOSE:
-                print(f"[hook] First trace for {stub_name}, generating fresh skeleton")
-
-            # Get forward source and strip @autodiff decorator
-            fwd_source = get_fwd_source_from_module(mod_name)
-            if not fwd_source or not fwd_source.strip():
-                raise RuntimeError(f"Failed to extract forward source for {stub_name}")
-
-            # Strip @autodiff decorator from forward source
-            # Original forward file has decorator that creates proxies - we don't need it in raised.py
-            import re
-            fwd_source = re.sub(r'^@autodiff.*$\n?', '', fwd_source, flags=re.MULTILINE)
-
-            # Generate signature comment using call-site analysis
-            sig_comment = build_signature_comment_from_stub_analysis(
-                stub_name,
-                fwd_source,
-                jit_fn.fn.__name__,
-                jit_fn._compile_signature
-            )
-
-            # Generate backward_stub skeleton with proper scaffolding
-            stub_skeleton = generate_backward_stub_with_scaffolding(
-                stub_name,
-                fwd_source,
-                jit_fn.fn.__name__,
-                jit_fn._compile_signature
-            )
-
-            # Generate DCK template
-            dck_content = gen_dck_template(stub_name)
-
-            # todo: Compiler mode: preserve compiler-generated backward (from MLIR)
-            # currently overwrites compiler generated stub with the stub_skeleton
-
-            # Build complete file content
-            raised_content = (
-                "# ============================================================\n"
-                "# Forward kernel and stub (copied from user file)\n"
-                "# Backward can call these to recompute intermediates\n"
-                "# ============================================================\n\n"
-                f"{fwd_source}\n\n"
-                "# ============================================================\n"
-                "# Backward kernel and stub\n"
-                "# ============================================================\n"
-                f"{sig_comment}\n"
-                f"{stub_skeleton}\n\n"
-                f"{dck_content}"
-            )
-
-            # Write complete skeleton to file
-            with open(raised_py_path, "w") as f:
-                f.write(raised_content)
-
-            if VERBOSE:
-                print(f"[hook] Generated skeleton: {raised_py_path}")
-
-        else:
-            # SUBSEQUENT TRACE OR WITHIN-RUN COMPILE: File already exists with potential LLM edits
-
-            if VERBOSE:
-                print(f"[hook] Preserving existing {raised_py_path} (mtime={file_mtime:.2f} > start={start_time:.2f})")
-
-            # Sanity check: file must exist (we checked this above to set is_first_trace)
-            assert os.path.exists(raised_py_path), f"Logic error: is_first_trace={is_first_trace} but file doesn't exist"
-
-            # Don't modify the file - LLM may have edited it
-            # Just load it below for CustomDCK extraction
 
         # Load DCK and/or stubs from raised.py
         # New approach (raised.py with DCK): Load CustomDCK class
-        # Old approach (backward compat): Load stubs for tuple-based framework DCK
         # NOTE: LLM edits are picked up because we rebind each time
         raised_module = runpy.run_path(raised_py_path)
 
@@ -190,36 +175,6 @@ def my_post_hook(key, repr, fn, compile, is_manual_warmup, already_compiled):
         assert CustomDCK
         # New path: LLM-editable DCK in raised.py
         setattr(jit_fn, "_CustomDCK", CustomDCK)
-
-        # remember path on the kernel for future retraces. We avoid relying on the
-        # thread‑local ContextVar because it is reset after setup() and can point to
-        # artifacts of a different kernel if multiple kernels are traced interleaved
-        setattr(jit_fn, "_generated_bwd_stub_path", raised_py_path)
-
-
-        # comment:
-        # for this path, don't need to attach any entry into the cache of the backward_jit_fucntion
-        # (as oppose to the USE_RAISED=False path) becuase USE_RAISED=True path is integrated basically calling
-        # the pytohn JITFunction object (bwd_kerne._raised) from the wrap_bwd_kernel (so no populating of bwd jut fucntion caches is needed)
-
-
-        # still keep _autodiff_info on bwd_jit_fn (folded indices) for the wrapper logic
-        # (for both USE_RAISED=True and USE_RAISED=False) becuase wrap_bwd_kernel reads it unconditionally
-
-        # recover all arguments that have been folded into the CompiledKernel (need for later removal
-        # of these folded args from fwd_kernel_args inside wrapped_bwd_kernel before passing them bwd_kernel);
-        # includes compile‑time constants (declared `constexpr`) AND automatically specialised (ints/bools/tuples …)
-        folded = list(p[0] for p in compile_dict["constants"])
-        names = [jit_fn.arg_names[i] for i in folded]
-
-        if VERBOSE:
-            print("[my_hook] compile_dict['signature']", compile_dict["signature"])
-            print("[my_hook] compile_dict['constants']", compile_dict["constants"])
-            print("[my hook] jit_fn.params:", jit_fn.params)
-            print("jit_fn.signature.parameters", jit_fn.signature.parameters)
-
-            print("Hard‑coded parameter indices:", folded)
-            print("Hard‑coded parameter names:  ", names)
 
     return True
 
