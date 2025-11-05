@@ -251,37 +251,18 @@ _triton_launch_counter = _TritonLaunchCounter()
 
 def compile_kernel(file_path: str, generated_fp: str | None = None):
     """
-    Execute user's forward module, run its setup(), and return:
-        (op_fn, backward_file_pointer, module_namespace)
-
-    - file_path: path to the original forward user file (e.g., matmul.py)
-    - generated_fp: path to an existing _raised.py with edited bwd kernel+stub.
-      If provided, do not re-run the MLIR pass; reuse that file instead.
+    - Executes user’s forward module to get a fresh namespace for make_args, SWEEP, setup, etc.
+    - Runs setup() once to force Triton to compile the forward kernel (and surface syntax/runtime issues early).
+    - Validates that the forward file actually defines a @triton.jit kernel plus an autodiff-tagged stub, and raises UserError if not.
+    - If user fwd kernel call blows up, the failure stays in that short-lived process because we invoke this fn from probe child.
     """
 
-    # CRITICAL: Every worker starts by calling compile_kernel to materialize the live
-    # forward stub and the sidecar namespace (make_args, SWEEP, etc.). Gradcheck/bench
-    # then immediately swap that stub for the StubOverrideDCK wrapper loaded from
-    # raised.py. If this function stops returning the user stub + namespace, the
-    # worker pipeline breaks regardless of what lives in raised.py.
+    # Spawn a short-lived child before touching the freshly edited backward. The child runs compile_kernel to
+    # materialize the forward namespace (make_args, SWEEP, setup) and to surface syntax/device faults inside
+    # its own CUDA context; the parent stays clean. On success nothing is returned—only a "passed" marker
+    # so the parent can rebuild in-process. A KERNEL_AGENT_PROBE_CHILD flag prevents recursion because
+    # run_compile_child ultimately calls back into compile_kernel.
 
-    # probe compile in a spawned child before using a newly edited backward in‑process.
-    # Needed because if LLM edits introduce OOB or device faults, running compile+preflight
-    # in a child contains the failure to that child’s CUDA context. The parent remains
-    # healthy and can immediately ask the LLM to fix instead of crashing the whole loop.
-    # The probe ignores return values and only reports status; the parent then rebuilds
-    # the op in‑process as usual on success.
-    #
-    # i put the probe call inside the compile_op, because i already define _create_op_with_fix
-    # which catches the errs from _create_op and shows them to llm, and to avoid duplicating all the logic;
-    # That keeps logic in one place, _create_op_with_fix surface both compile and probe failures
-    # to the LLM, and avoids duplicating paths
-
-    # In parent (orchestrator.py) run a probe compile in a child before executing user code here.
-    # Avoid recursion by checking a child flag (because run_compile_child calls compile_kernel)
-
-    # If i launch a child once and it OOB's and messes the context, then (e.g. on the next iteration of the orchestrator loop)
-    # I'll launch another child and that child will have a fresh working context
     if not os.environ.get("KERNEL_AGENT_PROBE_CHILD"):
         try:
             # Import here to avoid circular import when worker imports utils.
@@ -319,8 +300,7 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
         src = f.read()
 
     try:
-        # sometimes even this step failed, e.g. when model messed up
-        # indentation of python kernel function declaration
+        # this can fail, e.g. wrong indentation of python kernel function declaration
         ns = exec_module(src)
     except BaseException as e:
         # surface structured error upwards; let the orchestrator decide how to recover
@@ -336,10 +316,7 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
         }
         raise CompileError(err) from e
 
-    # Validate presence of a Triton kernel and an @autodiff-decorated stub.
-    # Don't check for a StubDCK subclass here, bc the decorator returns a callable function,
-    # and the internal autograd class is not exposed as a public subclass in the user module.
-    # Instead i made the @autograd decorator tag the stub (__is_autodiff_stub__), so check for that
+    # Validate presence of a Triton kernel and an @autodiff-decorated stub
     has_kernel = any(isinstance(v, JITFunction) for v in ns.values())
     has_stub = any(
         callable(v) and bool(getattr(v, "__is_autodiff_stub__", False))
@@ -363,10 +340,10 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
     if not callable(ns.get("make_args")) or not isinstance(ns.get("SWEEP"), (list, tuple)):
         raise UserError("User kernel must define make_args and SWEEP")
 
-    bwd_fp = None
     def _exec_setup():
         exec(setup_fn.__code__, ns, ns)
 
+    # NOTE: execute user stub and kernels
     try:
         run_with_timeout(_exec_setup, CODE_EXEC_TIMEOUT_S)
     except BaseException as e:
@@ -382,16 +359,10 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
             "context_snippet": _read_snippet(file_path, 200),
         }
         raise CompileError(err) from e
-    op = ns.get("stub")
-    if not callable(op):
+    if not callable(ns.get("stub")):
         raise UserError("Expected a top-level stub(...) to call the kernel.")
 
-    # don't run pre-flight bwd here anymore, instead just directly run gradcheck / bench
-    # in the child -- if it oob's then no problem. Preemptively running backward was needed here when
-    # i tried to do a canary compile_kernel in the child to try to guard oob's before the main
-    # process runs but now since gracheck and bench both run in child -- isn't needed anymore.
-
-    return op, bwd_fp, ns
+    return ns
 
 
 

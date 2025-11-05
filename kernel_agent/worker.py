@@ -36,10 +36,10 @@ BENCH_TIMEOUT_S     = float(os.environ.get("TB_BENCH_TIMEOUT_S", "180"))
 def _load_generated_op(generated_fp: str):
     import runpy
 
-    # Execute generated/raised.py so I inspect its namespace (forward copy, backward stub, StubOverrideDCK).
+    # Execute generated/raised.py to inspect its namespace (forward copy, backward stub, StubOverrideDCK).
     ns = runpy.run_path(generated_fp)
 
-    # StubOverrideDCK is the autograd bridge the generated file exports. Without it I cannot run backward.
+    # StubOverrideDCK is the autograd bridge the generated file exports. Without it the backward cannot run.
     override_cls = ns.get("StubOverrideDCK")
     if override_cls is None:
         raise RuntimeError("StubOverrideDCK missing from generated backward file")
@@ -63,7 +63,7 @@ def _load_generated_op(generated_fp: str):
     # (including keyword-only parameters and defaults) via inspect.signature.bind(). This happens in
     # the worker only; the original forward module isn’t modified.
     #
-    # Important: i do NOT overwrite the stub living in raised.py. This helper creates a thin wrapper
+    # Important: do NOT overwrite the stub living in raised.py. This helper creates a thin wrapper
     # that mirrors the stub's signature and forwards into StubOverrideDCK.apply. The gradcheck/bench children
     # call that wrapper so kwargs/defaults bind correctly before apply() (which only accepts positional args).
     # Because the wrapper sits purely in the worker, the actual stub definition inside raised.py remains untouched.
@@ -109,19 +109,16 @@ def _compile_child(fwd_fp: str, generated_fp: str, q):
             os._exit(1)
 
         # Reconstruct everything fresh in the child so any CUDA faults stay isolated.
-        # Capture bwd_fp to return to the parent (ns is not pickleable; return only bwd_fp).
         # FLOW: compile_kernel executes fwd_fp (user's forward file), not the generated backward path:
         # - runpy.run_path(fwd_fp) creates fresh kernel objects, runs @autodiff (tags stub)
         # - setup() runs once, compiling the Triton kernel and populating make_args / SWEEP
-        # - The returned stub is still the user stub; later wrap it so calls route through StubOverrideDCK.apply
-        # todo: since i now create generated file form orchestrator -- seems don't need to call compile_kernel just to get bwd_fp -- that seems legacy path
-        _usr_stub, bwd_fp, _ns = compile_kernel(fwd_fp, generated_fp)
+        # - Runs setup() to surface runtime faults; nothing is returned
+        compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
         # Prevents kernel bugs from surfacing at torch.empty() with misleading tracebacks.
         # See _gradcheck_child:207-212 for detailed explanation with real example.
         _t.cuda.synchronize()
-        q.put(bwd_fp)
         q.close(); q.join_thread()
         os._exit(0)
     except Exception as e:
@@ -147,11 +144,6 @@ def _compile_child(fwd_fp: str, generated_fp: str, q):
 def run_compile_child(fwd_fp: str, generated_fp: str):
     """
     Spawn a short-lived child that runs compile_kernel(...) as a probe.
-
-    Why here and why child:
-      - compile_kernel includes a minimal backward preflight; running it in a child
-        contains OOB/device faults so the main agent loop can continue and let the LLM fix.
-      - Only the backward file path (string) is returned to avoid pickling large objects.
     """
     # Lazy import to avoid circular imports and pick up runtime-configured timeout
     from .utils import CODE_EXEC_TIMEOUT_S
@@ -182,7 +174,6 @@ def run_compile_child(fwd_fp: str, generated_fp: str):
         err = RuntimeError(f"compile probe failed: {payload.get('etype', 'Unknown')}: {payload.get('emsg', str(payload))}")
         err.worker_payload = payload  # Attach payload dict as attribute
         raise err
-    # payload is the bwd_fp (string)
     return payload
 
 
@@ -210,9 +201,9 @@ def _gradcheck_child(fwd_fp: str, generated_fp: str, q):
         )
 
         # CRITICAL: compile_kernel runs FIRST in this child process to materialize the
-        # forward namespace (make_args, SWEEP, etc.). I later load StubOverrideDCK from raised.py
+        # forward namespace (make_args, SWEEP, etc.). Later steps load StubOverrideDCK from raised.py
         # and call the wrapper produced by _load_generated_op so tests route through StubOverrideDCK.apply().
-        _usr_stub, _, ns = compile_kernel(fwd_fp, generated_fp)
+        ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
         # Real bug example (iterations 2-7): stride error in kernel → surfaced at torch.empty()
@@ -336,9 +327,9 @@ def _bench_child(fwd_fp: str, generated_fp: str, q):
         import torch as _t
 
         # CRITICAL: compile_kernel runs FIRST in this child process to materialize the
-        # forward namespace. I later replace op with the wrapper from _load_generated_op so execution routes
+        # forward namespace. Later steps replace op with the wrapper from _load_generated_op so execution routes
         # through StubOverrideDCK.apply without touching the stub definition in raised.py.
-        _usr_stub, _, ns = compile_kernel(fwd_fp, generated_fp)
+        ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
         # Real bug example (iterations 2-7): stride error in kernel → surfaced at torch.empty()
@@ -349,9 +340,7 @@ def _bench_child(fwd_fp: str, generated_fp: str, q):
 
         sidecar = dict(ns)
 
-        # compile_kernel still returns the original user stub; swapping in _load_generated_op
-        # replaces it with the wrapped raised.py stub, ensuring the benchmark exercise
-        # matches the code gradcheck validated
+        # Load the generated stub wrapper so benchmarking exercises the latest backward implementation
         _, op, _ = _load_generated_op(generated_fp)
 
         cand = bench_op(op, sidecar, mode="bwd")
