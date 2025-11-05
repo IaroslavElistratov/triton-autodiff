@@ -251,36 +251,15 @@ _triton_launch_counter = _TritonLaunchCounter()
 
 def compile_kernel(file_path: str, generated_fp: str | None = None):
     """
-    - Executes user’s forward module to get a fresh namespace for make_args, SWEEP, setup, etc.
-    - Runs setup() once to force Triton to compile the forward kernel (and surface syntax/runtime issues early).
-    - Validates that the forward file actually defines a @triton.jit kernel plus an autodiff-tagged stub, and raises UserError if not.
-    - If user fwd kernel call blows up, the failure stays in that short-lived process because we invoke this fn from probe child.
+    Execute the user forward module in-process and return the resulting namespace.
+
+    Assumes the caller already chose the desired isolation strategy (e.g., by
+    launching this function inside a separate process). Responsibilities here:
+      - import the forward file into a fresh module namespace
+      - run setup() once so Triton compiles the forward kernel and surfaces errors
+      - ensure a @triton.jit kernel and autodiff-tagged stub exist
+      - raise UserError/CompileError with structured context on failure
     """
-
-    # Spawn a short-lived child before touching the freshly edited backward. The child runs compile_kernel to
-    # materialize the forward namespace (make_args, SWEEP, setup) and to surface syntax/device faults inside
-    # its own CUDA context; the parent stays clean. On success nothing is returned—only a "passed" marker
-    # so the parent can rebuild in-process. A KERNEL_AGENT_PROBE_CHILD flag prevents recursion because
-    # run_compile_child ultimately calls back into compile_kernel.
-
-    if not os.environ.get("KERNEL_AGENT_PROBE_CHILD"):
-        try:
-            # Import here to avoid circular import when worker imports utils.
-            from .worker import run_compile_child
-            run_compile_child(file_path, generated_fp=generated_fp)
-        except Exception as e:
-            # surface as CompileError so the orchestrator can prompt the LLM to fix
-            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-            msg = str(e)
-            err = {
-                "phase": "compile_probe",
-                "error_type": type(e).__name__,
-                "error_message": msg,
-                # "fwd_file": file_path,
-                "traceback": tb,
-                "context_snippet": _read_snippet(file_path, 200),
-            }
-            raise CompileError(err) from e
 
 
     def exec_module(src: str) -> dict[str, Any]:

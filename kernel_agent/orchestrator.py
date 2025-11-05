@@ -8,7 +8,7 @@ import torch
 
 from gpt_oss.tools.apply_patch import apply_patch as _apply_patch_raw
 from .utils import _read_snippet, compile_kernel as create_op, UserError, _env_truthy, save_file_bytes, restore_file_bytes, redact_torch_fn, filter_traceback_for_llm
-from .worker import run_gradcheck_child, run_bench_child, run_compile_child
+from .worker import run_gradcheck_child, run_bench_child
 from .strategy import make_strategy
 from .rollback import Rollback
 from .tools.benchmark import PerfTracker

@@ -98,9 +98,6 @@ def _compile_child(fwd_fp: str, generated_fp: str, q):
         from .utils import compile_kernel
         # Import torch lazily inside the child process only
         import torch as _t
-        # Mark this process as the probe child so compile_kernel won't spawn again.
-        os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
-
         # If CUDA is unavailable, treat as a hard error and exit child.
         if not _t.cuda.is_available():
             # Signal fatal probe failure to parent and return cleanly; parent raises.
@@ -141,40 +138,41 @@ def _compile_child(fwd_fp: str, generated_fp: str, q):
         # Hard-exit to guarantee isolation; parent inspects exit code and status
         os._exit(1)
 
-def run_compile_child(fwd_fp: str, generated_fp: str):
-    """
-    Spawn a short-lived child that runs compile_kernel(...) as a probe.
-    """
-    # Lazy import to avoid circular imports and pick up runtime-configured timeout
-    from .utils import CODE_EXEC_TIMEOUT_S
-    ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
-    q = ctx.Queue(1)
-    # Use non-daemon child so resources flush cleanly; explicitly join below.
-    p = ctx.Process(target=_compile_child, args=(fwd_fp, generated_fp, q), daemon=False)
-    p.start()
-    try:
-        payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
-    except (queue.Empty, EOFError):
-        # print(f"[probe] queue wait failed: {type(e).__name__}: {e}; alive={p.is_alive()}, exitcode={p.exitcode}")
-        # Child wedged or died before posting a status – kill and escalate
-        p.terminate(); p.join(1.0)
-        if p.is_alive():
-            getattr(p, "kill", p.terminate)()
-            p.join()
-        raise TimeoutError("compile probe hung or child died without reporting")
-    finally:
-        q.close()
-    p.join()
-    # Use child exit code to decide success; queue carries payload only.
-    if p.exitcode != 0:
-        # Attach structured payload from child so orchestrator can extract full traceback.
-        # payload = {"etype": "KeyError", "emsg": "'backward_stub'", "traceback": "...full frames..."}
-        # Orchestrator's run_with_fix will extract this via hasattr(err, 'worker_payload') and
-        # filter the traceback before showing to LLM (removing middleware frames, keeping user code).
-        err = RuntimeError(f"compile probe failed: {payload.get('etype', 'Unknown')}: {payload.get('emsg', str(payload))}")
-        err.worker_payload = payload  # Attach payload dict as attribute
-        raise err
-    return payload
+# def run_compile_child(fwd_fp: str, generated_fp: str):
+#     """
+#     Spawn a short-lived child that runs compile_kernel(...) to validate the forward module in isolation.
+#     Returns True on success; otherwise raises with the child’s structured error payload.
+#     """
+#     # Lazy import to avoid circular imports and pick up runtime-configured timeout
+#     from .utils import CODE_EXEC_TIMEOUT_S
+#     ctx = mp.get_context("spawn")  # never 'fork' with CUDA (unsafe with GPU)
+#     q = ctx.Queue(1)
+#     # Use non-daemon child so resources flush cleanly; explicitly join below.
+#     p = ctx.Process(target=_compile_child, args=(fwd_fp, generated_fp, q), daemon=False)
+#     p.start()
+#     try:
+#         payload = q.get(timeout=CODE_EXEC_TIMEOUT_S)
+#     except (queue.Empty, EOFError):
+#         # print(f"[probe] queue wait failed: {type(e).__name__}: {e}; alive={p.is_alive()}, exitcode={p.exitcode}")
+#         # Child wedged or died before posting a status – kill and escalate
+#         p.terminate(); p.join(1.0)
+#         if p.is_alive():
+#             getattr(p, "kill", p.terminate)()
+#             p.join()
+#         raise TimeoutError("compile probe hung or child died without reporting")
+#     finally:
+#         q.close()
+#     p.join()
+#     # Use child exit code to decide success; queue carries payload only.
+#     if p.exitcode != 0:
+#         # Attach structured payload from child so orchestrator can extract full traceback.
+#         # payload = {"etype": "KeyError", "emsg": "'backward_stub'", "traceback": "...full frames..."}
+#         # Orchestrator's run_with_fix will extract this via hasattr(err, 'worker_payload') and
+#         # filter the traceback before showing to LLM (removing middleware frames, keeping user code).
+#         err = RuntimeError(f"compile probe failed: {payload.get('etype', 'Unknown')}: {payload.get('emsg', str(payload))}")
+#         err.worker_payload = payload  # Attach payload dict as attribute
+#         raise err
+#     return payload
 
 
 
@@ -185,8 +183,6 @@ def run_compile_child(fwd_fp: str, generated_fp: str):
 def _gradcheck_child(fwd_fp: str, generated_fp: str, q):
     # Mark worker so compile_kernel can run preflight safely here only.
     os.environ["KERNEL_AGENT_WORKER"] = "gradcheck"
-    # Prevent compile_kernel from spawning another probe child recursively.
-    os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
     # Make launch sync so device-side assert triggers here, not later.
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
     status_ok = False
@@ -315,8 +311,6 @@ def run_gradcheck_child(fwd_fp: str, generated_fp: str):
 
 def _bench_child(fwd_fp: str, generated_fp: str, q):
     os.environ["KERNEL_AGENT_WORKER"] = "bench"
-    # Prevent compile_kernel from spawning another probe child recursively.
-    os.environ["KERNEL_AGENT_PROBE_CHILD"] = "1"
     # Make launch sync so device-side assert triggers here, not later.
     os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
     status_ok = False
