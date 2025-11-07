@@ -191,7 +191,7 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
 
 
 
-@autodiff(_attn_fwd, idxs_buffers=(0, 1, 2))
+@autodiff(idxs_buffers=(0, 1, 2))
 def stub(q, k, v, causal, sm_scale):
     # shape constraints
     HEAD_DIM_Q, HEAD_DIM_K = q.shape[-1], k.shape[-1]

@@ -68,7 +68,7 @@ def _layer_norm_fwd_fused(
         # Write output
         tl.store(Y + cols, y, mask=mask)
 
-@autodiff(kernel=_layer_norm_fwd_fused, idxs_buffers=(0, 1, 2))
+@autodiff(idxs_buffers=(0, 1, 2))
 def stub(x, weight, bias, eps=1e-5):
     # allocate output
     y = torch.empty_like(x)

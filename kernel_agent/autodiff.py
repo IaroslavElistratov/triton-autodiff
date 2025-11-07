@@ -11,17 +11,6 @@ def autodiff(*args, **kwargs):
     Only records metadata (no runtime hook integration).
     """
 
-    if not args and 'kernel' not in kwargs:
-        raise TypeError("autodiff() missing required positional argument 'kernel'")
-
-    if args:
-        kernel = args[0]
-    else:
-        kernel = kwargs.pop('kernel', None)
-
-    if kernel is None:
-        raise TypeError("autodiff() missing required argument 'kernel'")
-
     if 'idxs_buffers' not in kwargs:
         raise TypeError("autodiff() missing required keyword argument 'idxs_buffers'")
 

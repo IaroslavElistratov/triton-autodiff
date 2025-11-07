@@ -79,7 +79,7 @@ def kernel(
     tl.store(c_ptrs, c)
 
 
-@autodiff(kernel=kernel, idxs_buffers=(0, 1))
+@autodiff(idxs_buffers=(0, 1))
 def stub(
         a,
         b,
