@@ -1,5 +1,16 @@
 #  python -m kernel_agent.test.bwd.attention
 
+"""
+NVIDIA RTX 4000 Ada
+fused-attention-batch4-head32-d64-bwd-causal=True:
+     N_CTX  Triton [FP16]  Triton [FP8]
+0   1024.0      21.316002     21.388169
+1   2048.0      29.849746     29.873517
+2   4096.0      36.174604     35.972546
+3   8192.0      39.760135     39.488577
+4  16384.0      41.676693     41.492543
+"""
+
 
 """
 Fused Attention

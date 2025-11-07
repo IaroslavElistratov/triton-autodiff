@@ -249,18 +249,19 @@ def make_args(dims, device=DEVICE, dtype=torch.float16):
     kwargs = {key: dims[key] for key in ("causal", "sm_scale") if key in dims}
     return (q, k, v), kwargs
 
-def flops(dims, mode):
-    """ optional"""
+def flops(dims):
     B, H, N, D = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
-    total = 2.0 * (2.0 * B * H * N * N * D)  # forward+backward baseline
+    total = 2.0 * (2.0 * B * H * N * N * D)  # do this to count forward and backward matmuls for the baseline
     if dims.get("causal", False):
         total *= 0.5
+    # backward mode
+    total *= 2.5
     return total
 
 
 def setup():
-    (q, k, v), extra = make_args(SWEEP[0])
-    stub(q, k, v, **extra)
+    (q, k, v), kwargs = make_args(SWEEP[0])
+    stub(q, k, v, **kwargs)
 
 
 if __name__ == "__main__":
