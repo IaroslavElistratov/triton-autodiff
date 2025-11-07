@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 from triton.runtime.jit import JITFunction
+from triton.runtime.autotuner import Autotuner
 
 
 # todo:
@@ -20,6 +21,14 @@ from triton.runtime.jit import JITFunction
 # Examples:
 #   "CompileError: compile_error: TypeError: ..." -> type="TypeError", msg="..."
 #   "TypeError: ..." -> type="TypeError", msg="..."
+
+def _is_triton_kernel(obj) -> bool:
+    """Return True for raw @triton.jit kernels or autotune wrappers."""
+    if isinstance(obj, (JITFunction, Autotuner)):
+        return True
+    # Fallback for unforeseen wrappers: look for an embedded JITFunction
+    inner = getattr(obj, "fn", None)
+    return isinstance(inner, JITFunction)
 
 
 # todo: remove, not needed anymore. Can just raise e
@@ -296,7 +305,7 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
         raise CompileError(err) from e
 
     # Validate presence of a Triton kernel and an @autodiff-decorated stub
-    has_kernel = any(isinstance(v, JITFunction) for v in ns.values())
+    has_kernel = any(_is_triton_kernel(v) for v in ns.values())
     has_stub = any(
         callable(v) and bool(getattr(v, "__is_autodiff_stub__", False))
         for v in ns.values()
@@ -338,9 +347,6 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
             "context_snippet": _read_snippet(file_path, 200),
         }
         raise CompileError(err) from e
-    if not callable(ns.get("stub")):
-        raise UserError("Expected a top-level stub(...) to call the kernel.")
-
     return ns
 
 
