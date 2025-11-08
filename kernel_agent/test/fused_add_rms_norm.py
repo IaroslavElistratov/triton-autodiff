@@ -2,12 +2,10 @@
 
 import functools
 import importlib
-import operator
 
 from typing import Callable
 
 import math
-import operator
 
 import torch
 import triton
@@ -505,7 +503,6 @@ import time
 from collections import OrderedDict
 from dataclasses import asdict
 from dataclasses import dataclass
-from importlib.metadata import version
 from itertools import zip_longest
 from typing import Any
 from typing import Callable
@@ -871,7 +868,6 @@ def parse_benchmark_script_args():
 # from liger_kernel.utils import infer_device
 
 import torch
-import torch.nn as nn
 
 # from liger_kernel.ops.fused_add_rms_norm import LigerFusedAddRMSNormFunction
 

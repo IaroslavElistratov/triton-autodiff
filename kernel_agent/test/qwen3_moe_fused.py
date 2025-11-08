@@ -296,6 +296,7 @@ def make_args(dims, device="cuda", dtype=torch.bfloat16):
     return (x, w, m_sizes), {"dtype": dtype}
 
 
+# todo: replace with flop count for bwd
 def flops(dims):
     M = dims["M"]
     N = dims["N"]

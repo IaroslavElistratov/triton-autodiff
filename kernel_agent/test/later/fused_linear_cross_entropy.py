@@ -277,6 +277,9 @@ def fused_linear_cross_entropy_forward(
     device = _input.device
 
     input_requires_grad = _input.requires_grad
+    # NOTE: fixes liger bug
+    grad_weight = None
+    grad_bias = None
 
     # inputs have shape: BT x H
     # materialized activations will have shape: BT x V
@@ -459,7 +462,7 @@ def fused_linear_cross_entropy_forward(
 SWEEP = [
     {"BT": 1024, "H": 4096, "V": 128256, "dtype": torch.bfloat16, "required": True},
     {"BT": 4096, "H": 4096, "V": 128256, "dtype": torch.bfloat16, "required": True}, # "with_bias": True,
-    {"BT": 8192, "H": 4096, "V": 128256, "dtype": torch.bfloat16, "required": False}, # "with_ce_weight": True,
+    {"BT": 8192, "H": 4096, "V": 128256, "dtype": torch.bfloat16, "required": True}, # "with_ce_weight": True,
     {"BT": 16384, "H": 4096, "V": 128256, "dtype": torch.bfloat16, "required": False},
 ]
 

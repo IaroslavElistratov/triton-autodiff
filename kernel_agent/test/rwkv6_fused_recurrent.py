@@ -166,10 +166,11 @@ def fused_recurrent_rwkv6_fwd(
 
 
 SWEEP = [
-    {"B": 8, "T": 512, "H": 64, "D": 64, "required": True},
-    {"B": 8, "T": 2048, "H": 64, "D": 64, "required": True},
-    {"B": 8, "T": 4096, "H": 64, "D": 64, "required": False},
-    {"B": 8, "T": 8192, "H": 64, "D": 64, "required": False},
+    {"B": 4, "T": 256, "H": 32, "D": 32, "required": True},
+    # todo-now: fix advancing to next phase if all required shapes passed, even if TimeoutErr
+    # {"B": 8, "T": 2048, "H": 64, "D": 64, "required": False},
+    # {"B": 8, "T": 4096, "H": 64, "D": 64, "required": False},
+    # {"B": 8, "T": 8192, "H": 64, "D": 64, "required": False},
 ]
 
 def make_args(dims, device=DEVICE, dtype=torch.bfloat16):

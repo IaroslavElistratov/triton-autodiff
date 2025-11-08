@@ -104,7 +104,10 @@ def make_args(dims, device="cuda", dtype=torch.float32):
     x = -2.3 + 0.5 * torch.randn((M, N), device=device, dtype=dtype)
     weight = torch.randn((N,), device=device, dtype=dtype)
     bias = torch.randn((N,), device=device, dtype=dtype)
-    return (x, weight, bias), {}
+    normalized_shape = (N,)
+    eps = 1e-5
+    # forward_layernorm signature includes normalized_shape metadata and explicit eps
+    return (x, normalized_shape, weight, bias, eps), {}
 
 def flops(dims, mode):
     """optional, for benchmarking"""
@@ -120,5 +123,5 @@ def flops(dims, mode):
 
 
 def setup():
-    (x, weight, bias), _ = make_args(SWEEP[0])
-    forward_layernorm(x, weight, bias)
+    (x, normalized_shape, weight, bias, eps), _ = make_args(SWEEP[0])
+    forward_layernorm(x, normalized_shape, weight, bias, eps)
