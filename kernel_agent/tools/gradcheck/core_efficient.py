@@ -127,23 +127,29 @@ def check_forward_outputs_match(
                     forward_mismatches.append(f"Output {i}: {e}")
                     if verbose:
                         print(f"[Reference Check] Output {i} mismatch: {e}")
+                finally:
+                    if verbose:
+                        triton_flat = t_out.flatten()[:20].detach().cpu().tolist()
+                        ref_flat = r_out.flatten()[:20].detach().cpu().tolist()
+                        print(f"  [DEBUG] Forward reference (first 20): {ref_flat}")
+                        print(f"  [DEBUG] Forward Triton (first 20):    {triton_flat}")
 
         stats["forward_match"] = all_match
         stats["forward_mismatches"] = forward_mismatches
 
-        # NOTE: generates reference bwd on first success only
-        if all_match and not stats.get("aot_reference"):
-            # wrap the freshly validated reference now so Phase 2's first backward prompt already
-            # has FX graphs before gradcheck reruns the reference;
-            # I'm wrapping with AOT-Autograd here so that by the time we advance to the next phase (2nd phase)
-            # we already have reference backward graph (so that we can attach this to the very first prompt of the 2nd phase)
-            capture_reference_backward(
-                pytorch_ref,
-                test_inputs,
-                test_kwargs,
-                stats=stats,
-                verbose=verbose,
-            )
+        # # NOTE: generates reference bwd on first success only
+        # if all_match and not stats.get("aot_reference"):
+        #     # wrap the freshly validated reference now so Phase 2's first backward prompt already
+        #     # has FX graphs before gradcheck reruns the reference;
+        #     # I'm wrapping with AOT-Autograd here so that by the time we advance to the next phase (2nd phase)
+        #     # we already have reference backward graph (so that we can attach this to the very first prompt of the 2nd phase)
+        #     capture_reference_backward(
+        #         pytorch_ref,
+        #         test_inputs,
+        #         test_kwargs,
+        #         stats=stats,
+        #         verbose=verbose,
+        #     )
 
         return all_match, stats
 
@@ -267,6 +273,12 @@ def check_op_backward_with_reference(
                     forward_mismatches.append(f"Output {i}: {e}")
                     forward_match = False
                     break
+                finally:
+                    if verbose:
+                        triton_flat = t_out.flatten()[:20].detach().cpu().tolist()
+                        ref_flat = r_out.flatten()[:20].detach().cpu().tolist()
+                        print(f"  [DEBUG] Forward reference (first 20): {ref_flat}")
+                        print(f"  [DEBUG] Forward Triton (first 20):    {triton_flat}")
 
         if not forward_match:
             stats["forward_match"] = False
