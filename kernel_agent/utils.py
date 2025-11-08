@@ -23,12 +23,25 @@ from triton.runtime.autotuner import Autotuner
 #   "TypeError: ..." -> type="TypeError", msg="..."
 
 def _is_triton_kernel(obj) -> bool:
-    """Return True for raw @triton.jit kernels or autotune wrappers."""
+    """
+    Detect raw @triton.jit kernels plus common wrappers (@triton.autotune, @triton.heuristics).
+
+    Triton decorators wrap the JITFunction in objects that stash the underlying kernel in either
+    .fn (autotune/heuristics) or __wrapped__ (functools.wraps). Recursively follow those pointers
+    until we see a real JITFunction/Autotuner, or exhaust the chain.
+    """
     if isinstance(obj, (JITFunction, Autotuner)):
         return True
-    # Fallback for unforeseen wrappers: look for an embedded JITFunction
+
     inner = getattr(obj, "fn", None)
-    return isinstance(inner, JITFunction)
+    if inner is not None and inner is not obj and _is_triton_kernel(inner):
+        return True
+
+    wrapped = getattr(obj, "__wrapped__", None)
+    if wrapped is not None and wrapped is not obj and _is_triton_kernel(wrapped):
+        return True
+
+    return False
 
 
 # todo: remove, not needed anymore. Can just raise e
@@ -307,8 +320,8 @@ def compile_kernel(file_path: str, generated_fp: str | None = None):
     # Validate presence of a Triton kernel and an @autodiff-decorated stub
     has_kernel = any(_is_triton_kernel(v) for v in ns.values())
     has_stub = any(
-        callable(v) and bool(getattr(v, "__is_autodiff_stub__", False))
-        for v in ns.values()
+        callable(val) and bool(getattr(val, "__is_autodiff_stub__", False))
+        for val in ns.values()
     )
     if not (has_kernel and has_stub):
         # these errors for invalid *fwd* kernel -- these aren't designed for llm, but for a human
