@@ -264,18 +264,18 @@ class MinimalLLMPatchProvider:
             working_file_snippet = redact_torch_fn(generated_fp, self.snippet_max_lines)
 
         # RAG reference block
-        # Strategy has stored rag_fwd and rag_bwd from retrieved kernel
-        # Show full RAG FWD+BWD as readonly reference for each turn
+        # Strategy stores retrieved references internally.
+        # Show the readonly block only when strategy makes it available.
 
         rag_block = ""
 
-        # Check if strategy has stored RAG references (RAG-only mode)
-        if hasattr(strategy, 'rag_fwd') and hasattr(strategy, 'rag_bwd'):
-            # Let strategy decide whether to show RAG based on current phase
+        # Non-RAG strategies may omit this helper entirely.
+        if hasattr(strategy, 'rag_reference_section'):
+            # Let strategy decide whether to show RAG based on current phase.
             # Shows RAG FWD+BWD only at Phase 2 entry (when phase_just_advanced=True)
             # Phase 1 and Phase 2 fix iterations return empty (rely on conversation chaining)
             # Note: No it>0 suppression - RAG is gated by phase_just_advanced only
-            rag_block = strategy.rag_reference_section(strategy.rag_fwd, strategy.rag_bwd)
+            rag_block = strategy.rag_reference_section()
 
 
         # Format state_facts for LLM prompt.

@@ -199,8 +199,9 @@ class RAGAdaptationStrategy(BaseStrategy):
         self.pytorch_reference_validated = False
 
         # Phase 2 state: RAG patterns (optional)
-        self.rag_fwd = rag_fwd
-        self.rag_bwd = rag_bwd
+        raw_topk = os.environ.get("KERNEL_AGENT_RAG_TOPK", "1")
+        self.topk = max(1, int(raw_topk))
+        self.rag_refs: list[dict[str, str | float]] = []
         # Store retrieval metadata when orchestrator calls retrieve_references
         self.last_retrieval = {}
         self._path_excluder = _PathExcluder(excluded_substrings or [])
@@ -217,25 +218,35 @@ class RAGAdaptationStrategy(BaseStrategy):
             raise ValueError(f"Failed to load RAG index or embed query: {e}")
 
         filtered_paths, excluded_info = _filter_rag_paths(file_list, self._path_excluder)
-        best_match = None
-        best_similarity = -1.0
         candidate_scores: list[tuple[str, float]] = []
         for fp in filtered_paths:
             sim = _cosine(query_embedding, embeddings[fp])
             candidate_scores.append((fp, sim))
-            if sim >= min_sim and sim > best_similarity:
-                content = backward_docs.get(fp, "")
-                if content:
-                    best_match = fp
-                    best_similarity = sim
+        candidate_scores.sort(key=lambda item: item[1], reverse=True)
+
+        references: list[dict[str, object]] = []
+        for fp, sim in candidate_scores:
+            if sim < min_sim:
+                continue
+            bwd = backward_docs.get(fp, "")
+            fwd = documents.get(fp, "")
+            assert (bwd and fwd), "unreachable"
+            references.append({
+                "forward": fwd,
+                "backward": bwd,
+                "similarity": sim,
+                "match_path": fp,
+            })
+            if len(references) >= self.topk:
+                break
 
         if VERBOSE and candidate_scores:
-            top5 = sorted(candidate_scores, key=lambda item: item[1], reverse=True)[:5]
+            top5 = candidate_scores[:5]
             print("[kernel-agent][RAG] Top candidates:")
             for path, sim in top5:
                 print(f"  - {path} (sim={sim:.3f})")
 
-        if not best_match:
+        if not references:
             extra = ""
             if excluded_info and self._path_excluder.tokens_lower:
                 first_hits = ", ".join(path for path, _ in excluded_info[:3])
@@ -249,16 +260,11 @@ class RAGAdaptationStrategy(BaseStrategy):
                 "Try lowering --min-sim threshold." + extra
             )
 
-        forward_ref = documents.get(best_match, "")
-        backward_ref = backward_docs.get(best_match, "")
-
         payload = {
-            "forward": forward_ref,
-            "backward": backward_ref,
-            "match_path": best_match,
-            "similarity": best_similarity,
+            "references": references,
             "excluded_matches": [path for path, _ in excluded_info],
         }
+        self.rag_refs = references
         self.last_retrieval = payload
         return payload
 
@@ -319,7 +325,7 @@ class RAGAdaptationStrategy(BaseStrategy):
     #     """RAG kernels don't have compiler-specific characteristics, return empty."""
     #     return ""
 
-    def rag_reference_section(self, rag_fwd: str, rag_bwd: str) -> str:
+    def rag_reference_section(self) -> str:
         """Show RAG references only at Phase 2 entry (backward generation init).
 
         Phase 1: PyTorch reference generation - no RAG content (returns empty)
@@ -332,34 +338,32 @@ class RAGAdaptationStrategy(BaseStrategy):
             return ""
 
         # Phase 2 entry: Show RAG FWD+BWD once when transitioning
-        if self.phase_just_advanced:
+        if self.phase_just_advanced and self.rag_refs:
             if VERBOSE: print(f"[kernel-agent] RAG reference shown (Phase 2 entry: generating backward kernel)")
-            return self._build_rag_reference_section(rag_fwd, rag_bwd)
+            return self._build_rag_reference_section()
 
         # Phase 2 fix iterations: Hide RAG, rely on conversation chaining
         if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 2 fix iteration: relying on conversation chaining)")
         return ""
 
-    def _build_rag_reference_section(self, rag_fwd: str, rag_bwd: str) -> str:
+    def _build_rag_reference_section(self) -> str:
         """Build readonly RAG reference section for prompt.
 
         This shows the retrieved FWD+BWD pair as a reference pattern,
         NOT as code to edit directly. Forces semantic comparison with user's forward.
 
-        Args:
-            rag_fwd: Retrieved forward kernel source
-            rag_bwd: Retrieved backward kernel source
-
         Returns:
             Formatted reference block with comparison instructions
         """
-        # Truncate if too long (stay within token budget)
-        if len(rag_fwd) > _RAG_MAX_CHARS:
-            rag_fwd = rag_fwd[:_RAG_MAX_CHARS] + "\n... [truncated] ..."
-        if len(rag_bwd) > _RAG_MAX_CHARS:
-            rag_bwd = rag_bwd[:_RAG_MAX_CHARS] + "\n... [truncated] ..."
+        # give budget of at least 400 chars to each retrieved example
+        per_section_budget = max(400, _RAG_MAX_CHARS // max(1, len(self.rag_refs)))
 
-        return f"""
+        def _truncate(text: str) -> str:
+            if len(text) <= per_section_budget:
+                return text
+            return text[:per_section_budget] + "\n... [truncated] ..."
+
+        sections: list[str] = [f"""
 {_SEP_MAJOR}
 REFERENCE ONLY (do not edit this section)
 {_SEP_MAJOR}
@@ -373,7 +377,19 @@ DO NOT copy-paste this reference code. Instead:
 2. Understand the pattern (how does retrieved BWD mirror its FWD?)
 3. Apply that pattern to write BWD for YOUR FWD
 
+"""]
+
+        for idx, ref in enumerate(self.rag_refs, 1):
+            match_path = ref["match_path"]
+            sim = ref["similarity"]
+            rag_fwd = _truncate(ref["forward"])
+            rag_bwd = _truncate(ref["backward"])
+
+            sections.append(
+f"""{_SEP_MINOR}
+REFERENCE #{idx}: {match_path} (similarity={sim:.3f})
 {_SEP_MINOR}
+
 RETRIEVED FORWARD (this is what the retrieved backward was written for):
 {_SEP_MINOR}
 
@@ -384,12 +400,15 @@ RETRIEVED BACKWARD (pattern reference - shows how backward mirrors forward):
 {_SEP_MINOR}
 
 {rag_bwd}
+"""
+            )
 
-{_SEP_MAJOR}
+        sections.append(f"""{_SEP_MAJOR}
 END REFERENCE SECTION
 {_SEP_MAJOR}
+""")
 
-"""
+        return "\n".join(sections)
 
     def allowed_edits_section(self) -> str:
         """Return allowed edits based on current phase."""

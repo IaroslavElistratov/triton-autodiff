@@ -33,7 +33,7 @@ class Config:
     patience_parity_restore: int = 2  # allow this many parity-regression iterations before restoring snapshot
     min_rel_improvement: float = 0.10   # require >= +10% throughput to accept
     # todo: a better way?
-    snippet_max_lines: int = 2000       # bound context shown to the LLM
+    snippet_max_lines: int = 6000       # bound context shown to the LLM
 
 
 # Runtime exceptions (gradcheck/bench/compile child fails): handled once per iteration in run_with_fix;
@@ -306,15 +306,14 @@ class KernelOptimizer:
             raise ValueError(f"Forward kernel file is empty or could not be read: {fwd_fp}")
 
         retrieved = self.strategy.retrieve_references(redacted_fwd)
-        self.strategy.rag_fwd = retrieved.get("forward", "")
-        self.strategy.rag_bwd = retrieved.get("backward", "")
+        rag_refs = retrieved["references"]
 
         if VERBOSE:
-            match_path = retrieved.get("match_path", "<unknown>")
-            similarity = retrieved.get("similarity", float("nan"))
-            print(f"[kernel-agent] Retrieved backward from '{match_path}' (similarity: {similarity:.3f})")
-            print(f"[kernel-agent] Retrieved reference FWD: {len(self.strategy.rag_fwd)} chars")
-            print(f"[kernel-agent] Retrieved reference BWD: {len(self.strategy.rag_bwd)} chars")
+            print(f"[kernel-agent] Retrieved {len(rag_refs)} backward reference(s):")
+            for idx, ref in enumerate(rag_refs, 1):
+                path = ref["match_path"]
+                sim = ref["similarity"]
+                print(f"  [{idx}] {path} (similarity={sim:.3f}, fwd_chars={len(ref["forward"])}, bwd_chars={len(ref["backward"])})")
 
         # Set backward file path (write_initial_backward seeds the scaffold immediately)
         digest = hashlib.sha256(redacted_fwd.encode()).hexdigest()[:10]
