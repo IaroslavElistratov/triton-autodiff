@@ -36,6 +36,12 @@ def main() -> None:
     # RAG configuration (always enabled by default)
     ap.add_argument("--min-sim", type=float, default=0.75, help="Minimum cosine similarity threshold for RAG retrieval")
     ap.add_argument("--topk", type=int, default=1, help="Number of RAG examples to retrieve (currently only 1 is used)")
+    ap.add_argument(
+        "--rag-exclude",
+        type=str,
+        default="",
+        help="Optional substring for excluding matching files from RAG retrieval (case-insensitive)",
+    )
 
     args = ap.parse_args()
 
@@ -72,6 +78,8 @@ def main() -> None:
     # Always set RAG configuration
     os.environ["KERNEL_AGENT_RAG_TOPK"] = str(int(args.topk))
     os.environ["KERNEL_AGENT_RAG_MIN_SIM"] = str(float(args.min_sim))
+    if args.rag_exclude:
+        os.environ["KERNEL_AGENT_RAG_EXCLUDE_SUBSTR"] = args.rag_exclude
 
     # Initialize configuration (RAG is always enabled)
     cfg = Config(max_iters=args.max_iters,

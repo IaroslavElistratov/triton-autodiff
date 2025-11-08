@@ -12,6 +12,27 @@ from .rag import _load_index, _embed_query, _cosine
 # Default verbose ON unless explicitly disabled
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
 
+
+def _parse_rag_exclusions() -> list[str]:
+    raw = os.environ.get("KERNEL_AGENT_RAG_EXCLUDE_SUBSTR", "")
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item and item.strip()]
+
+
+def _filter_rag_paths(paths: Sequence[str], excluder: "_PathExcluder") -> tuple[list[str], list[tuple[str, str]]]:
+    filtered: list[str] = []
+    excluded: list[tuple[str, str]] = []
+    for path in paths:
+        reason = excluder.match(path)
+        if reason:
+            excluded.append((path, reason))
+            if VERBOSE:
+                print(f"[kernel-agent][RAG] Excluding '{path}' (matched '{reason}')")
+            continue
+        filtered.append(path)
+    return filtered, excluded
+
 # RAG reference formatting constants
 _RAG_MAX_CHARS = 15000  # Max chars per kernel in reference section (to stay within token budget)
 _SEP_MAJOR = "=" * 80   # Major section separator
@@ -130,6 +151,22 @@ class RegularStrategy(BaseStrategy):
         self.phase_just_advanced = False  # Always False since no phases
 
 
+class _PathExcluder:
+    def __init__(self, raw_tokens: Sequence[str]):
+        cleaned = [tok.strip() for tok in raw_tokens if tok and tok.strip()]
+        self.raw_tokens = cleaned
+        self.tokens_lower = [tok.lower() for tok in cleaned]
+
+    def match(self, path: str) -> Optional[str]:
+        if not self.tokens_lower:
+            return None
+        lowered = path.lower()
+        for token in self.tokens_lower:
+            if token in lowered:
+                return token
+        return None
+
+
 class RAGAdaptationStrategy(BaseStrategy):
     """Two-phase strategy for reference-based gradient validation.
 
@@ -141,7 +178,13 @@ class RAGAdaptationStrategy(BaseStrategy):
     need adaptation to the specific forward kernel.
     """
 
-    def __init__(self, rag_fwd: Optional[str] = None, rag_bwd: Optional[str] = None):
+    def __init__(
+        self,
+        rag_fwd: Optional[str] = None,
+        rag_bwd: Optional[str] = None,
+        *,
+        excluded_substrings: Optional[Sequence[str]] = None,
+    ):
         self.name = "rag_adaptation"
         # Phase index (0=reference generation, 1=backward generation)
         self.i = 0
@@ -160,6 +203,7 @@ class RAGAdaptationStrategy(BaseStrategy):
         self.rag_bwd = rag_bwd
         # Store retrieval metadata when orchestrator calls retrieve_references
         self.last_retrieval = {}
+        self._path_excluder = _PathExcluder(excluded_substrings or [])
 
     def retrieve_references(self, redacted_forward: str) -> dict:
         """Retrieve reference forward/backward code snippets via embeddings."""
@@ -172,20 +216,37 @@ class RAGAdaptationStrategy(BaseStrategy):
         except Exception as e:
             raise ValueError(f"Failed to load RAG index or embed query: {e}")
 
+        filtered_paths, excluded_info = _filter_rag_paths(file_list, self._path_excluder)
         best_match = None
         best_similarity = -1.0
-        for fp in file_list:
+        candidate_scores: list[tuple[str, float]] = []
+        for fp in filtered_paths:
             sim = _cosine(query_embedding, embeddings[fp])
+            candidate_scores.append((fp, sim))
             if sim >= min_sim and sim > best_similarity:
                 content = backward_docs.get(fp, "")
                 if content:
                     best_match = fp
                     best_similarity = sim
 
+        if VERBOSE and candidate_scores:
+            top5 = sorted(candidate_scores, key=lambda item: item[1], reverse=True)[:5]
+            print("[kernel-agent][RAG] Top candidates:")
+            for path, sim in top5:
+                print(f"  - {path} (sim={sim:.3f})")
+
         if not best_match:
+            extra = ""
+            if excluded_info and self._path_excluder.tokens_lower:
+                first_hits = ", ".join(path for path, _ in excluded_info[:3])
+                tokens = ", ".join(self._path_excluder.raw_tokens)
+                extra = (
+                    f" Excluded {len(excluded_info)} candidates via rag-exclude filter"
+                    f" (substrings: {tokens}; first match: {first_hits})."
+                )
             raise ValueError(
                 f"No similar kernels found in RAG index (similarity >= {min_sim:.2f}). "
-                "Try lowering --min-sim threshold."
+                "Try lowering --min-sim threshold." + extra
             )
 
         forward_ref = documents.get(best_match, "")
@@ -196,6 +257,7 @@ class RAGAdaptationStrategy(BaseStrategy):
             "backward": backward_ref,
             "match_path": best_match,
             "similarity": best_similarity,
+            "excluded_matches": [path for path, _ in excluded_info],
         }
         self.last_retrieval = payload
         return payload
@@ -663,10 +725,11 @@ END REFERENCE SECTION
 
 def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
     # Factory: allows toggling strategy with an env flag without touching the loop.
+    exclusions = _parse_rag_exclusions()
     if mode == "phased":
         raise ValueError("Phased mode is temporarily disabled. Use 'regular' or 'rag_adaptation' instead.")
     elif mode == "rag_adaptation":
-        return RAGAdaptationStrategy()  # Use new reference-based strategy
+        return RAGAdaptationStrategy(excluded_substrings=exclusions)  # Use new reference-based strategy
     else:
         return RegularStrategy(default_temp)
 
