@@ -82,7 +82,6 @@ class StubInfo:
     stub_name: str
     positional_params: list[str]
     kwonly_params: list[str]
-    upstream_count: int
     grad_param_names: list[str]
 
 
@@ -144,8 +143,6 @@ def discover_stub_info(forward_path: str) -> StubInfo:
         stub_name=stub_name,
         positional_params=positional,
         kwonly_params=kwonly,
-        # TODO-NOW: stop fabricating upstream_0 when the stub signature has zero upstream kwargs
-        upstream_count=len(upstream_names) or 1,
         grad_param_names=grad_names,
     )
 
@@ -220,12 +217,11 @@ def _make_signature_comment(info: StubInfo) -> str:
     if info.kwonly_params:
         kw_section.extend(info.kwonly_params)
 
-    upstream_names = [f"upstream_{i}" for i in range(info.upstream_count)]
-    if upstream_names:
-        kw_section.extend(upstream_names)
-
     if kw_section:
+        kw_section.append("**upstreams")
         pieces.append(", ".join(["*"] + kw_section))
+    else:
+        pieces.append("**upstreams")
 
     call_signature = ", ".join(pieces)
 
@@ -240,6 +236,9 @@ def _make_signature_comment(info: StubInfo) -> str:
         # Gradcheck will call this EXACTLY as:
         #   backward_{info.stub_name}({call_signature})
         #
+        # PyTorch supplies one upstream_i entry per tensor returned by forward (in return order).
+        # Non-differentiable outputs yield upstream_i=None.
+        #
         # {grad_clause}
         """
     )
@@ -248,10 +247,12 @@ def _make_signature_comment(info: StubInfo) -> str:
 def _make_backward_stub(info: StubInfo) -> str:
     params: list[str] = list(info.positional_params)
 
-    if info.kwonly_params or info.upstream_count:
+    if info.kwonly_params:
         params.append("*")
         params.extend(info.kwonly_params)
-        params.extend(f"upstream_{i}" for i in range(info.upstream_count))
+        params.append("**upstreams")
+    else:
+        params.append("**upstreams")
 
     param_str = ", ".join(params)
     grad_targets = info.grad_param_names or ["input_tensor"]
@@ -259,14 +260,17 @@ def _make_backward_stub(info: StubInfo) -> str:
     lines = [
         f"def backward_{info.stub_name}({param_str}):",
         '    """Generated placeholder for backward pass."""',
-        "    # 1. Allocate gradient buffers for each tensor input",
+        "    # 1. Pull upstream gradients for tensor outputs (forward return order)",
+        "    #    dy = upstreams.get('upstream_0')  # None when that output is non-differentiable",
+        "    #    add more upstream_* lookups as needed based on forward returns",
+        "    # 2. Allocate gradient buffers for each tensor input",
     ]
     # Show explicit grad_foo examples so the LLM knows exactly which tensors require gradients.
     lines.extend(f"    #    grad_{name} = torch.zeros_like({name})" for name in grad_targets)
     lines.extend([
-        "    # 2. Launch backward kernels to populate gradients",
+        "    # 3. Launch backward kernels to populate gradients",
         "    #    backward_kernel[grid](...)",
-        "    # 3. Return gradients matching the tensor input order",
+        "    # 4. Return gradients matching the tensor input order",
         "    raise ValueError(",
         f'        "backward_{info.stub_name} not implemented!\\n"',
         '        "Must allocate gradient buffers for each tensor input, launch backward kernels, and return gradients in input order."',
