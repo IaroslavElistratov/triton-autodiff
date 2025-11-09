@@ -65,7 +65,6 @@ def _layer_norm_fwd_fused(
         tl.store(Y + cols, y, mask=mask)
 
 
-# todo-now: add decorator to specify that some outputs don't require grads
 @autodiff(idxs_buffers=(0, 2, 3))
 def forward_layernorm(x, normalized_shape, weight, bias, eps):
     # allocate output

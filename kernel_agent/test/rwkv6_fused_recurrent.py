@@ -30,19 +30,20 @@ exp = tl.exp
 
 
 
-@triton.heuristics({
-    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
-    'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
-})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
-    ],
-    key=['BK', 'BV'],
-    **autotune_cache_kwargs
-)
+# todo-now: support .autotune and .heuristics
+# @triton.heuristics({
+#     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+#     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
+#     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+# })
+# @triton.autotune(
+#     configs=[
+#         triton.Config({}, num_warps=num_warps)
+#         for num_warps in [1, 2, 4, 8, 16]
+#     ],
+#     key=['BK', 'BV'],
+#     **autotune_cache_kwargs
+# )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv6_fwd_kernel(
     q,  # query [B, H, T, K]/[B, T, H, K]
@@ -117,7 +118,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-# todo-now: add grad dh0
+# todo-now: add grad dh0?
 @autodiff(idxs_buffers=(0, 1, 2, 3, 4))
 def fused_recurrent_rwkv6_fwd(
     q: torch.Tensor,
