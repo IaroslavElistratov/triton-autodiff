@@ -248,14 +248,16 @@ def make_args(dims, device=DEVICE, dtype=torch.float16):
     kwargs = {key: dims[key] for key in ("causal", "sm_scale") if key in dims}
     return (q, k, v), kwargs
 
-def flops(dims):
-    B, H, N, D = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
-    total = 2.0 * (2.0 * B * H * N * N * D)  # do this to count forward and backward matmuls for the baseline
-    if dims.get("causal", False):
-        total *= 0.5
-    # backward mode
-    total *= 2.5
-    return total
+def flops(dims, mode):
+    if mode == "bwd":
+        # keep backward-only flop estimate aligned with how bench_op calls this helper
+        B, H, N, D = dims["B"], dims["NUM_HEADS"], dims["SEQ_LEN"], dims["HEAD_DIM"]
+        total = 2.0 * (2.0 * B * H * N * N * D)
+        if dims.get("causal", False):
+            total *= 0.5
+        total *= 2.5
+        return total
+    raise ValueError(f"flops only implemented for backward mode; got {mode}")
 
 
 def setup():

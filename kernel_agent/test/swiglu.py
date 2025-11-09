@@ -106,11 +106,13 @@ def make_args(dims, device=DEVICE, dtype=None):
     b = torch.randn_like(a)
     return (a, b), {}
 
-# todo: replace with flop count for bwd
-def flops(dims):
-    elems = dims["B"] * dims["SEQ_LEN"] * dims["INTERMEDIATE_SIZE"]
-    # Backward recomputes sigmoid/SiLU and emits two grads (~12 scalar ops per element)
-    return float(elems) * 12.0
+# todo: replace with actual flop count for bwd
+def flops(dims, mode):
+    if mode == "bwd":
+        # backward recomputes sigmoid/SiLU and emits two grads (~12 scalar ops per element)
+        elems = dims["B"] * dims["SEQ_LEN"] * dims["INTERMEDIATE_SIZE"]
+        return float(elems) * 12.0
+    raise ValueError(f"flops only implemented for backward mode; got {mode}")
 
 
 def setup():

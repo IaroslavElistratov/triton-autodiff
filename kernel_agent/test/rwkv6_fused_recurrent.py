@@ -184,10 +184,13 @@ def make_args(dims, device=DEVICE, dtype=torch.bfloat16):
     scale = 1.0 / math.sqrt(D)
     return (r, k, v, w, u), {"scale": scale}
 
-def flops(dims):
-    B, T, H, D = dims["B"], dims["T"], dims["H"], dims["D"]
-    forward = 2.0 * B * H * T * D * D
-    return forward * 3.5
+def flops(dims, mode):
+    if mode == "bwd":
+        # forward recurrence ~2*B*H*T*D^2, backward approx 3.5x inflation
+        B, T, H, D = dims["B"], dims["T"], dims["H"], dims["D"]
+        forward = 2.0 * B * H * T * D * D
+        return forward * 3.5
+    raise ValueError(f"flops only implemented for backward mode; got {mode}")
 
 
 def setup():

@@ -111,15 +111,11 @@ def make_args(dims, device="cuda", dtype=torch.float32):
 
 def flops(dims, mode):
     """optional, for benchmarking"""
-    M, N = dims["M"], dims["N"]
-    # Forward pass:
-    # - mean computation: M*N additions + M divisions
-    # - variance computation: M*N subtractions + M*N multiplications + M*N additions + M divisions
-    # - normalization: M*N subtractions + M*N multiplications
-    # - affine transform: M*N multiplications + M*N additions
-    # Approximation: ~6*M*N ops for forward
-    # Backward adds similar cost, so total ~12*M*N
-    return 12.0 * M * N
+    if mode == "bwd":
+        # forward: mean+var+norm+affine ~6*M*N ops, backward doubles it -> 12*M*N
+        M, N = dims["M"], dims["N"]
+        return 12.0 * M * N
+    raise ValueError(f"flops only implemented for backward mode; got {mode}")
 
 
 def setup():

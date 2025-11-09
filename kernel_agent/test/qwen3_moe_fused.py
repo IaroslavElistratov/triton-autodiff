@@ -297,12 +297,14 @@ def make_args(dims, device="cuda", dtype=torch.bfloat16):
 
 
 # todo: replace with flop count for bwd
-def flops(dims):
-    M = dims["M"]
-    N = dims["N"]
-    K = dims["K"]
-    # downstream perf chart already reports M*N*K as the flop proxy
-    return M * N * K
+def flops(dims, mode):
+    if mode == "bwd":
+        # keep existing M*N*K proxy but acknowledge this path only runs for backward benches
+        M = dims["M"]
+        N = dims["N"]
+        K = dims["K"]
+        return M * N * K
+    raise ValueError(f"flops only implemented for backward mode; got {mode}")
 
 
 def setup():

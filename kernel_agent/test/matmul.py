@@ -142,5 +142,8 @@ def setup():
 
 def flops(dims, mode):
     """optional, for benchmarking"""
-    M, N, K = dims["M"], dims["N"], dims["K"]
-    return 2.0 * M * N * K
+    if mode == "bwd":
+        # backward matmul path is what benchmark samples, so keep 2*M*N*K under that flag
+        M, N, K = dims["M"], dims["N"], dims["K"]
+        return 2.0 * M * N * K
+    raise ValueError(f"flops only implemented for backward mode; got {mode}")
