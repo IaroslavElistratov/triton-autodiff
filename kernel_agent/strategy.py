@@ -273,6 +273,24 @@ class RAGAdaptationStrategy(BaseStrategy):
                 "Try lowering --min-sim threshold." + extra
             )
 
+        # fail fast when similarity filtering can't satisfy requested top-k so the caller tweaks min-sim or top-k explicitly
+        if len(references) < self.topk:
+            shortage = self.topk - len(references)
+            extra = ""
+            if excluded_info and self._path_excluder.tokens_lower:
+                first_hits = ", ".join(path for path, _ in excluded_info[:3])
+                tokens = ", ".join(self._path_excluder.raw_tokens)
+                # include exclusion metadata to make it obvious when custom filters prevented satisfied references.
+                extra = (
+                    f" Excluded {len(excluded_info)} candidates via rag-exclude filter"
+                    f" (substrings: {tokens}; first match: {first_hits})."
+                )
+            raise ValueError(
+                f"Requested {self.topk} RAG reference(s) but only {len(references)} met the"
+                f" similarity threshold (>= {min_sim:.2f}). {shortage} more reference(s) are needed. "
+                "Lower --min-sim or request fewer references via --rag-topk / KERNEL_AGENT_RAG_TOPK." + extra
+            )
+
         payload = {
             "references": references,
             "excluded_matches": [path for path, _ in excluded_info],

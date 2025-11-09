@@ -1,19 +1,20 @@
 # python -m pip install -e kernel_agent
-# cd /root/triton-autodiff
-# export TRITON_AUTODIFF_DIR=$(pwd)/triton_autodiff
 
 # Example usage:
-# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --reasoning-effort high --file-path kernel_agent/test/attention.py > kernel_agent/LOGS/out.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/attention.py --min-sim 0.7 --topk 4 --rag-exclude tritonbench,fa2_original__attention > kernel_agent/LOGS/atten.txt
 
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/attention.py > kernel_agent/LOGS/atten.txt
-
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/layernorm.py --min-sim 0.7 --topk 4 --rag-exclude tritonbench> kernel_agent/LOGS/layernorm.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/layernorm.py --min-sim 0.7 --topk 4 --rag-exclude tritonbench > kernel_agent/LOGS/layernorm.txt
 
 # kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/qwen3_moe_fused.py --min-sim 0.5 --topk 4 --rag-exclude woct0rdho > kernel_agent/LOGS/moe.txt
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/swiglu.py --min-sim 0.7 --topk 4 --rag-exclude Liger> kernel_agent/LOGS/swiglu.txt
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/rwkv6_fused_recurrent.py --min-sim 0.7 --topk 4 --rag-exclude fla_org> kernel_agent/LOGS/rwkv.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/swiglu.py --min-sim 0.7 --topk 4 --rag-exclude Liger > kernel_agent/LOGS/swiglu.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/rwkv6_fused_recurrent.py --min-sim 0.7 --topk 4 --rag-exclude fla_org > kernel_agent/LOGS/rwkv.txt
 
 # CUDA_VISIBLE_DEVICES=
+
+
+# todo: update this example
+# kernel-agent --backend triton --checkpoint /workspace/gpt-oss/gpt-oss-120b/original/ --reasoning-effort high --file-path kernel_agent/test/attention.py > kernel_agent/LOGS/out.txt
+
 
 
 from __future__ import annotations
