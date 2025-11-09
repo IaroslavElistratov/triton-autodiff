@@ -18,15 +18,17 @@ def _render_stub_override_dck(stub_name: str) -> str:
         import torch
 
         class StubOverrideDCK(torch.autograd.Function):
-            \"\"\"Connects forward/backward stubs for automatic differentiation.\"\"\"
+            \"\"\"Connects forward/backward stubs and threads ctx for intermediate caching.\"\"\"
 
             @staticmethod
             def forward(ctx, *all_stub_inputs):
-                result = {stub_name}(*all_stub_inputs)
+                # Pass ctx so forward can stash tensors/metadata directly on the autograd context
+                result = {stub_name}(*all_stub_inputs, ctx=ctx)
 
                 ten = [x for x in all_stub_inputs if isinstance(x, torch.Tensor)]
                 ctx.save_for_backward(*ten)
 
+                # Track tensor vs non-tensor inputs so backward stub reconstruction stays faithful
                 ctx.non_ten = [x for x in all_stub_inputs if not isinstance(x, torch.Tensor)]
                 ctx.is_ten = [isinstance(x, torch.Tensor) for x in all_stub_inputs]
 
@@ -40,8 +42,9 @@ def _render_stub_override_dck(stub_name: str) -> str:
                 all_inps = [next(it_t) if t else next(it_n) for t in ctx.is_ten]
 
                 # keep full dict comprehension literal so generated file stays readable
+                # upstream_i kwargs mirror PyTorch's gradient order for each forward output
                 kw_up = {{f"upstream_{{i}}": g for i, g in enumerate(upstreams)}}
-                grads_for_tensors = backward_{stub_name}(*all_inps, **kw_up)
+                grads_for_tensors = backward_{stub_name}(*all_inps, ctx=ctx, **kw_up)
 
                 if len(grads_for_tensors) != sum(ctx.is_ten):
                     raise RuntimeError(
@@ -66,7 +69,8 @@ def wrap_with_kwargs(stub_fn: Callable[..., object], override_cls: type) -> Call
     def wrapped(*args, **kwargs):
         bound = sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
-        ordered = [bound.arguments[name] for name in names]
+        # ctx is created by autograd when StubOverrideDCK.forward runs, so exclude it here.
+        ordered = [bound.arguments[name] for name in names if name != "ctx"]
         return override_cls.apply(*ordered)
 
     wrapped.__name__ = stub_fn.__name__
@@ -83,6 +87,9 @@ class StubInfo:
     positional_params: list[str]
     kwonly_params: list[str]
     grad_param_names: list[str]
+    stub_signature: inspect.Signature
+    stub_def_line: str
+    stub_def_indent: str
 
 
 
@@ -105,6 +112,24 @@ def discover_stub_info(forward_path: str) -> StubInfo:
     and the corresponding “grad_x = torch.zeros_like(x)” hints for every tensor input.
     """
 
+    def _extract_stub_def_line(stub_fn: Callable, stub_name: str) -> tuple[str, str]:
+        """Capture indent/def line; fail fast if the source cannot be located."""
+        try:
+            lines, _ = inspect.getsourcelines(stub_fn)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Unable to locate source for stub '{stub_name}' while injecting ctx"
+            ) from exc
+
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith(f"def {stub_name}"):
+                indent = line[: len(line) - len(stripped)]
+                return indent, line.rstrip("\n")
+
+        raise RuntimeError(
+            f"Failed to find definition line for stub '{stub_name}' while injecting ctx"
+        )
 
     # 1) try to find stub, by whatever defines __is_autodiff_stub__
     # (which is what my @autodiff decorator writes)
@@ -134,16 +159,18 @@ def discover_stub_info(forward_path: str) -> StubInfo:
     positional = [p.name for p in signature.parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
     # Keep any keyword-only parameters defined on the stub (besides pre-existing upstream_* kwargs)
     kwonly = [p.name for p in signature.parameters.values() if p.kind == p.KEYWORD_ONLY and not p.name.startswith("upstream_")]
-    # Some user stubs already expose upstream_* kwargs; reuse them instead of fabricating new names
-    upstream_names = [p.name for p in signature.parameters.values() if p.name.startswith("upstream_")]
 
     idxs = getattr(stub_fn, "__autodiff_idxs__", ())
     grad_names = [positional[idx] for idx in idxs if 0 <= idx < len(positional)]
+    indent, def_line = _extract_stub_def_line(stub_fn, stub_name)
     return StubInfo(
         stub_name=stub_name,
         positional_params=positional,
         kwonly_params=kwonly,
         grad_param_names=grad_names,
+        stub_signature=signature,
+        stub_def_line=def_line,
+        stub_def_indent=indent,
     )
 
 
@@ -160,11 +187,24 @@ def write_initial_backward(
     and “here are the gradient buffers you need to fill”, using the real stub
     signature and decorator-provided tensor indices.
     """
+
+    def _inject_ctx_into_forward_stub(forward_src: str, info: StubInfo) -> str:
+        """Rewrite the copied stub definition so it accepts ctx=None using the inspected signature."""
+        if "ctx" in info.stub_signature.parameters:
+            return forward_src
+
+        new_sig = _format_signature_with_ctx(info.stub_signature)
+        new_def = f"{info.stub_def_indent}def {info.stub_name}{new_sig}:"
+        old_def = info.stub_def_line.rstrip()
+        # TODO: handle multi-line stub signatures because I currently only replace the first def line and leave hanging fragments when the signature spans lines.
+        return forward_src.replace(old_def, new_def, 1)
+
     info = discover_stub_info(forward_path)
     forward_src = redact_torch_fn(forward_path, None)
     if not forward_src:
         raise RuntimeError(f"Failed to read forward source: {forward_path}")
     forward_src = _prepare_forward_source(forward_src, info.stub_name)
+    forward_src = _inject_ctx_into_forward_stub(forward_src, info)
 
     header_forward = textwrap.dedent(
         """\
@@ -209,21 +249,16 @@ def write_initial_backward(
 # comment:
 # essentially: inspect the stub’s signature, read user annotations for which args require grads, then auto-generate a docstring that tells the LLM to create gradients w.r.t. those input indices (and include examples that initialize zero-grads with the right shapes)
 def _make_signature_comment(info: StubInfo) -> str:
-    pieces: list[str] = []
-    if info.positional_params:
-        pieces.append(", ".join(info.positional_params))
+    params: list[str] = list(info.positional_params)
 
-    kw_section: list[str] = []
     if info.kwonly_params:
-        kw_section.extend(info.kwonly_params)
+        params.append("*")
+        params.extend(info.kwonly_params)
 
-    if kw_section:
-        kw_section.append("**upstreams")
-        pieces.append(", ".join(["*"] + kw_section))
-    else:
-        pieces.append("**upstreams")
+    params.append("ctx=None")
+    params.append("**upstreams")
 
-    call_signature = ", ".join(pieces)
+    call_signature = ", ".join(params)
 
     if info.grad_param_names:
         grad_clause = "Must return tuple: (" + ", ".join(f"grad_{name}" for name in info.grad_param_names) + ")"
@@ -238,6 +273,9 @@ def _make_signature_comment(info: StubInfo) -> str:
         #
         # PyTorch supplies one upstream_i entry per tensor returned by forward (in return order).
         # Non-differentiable outputs yield upstream_i=None.
+        # Both forward_{info.stub_name} and backward_{info.stub_name} accept an optional ctx=None argument.
+        # StubOverrideDCK passes the real autograd ctx object so you can stash tensors/metadata in forward
+        # (e.g., ctx.saved_mean = mean) and read them back inside backward without recomputing.
         #
         # {grad_clause}
         """
@@ -250,9 +288,9 @@ def _make_backward_stub(info: StubInfo) -> str:
     if info.kwonly_params:
         params.append("*")
         params.extend(info.kwonly_params)
-        params.append("**upstreams")
-    else:
-        params.append("**upstreams")
+
+    params.append("ctx=None")
+    params.append("**upstreams")
 
     param_str = ", ".join(params)
     grad_targets = info.grad_param_names or ["input_tensor"]
@@ -263,14 +301,15 @@ def _make_backward_stub(info: StubInfo) -> str:
         "    # 1. Pull upstream gradients for tensor outputs (forward return order)",
         "    #    dy = upstreams.get('upstream_0')  # None when that output is non-differentiable",
         "    #    add more upstream_* lookups as needed based on forward returns",
-        "    # 2. Allocate gradient buffers for each tensor input",
+        "    # 2. Use ctx (if not None) to retrieve any tensors/metadata stashed during forward",
+        "    # 3. Allocate gradient buffers for each tensor input",
     ]
     # Show explicit grad_foo examples so the LLM knows exactly which tensors require gradients.
     lines.extend(f"    #    grad_{name} = torch.zeros_like({name})" for name in grad_targets)
     lines.extend([
-        "    # 3. Launch backward kernels to populate gradients",
+        "    # 4. Launch backward kernels to populate gradients",
         "    #    backward_kernel[grid](...)",
-        "    # 4. Return gradients matching the tensor input order",
+        "    # 5. Return gradients matching the tensor input order",
         "    raise ValueError(",
         f'        "backward_{info.stub_name} not implemented!\\n"',
         '        "Must allocate gradient buffers for each tensor input, launch backward kernels, and return gradients in input order."',
@@ -285,6 +324,29 @@ def _prepare_forward_source(forward_src: str, stub_name: str) -> str:
     cleaned = _remove_autodiff_import(cleaned)
     cleaned = _strip_main_guard(cleaned)
     return cleaned
+
+
+def _format_signature_with_ctx(signature: inspect.Signature) -> str:
+    """Return a signature string that includes ctx=None while preserving arg order."""
+    params = list(signature.parameters.values())
+    if "ctx" in signature.parameters:
+        return str(signature)
+
+    insert_idx = len(params)
+    for i, param in enumerate(params):
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            # Place ctx just before **kwargs so kwargs still captures user metadata
+            insert_idx = i
+            break
+
+    # Add ctx as keyword-only when the stub already has keyword-only params or **kwargs, else keep positional-or-keyword
+    has_kwonly_space = any(p.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.VAR_KEYWORD) for p in params)
+    ctx_kind = inspect.Parameter.KEYWORD_ONLY if has_kwonly_space else inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ctx_param = inspect.Parameter("ctx", kind=ctx_kind, default=None)
+
+    params.insert(insert_idx, ctx_param)
+    new_sig = signature.replace(parameters=params)
+    return str(new_sig)
 
 
 def _strip_autodiff_decorator(forward_src: str, stub_name: str) -> str:
