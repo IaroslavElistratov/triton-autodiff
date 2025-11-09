@@ -34,7 +34,9 @@ def _filter_rag_paths(paths: Sequence[str], excluder: "_PathExcluder") -> tuple[
     return filtered, excluded
 
 # RAG reference formatting constants
-_RAG_MAX_CHARS = 15000  # Max chars per kernel in reference section (to stay within token budget)
+
+# Max lines per retrieved snippet (applied independently to each forward/backward block)
+_RAG_MAX_LINES = 250
 _SEP_MAJOR = "=" * 80   # Major section separator
 _SEP_MINOR = "─" * 80   # Minor section separator
 _SEP_HEADER = "=" * 60  # Header separator for initial file comments
@@ -382,13 +384,13 @@ class RAGAdaptationStrategy(BaseStrategy):
         Returns:
             Formatted reference block with comparison instructions
         """
-        # give budget of at least 400 chars to each retrieved example
-        per_section_budget = max(400, _RAG_MAX_CHARS // max(1, len(self.rag_refs)))
-
         def _truncate(text: str) -> str:
-            if len(text) <= per_section_budget:
+            lines = text.splitlines()
+            if len(lines) <= _RAG_MAX_LINES:
                 return text
-            return text[:per_section_budget] + "\n... [truncated] ..."
+            print("[WARNING][RAGAdaptationStrategy] retrieved examples were truncated!")
+            truncated = "\n".join(lines[:_RAG_MAX_LINES])
+            return truncated + f"\n... [truncated after {_RAG_MAX_LINES} lines] ..."
 
         sections: list[str] = [f"""
 {_SEP_MAJOR}
