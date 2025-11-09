@@ -18,12 +18,12 @@ from .generate_initial import wrap_with_kwargs
 #    (make_args, SWEEP, etc.) we need for gradcheck/bench; it no longer patches
 #    the stub at runtime.
 #
-# 2. Import raised.py directly, fetch StubOverrideDCK and the orchestrator-supplied stub name,
-#    and create a wrapper that mirrors the stub signature but forwards into StubOverrideDCK.apply.
-#    The original stub inside raised.py stays untouched; only the worker holds the wrapper.
+# 2. Import raised.py directly, fetch DifferentiableStub and the orchestrator-supplied stub name,
+#    and create a wrapper that mirrors the stub signature but forwards into DifferentiableStub.apply.
+#    The original stub inside raised.py untouched; only the worker holds the wrapper.
 #
 # 3. Gradcheck/benchmark call that wrapper; it binds kwargs/defaults, hands the positional tuple to
-#    StubOverrideDCK.apply, and therefore executes whatever the LLM last wrote to raised.py without
+#    DifferentiableStub.apply, and therefore executes whatever the LLM last wrote to raised.py without
 #    altering the stub definition itself.
 
 
@@ -36,13 +36,13 @@ BENCH_TIMEOUT_S     = float(os.environ.get("TB_BENCH_TIMEOUT_S", "180"))
 def _load_generated_op(generated_fp: str):
     import runpy
 
-    # Execute generated/raised.py to inspect its namespace (forward copy, backward stub, StubOverrideDCK).
+    # Execute generated/raised.py to inspect its namespace (forward copy, backward stub, DifferentiableStub).
     ns = runpy.run_path(generated_fp)
 
-    # StubOverrideDCK is the autograd bridge the generated file exports. Without it the backward cannot run.
-    override_cls = ns.get("StubOverrideDCK")
+    # DifferentiableStub is the autograd bridge the generated file exports. Without it the backward cannot run.
+    override_cls = ns.get("DifferentiableStub")
     if override_cls is None:
-        raise RuntimeError("StubOverrideDCK missing from generated backward file")
+        raise RuntimeError("DifferentiableStub missing from generated backward file")
 
     target_stub_name = os.environ.get("KERNEL_AGENT_STUB_NAME")
     if not target_stub_name:
@@ -58,18 +58,18 @@ def _load_generated_op(generated_fp: str):
     stub_name = target_stub_name
     stub_fn = candidate
 
-    # Wrap the generated stub so kwargs/defaults still work, but bodies go through StubOverrideDCK.apply().
+    # Wrap the generated stub so kwargs/defaults still work, but bodies go through DifferentiableStub.apply().
     # Autograd Function.apply only accepts positional args, so we preserve the original signature
     # (including keyword-only parameters and defaults) via inspect.signature.bind(). This happens in
     # the worker only; the original forward module isn’t modified.
     #
     # Important: do NOT overwrite the stub living in raised.py. This helper creates a thin wrapper
-    # that mirrors the stub's signature and forwards into StubOverrideDCK.apply. The gradcheck/bench children
+    # that mirrors the stub's signature and forwards into DifferentiableStub.apply. The gradcheck/bench children
     # call that wrapper so kwargs/defaults bind correctly before apply() (which only accepts positional args).
     # Because the wrapper sits purely in the worker, the actual stub definition inside raised.py remains untouched.
     #
     # IOW: only borrow the stub’s signature (and call it to bind kwargs/defaults), then hand the positional tuple
-    # off to StubOverrideDCK.apply; the stub inside raised.py stays untouched
+    # off to DifferentiableStub.apply; the stub inside raised.py stays untouched
     op = wrap_with_kwargs(stub_fn, override_cls)
     return stub_name, op, ns
 
@@ -197,8 +197,8 @@ def _gradcheck_child(fwd_fp: str, generated_fp: str, q):
         )
 
         # CRITICAL: compile_kernel runs FIRST in this child process to materialize the
-        # forward namespace (make_args, SWEEP, etc.). Later steps load StubOverrideDCK from raised.py
-        # and call the wrapper produced by _load_generated_op so tests route through StubOverrideDCK.apply().
+        # forward namespace (make_args, SWEEP, etc.). Later steps load DifferentiableStub from raised.py
+        # and call the wrapper produced by _load_generated_op so tests route through DifferentiableStub.apply().
         ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.
@@ -322,7 +322,7 @@ def _bench_child(fwd_fp: str, generated_fp: str, q):
 
         # CRITICAL: compile_kernel runs FIRST in this child process to materialize the
         # forward namespace. Later steps replace op with the wrapper from _load_generated_op so execution routes
-        # through StubOverrideDCK.apply without touching the stub definition in raised.py.
+        # through DifferentiableStub.apply without touching the stub definition in raised.py.
         ns = compile_kernel(fwd_fp, generated_fp)
 
         # Force async CUDA errors to surface NOW at compile_kernel, not later at unrelated code.

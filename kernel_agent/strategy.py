@@ -122,15 +122,15 @@ class BaseStrategy:
         Override in subclasses for strategy-specific constraints.
         """
         return (
-            "The backward file contains the forward stub, backward Triton kernel, backward stub, and StubOverrideDCK class.\n"
-            "You can edit: backward kernel, backward stub body, forward stub body, and StubOverrideDCK class.\n"
+            "The backward file contains the forward stub, backward Triton kernel, backward stub, and DifferentiableStub class.\n"
+            "You can edit: backward kernel, backward stub body, forward stub body, and DifferentiableStub class.\n"
             "You must only have a single backward stub.\n"
             "Do not rename or move the file.\n"
             "\n"
             "You may edit stub and kernel signatures when required. Keep every call-site and signature consistent when you do so, restoring argument order and return structure to match the contract used by gradcheck.\n"
             "### CRITICAL: AVOID RECOMPUTING FORWARD INTERMEDIATES\n"
             "If backward requires fwd intermediates, treat the ctx arg (which is provided to both fwd and bwd stubs) as the live autograd context: stash any forward intermediates on it inside the forward stub, read them back inside backward_stub. Check if ctx is not None, before using it. \n"
-            # "If you need new buffers, modify StubOverrideDCK to pass them while keeping existing stub signatures intact.\n"
+            # "If you need new buffers, modify DifferentiableStub to pass them while keeping existing stub signatures intact.\n"
             "\n"
         )
 

@@ -12,12 +12,12 @@ from typing import Callable, Optional
 from .utils import redact_torch_fn
 
 
-def _render_stub_override_dck(stub_name: str) -> str:
+def _render_differentiable_stub(stub_name: str) -> str:
     return textwrap.dedent(
         f"""
         import torch
 
-        class StubOverrideDCK(torch.autograd.Function):
+        class DifferentiableStub(torch.autograd.Function):
             \"\"\"Connects forward/backward stubs and threads ctx for intermediate caching.\"\"\"
 
             @staticmethod
@@ -69,7 +69,7 @@ def wrap_with_kwargs(stub_fn: Callable[..., object], override_cls: type) -> Call
     def wrapped(*args, **kwargs):
         bound = sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
-        # ctx is created by autograd when StubOverrideDCK.forward runs, so exclude it here.
+        # ctx is created by autograd when DifferentiableStub.forward runs, so exclude it here
         ordered = [bound.arguments[name] for name in names if name != "ctx"]
         return override_cls.apply(*ordered)
 
@@ -105,7 +105,7 @@ def discover_stub_info(forward_path: str) -> StubInfo:
     Grab the stub, inspect its signature, and build a StubInfo (argument order,
     kw-only args, upstream kwargs, tensor names). The scaffold writer then uses
     StubInfo to emit the signature contract, backward placeholder, and
-    StubOverrideDCK wrapper.
+    DifferentiableStub wrapper.
 
     IOW: let the decorator tell which stub arguments need gradients, then bake
     that guidance straight into raised.py so the LLM sees the exact call signature
@@ -180,7 +180,7 @@ def write_initial_backward(
     dst_path: str,
     retrieved_backward: Optional[str] = None,
 ) -> StubInfo:
-    """Render raised.py using StubInfo: forward copy, signature comment, stub scaffold, DCK.
+    """Render raised.py using StubInfo: forward copy, signature comment, stub scaffold, DifferentiableStub.
 
     Called once per run before any workers spawn. The goal is to hand the LLM a
     complete template that already spells out “gradcheck will call this exactly as …”
@@ -225,7 +225,7 @@ def write_initial_backward(
     signature_comment = _make_signature_comment(info).strip()
     # Placeholder backward stub mirrors the user signature and raises until filled in with real logic.
     backward_stub = _make_backward_stub(info)
-    dck = _render_stub_override_dck(info.stub_name)
+    differentiable_stub = _render_differentiable_stub(info.stub_name)
 
     # spell sections out explicitly to keep zero-indent formatting in the generated file
     sections = [
@@ -234,7 +234,7 @@ def write_initial_backward(
         header_backward,
         signature_comment,
         backward_stub.strip(),
-        dck,
+        differentiable_stub,
     ]
 
     content = "\n\n".join(sections) + "\n"
@@ -274,7 +274,7 @@ def _make_signature_comment(info: StubInfo) -> str:
         # PyTorch supplies one upstream_i entry per tensor returned by forward (in return order).
         # Non-differentiable outputs yield upstream_i=None.
         # Both forward_{info.stub_name} and backward_{info.stub_name} accept an optional ctx=None argument.
-        # StubOverrideDCK passes the real autograd ctx object so you can stash tensors/metadata in forward
+        # DifferentiableStub passes the real autograd ctx object so you can stash tensors/metadata in forward
         # (e.g., ctx.saved_mean = mean) and read them back inside backward without recomputing.
         #
         # {grad_clause}
