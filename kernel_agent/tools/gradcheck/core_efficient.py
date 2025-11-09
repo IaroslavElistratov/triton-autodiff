@@ -6,6 +6,7 @@ to validate Triton backward kernels via autograd gradients.
 """
 
 import torch
+from torch import Tensor
 from typing import Callable, Sequence, Tuple, Any, Dict, List
 import traceback
 
@@ -66,7 +67,6 @@ def _clone_for_validation(obj, *, require_grad: bool):
 # run_with_fix so structural issues are routed as hard failures instead of being mistaken for
 # parity mismatches.
 
-Tensor = torch.Tensor
 Tensors = Tuple[Tensor, ...]
 
 def _is_cuda_oom(err: BaseException) -> bool:

@@ -219,6 +219,7 @@ class MinimalLLMPatchProvider:
         # Strategy provides: workflow_section(), allowed_edits_section(), kernel_details_section()
         # Generic sections: patch requirements, minor notes
         system = (
+            # todo-now: fold into a single method (strategy.workflow_section and strategy.allowed_edits_section)
             strategy.workflow_section()
 
             + "\n### Allowed edits\n"

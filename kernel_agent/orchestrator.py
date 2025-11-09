@@ -407,12 +407,12 @@ class KernelOptimizer:
 
 
             # Run parity in an isolated child process;
-            # phase 1 (and beyond): run parity over the full SWEEP to enforce loop re-introduction;
+            # Phase 2 runs parity over the full SWEEP;
             # tests/mamtul: backward casts to fp16 before dot and accumulates/atomics in fp16, while Torch grads accumulate in fp32;
 
             if self.strategy.i == 0:
-                # Phase 1: Validate PyTorch reference against Triton forward
-                if VERBOSE: print(f"[kernel-agent][it={it}] Phase 1: Validating PyTorch reference against Triton forward")
+                # Phase 0: Validate PyTorch reference against Triton forward
+                if VERBOSE: print(f"[kernel-agent][it={it}] Phase 0: Validating PyTorch reference against Triton forward")
 
                 # Only validate forward outputs
                 os.environ["GRADCHECK_FORWARD_ONLY"] = "1"
@@ -426,26 +426,34 @@ class KernelOptimizer:
 
                 # Check if reference validation passed
                 forward_match_ok, validation_stats = payload_gradcheck
-                # In Phase 1, parity_ok means forward outputs match, not gradients
+                # In Phase 0, parity_ok means forward outputs match, not gradients
                 parity_ok = forward_match_ok  # Keep variable name for compatibility
 
                 if forward_match_ok:
                     self.strategy.pytorch_reference_validated = True
                     if VERBOSE:
-                        print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference forward outputs validated!")
-                        print(f"[kernel-agent][it={it}] Advancing to Phase 2 for backward kernel generation...")
+                        print(f"[kernel-agent][it={it}] Phase 0: PyTorch reference forward outputs validated!")
+                        print(f"[kernel-agent][it={it}] Advancing to Phase 1 for reflecting on RAG examples...")
                 else:
-                    # Reset flag on validation failure (e.g., after rollback from Phase 2)
+                    # Reset flag on validation failure (e.g., after rollback from later phases)
                     self.strategy.pytorch_reference_validated = False
-                    if VERBOSE: print(f"[kernel-agent][it={it}] Phase 1: PyTorch reference validation failed, will retry")
+                    if VERBOSE: print(f"[kernel-agent][it={it}] Phase 0: PyTorch reference validation failed, will retry")
 
-                # Extract formatted summary for Phase 1 (forward validation)
+                # Extract formatted summary for Phase 0 (forward validation)
                 check_summary = validation_stats.get("summary_text", str(validation_stats))
                 check_stats = validation_stats
 
+            elif self.strategy.i == 1:
+                # Phase 1: RAG reflection
+
+                # NOTE: set to false so that below we shortcircuit gradcheck and benchmark
+                parity_ok = False
+                check_summary = ""
+                check_stats = {}
+
             else:
-                # Phase 2: Gradcheck (gradient validation via autograd)
-                # Clear forward-only flag for Phase 2
+                # Phases 2+: Gradcheck (gradient validation via autograd)
+                # Clear forward-only flag once we leave fwd reference-validation phase
                 os.environ.pop("GRADCHECK_FORWARD_ONLY", None)
 
                 def _run_gradcheck_child():
@@ -457,7 +465,7 @@ class KernelOptimizer:
                 parity_ok, grad_stats = payload_gradcheck
                 if VERBOSE: print(f"[kernel-agent][it={it}] gradient_check ok={parity_ok}, grad_stats={grad_stats}")
 
-                # Extract formatted summary for Phase 2 (gradcheck). By design, reaching here means the kernel ran;
+                # Extract formatted summary for backward gradcheck. By design, reaching here means the kernel ran;
                 # only numerical mismatches (parity_ok == False) will trigger the fix branch below.
                 check_summary = grad_stats.get("summary_text", str(grad_stats))
                 check_stats = grad_stats
@@ -465,6 +473,7 @@ class KernelOptimizer:
             # Don't add gradcheck to history - it appears in state_facts when prompting,
             # and previous iterations' gradcheck results aren't useful for current fixes.
 
+            # todo: support the newly added phase 1
             was_restored = rollback.maybe_snapshot_or_restore(check_stats)
 
             # Deferred phase advance gate: if last iteration applied a patch, only advance
@@ -477,16 +486,18 @@ class KernelOptimizer:
             # using parity from the previous kernel, it misalignes prompts and flips SWEEP early.
 
             # Check for phase advancement and handle any transitions
-            self.strategy.maybe_advance(generated_fp, payload_gradcheck)
+            self.strategy.maybe_advance(generated_fp)
 
             # Reset conversation chain when advancing from Phase 0 to Phase 1
             # Phase 0 shows the LLM how to write PyTorch reference implementation
             # Phase 1 must start with a FRESH conversation to avoid bias toward PyTorch code
-            # Without this reset, LLM remembers Phase 0 and writes pure PyTorch backward instead of Triton
-            if self.strategy.phase_just_advanced:
-                if self.strategy.i == 1:
-                    rollback.best_pass_count = 0
-                    rollback._parity_regress_streak = 0
+            # Without this reset, LLM remembers Phase 0 and writes pure PyTorch backward instead of Triton;
+            #
+            # Also, if a rollback triggered the phase change (was_restored) skip the reset, bc it's possible
+            # we rollback to earlier phase (phase 0), and don't want to restore mid conversation
+            if self.strategy.phase_just_advanced and self.strategy.i == 1 and (not was_restored):
+                rollback.best_pass_count = 0
+                rollback._parity_regress_streak = 0
                 if VERBOSE: print(f"[kernel-agent][it={it}] Phase transition detected (0→1), resetting conversation chain to start fresh")
                 self.patcher._sampler._chain.restore_anchor(None)
 
@@ -521,7 +532,7 @@ class KernelOptimizer:
                     it,
                     "init" if self.strategy.phase_just_advanced else "fix",
                     generated_fp=generated_fp, fwd_fp=fwd_fp,
-                    header=phase_text if self.strategy.phase_just_advanced else phase_text + "\nONLY restore correctness to pass gradcheck.\n",
+                    header=phase_text,
                     state_facts={"check_summary": check_summary},
                     # not using phase temp (temp) for fix prompts, fix turns should be conservative and stable
                     temperature=0.25,
@@ -532,8 +543,6 @@ class KernelOptimizer:
 
             ###### benchmark ######
 
-
-            # Benchmark the current autograd op (backward), independent of optimize path
             if VERBOSE: print(f"[kernel-agent][it={it}] Benchmarking backward")
 
             # Benchmark in an isolated child process
@@ -568,13 +577,13 @@ class KernelOptimizer:
             #   parity_ok=True means "Phase 1 passed" (BEFORE advance)
             #   in_phase2=True means "now in Phase 2" (AFTER advance)
             #   -> Would misinterpret as "Phase 2 passed" and terminate prematurely!
-            # When phase advances (e.g., 0->1), parity_ok is from OLD phase (forward validation)
+            # When phase advances (e.g., 1->2), parity_ok is from OLD phase (forward validation)
             # We must NOT terminate using stale results - need to generate code for NEW phase first
             #
             # If just advanced phases - parity_ok is from the previous phase!
             # Will call LLM to generate initial code for new phase, then validate
             # Skip termination check (parity_ok is stale from previous phase)
-            if parity_ok and (self.strategy.i == 1) and not self.strategy.phase_just_advanced:
+            if parity_ok and (self.strategy.i == 2) and not self.strategy.phase_just_advanced:
                 # TIMING: Safe to terminate - parity_ok and in_phase2 are from same context (no advance)
                 # Both refer to Phase 1: validation passed AND still in Phase 1
                 # Only terminate if we're in Phase 1 AND we have fresh Phase 1 validation results

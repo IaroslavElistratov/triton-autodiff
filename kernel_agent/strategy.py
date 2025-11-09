@@ -39,6 +39,16 @@ _SEP_MAJOR = "=" * 80   # Major section separator
 _SEP_MINOR = "─" * 80   # Minor section separator
 _SEP_HEADER = "=" * 60  # Header separator for initial file comments
 
+# Reflection phase markers
+_REFLECTION_BLOCK_START = "# === RAG REFLECTION ==="
+_REFLECTION_BLOCK_END = "# === END RAG REFLECTION ==="
+_REFLECTION_REQUIRED_KEYS = (
+    "reference_summary",
+    "chosen_anchor",
+    "forward_differences",
+    "backward_implications",
+)
+
 # Strategy module: encapsulates per-step instructions and temperature, so the
 # orchestrator can toggle this behavior without changing its main loop.
 
@@ -55,7 +65,7 @@ class BaseStrategy:
         # Default: a simple optimize header with global guardrails and neutral temperature
         return "Phase = optimize.\n", 0.7
 
-    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
+    def maybe_advance(self, bwd_fp) -> None:
         # No-op in the base class.
         pass
 
@@ -142,7 +152,7 @@ class RegularStrategy(BaseStrategy):
         )
         return header, self._temp
 
-    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
+    def maybe_advance(self, bwd_fp) -> None:
         """No-op for RegularStrategy which doesn't have phases.
 
         Note: phase_just_advanced is already reset by orchestrator at start of iteration.
@@ -168,14 +178,15 @@ class _PathExcluder:
 
 
 class RAGAdaptationStrategy(BaseStrategy):
-    """Two-phase strategy for reference-based gradient validation.
+    """Three-phase strategy for reference-based gradient validation.
 
-    Phase 1: Generate and validate PyTorch reference implementation
-    Phase 2: Generate backward kernel and validate against reference gradients
+    Phase 0: Generate and validate a PyTorch reference implementation
+    Phase 1: Reflect on retrieved RAG examples and plan the backward adaptation
+    Phase 2: Adapt the retrieved backward kernel and validate against reference gradients
 
     Unlike compiler-generated kernels that need multi-phase refinement (readability,
     loops, atomics, coalesce), RAG-retrieved kernels are already optimized and just
-    need adaptation to the specific forward kernel.
+    need semantic alignment with the specific forward kernel.
     """
 
     def __init__(
@@ -186,12 +197,12 @@ class RAGAdaptationStrategy(BaseStrategy):
         excluded_substrings: Optional[Sequence[str]] = None,
     ):
         self.name = "rag_adaptation"
-        # Phase index (0=reference generation, 1=backward generation)
+        # Phase index (0=reference generation, 1=reflection, 2=backward generation)
         self.i = 0
         # Track if we just transitioned phases
         self.phase_just_advanced = False
 
-        # Phase 1 state: PyTorch reference
+        # Phase 0 state: PyTorch reference
 
         # Source code of validated reference
         self.pytorch_reference_code = None
@@ -296,26 +307,41 @@ class RAGAdaptationStrategy(BaseStrategy):
                 "\n"
                 "You will have multiple turns to refine until outputs match.\n"
             )
+        elif self.i == 1:
+            return (
+                "\n### Workflow context\n"
+                "You are in the reflection phase. Goal: study every retrieved FWD+BWD pair before touching the Triton kernels.\n"
+                "Steps:\n"
+                "1. Read each retrieved example (forward + backward) and compare it to YOUR forward.\n"
+                "2. Record which example is closest and why.\n"
+                "3. List the semantic differences between YOUR forward and the chosen reference.\n"
+                "4. Map each forward difference to the backward implications (needed saved tensors, scaling, normalization, reductions, etc.).\n"
+                "\n"
+                "Update the '# === RAG REFLECTION ===' block in the working file every turn.\n"
+                "Fill the required sections: reference_summary, chosen_anchor, forward_differences, backward_implications.\n"
+                "Use concise bullet points; keep comments in first-person imperative form (no 'we').\n"
+                "Do NOT edit the Triton kernel or stub mechanics yet. Reflection is about semantic alignment only.\n"
+                "The full RAG reference block is attached below — read it before writing your reflection note.\n"
+            )
         else:
             ref_block_line = (
                 "A retrieved FWD+BWD pair is provided as a REFERENCE PATTERN (see reference section below).\n"
                 if self.phase_just_advanced
-                else "You already saw the retrieved FWD+BWD reference when entering Phase 2; reuse that pattern from memory (reference block hidden this turn).\n"
+                else "Reference block hidden this turn; rely on the reflection block you wrote and prior conversation history.\n"
             )
             return (
                 "\n### Workflow context\n"
-                "You are a Triton kernel adapter. Your task: write a backward kernel for YOUR forward (shown in working file).\n"
-                "You can try adapt a retrieved backward kernel to work with a specific forward kernel.\n"
-                "Workflow: RAG retrieval -> [write/adapt backward -> gradcheck] repeats until gradcheck passes on all shapes.\n"
+                "You are a Triton kernel adapter. Task: write a backward kernel for YOUR forward (shown in working file).\n"
+                "Workflow: RAG retrieval -> Reflection plan -> [adapt backward -> gradcheck] until gradcheck passes on all shapes.\n"
                 "\n"
                 f"{ref_block_line}"
                 "The retrieved backward was written for a DIFFERENT forward kernel and needs adaptation/rewrite to compute correct gradients for THIS forward.\n"
-                "Your job: write backward for YOUR forward using the retrieved pair as a pattern guide.\n"
+                "Your job: write backward for YOUR forward using the retrieved pair as a pattern guide and the reflection plan as your contract.\n"
                 "\n"
                 "CRITICAL APPROACH:\n"
                 "1. SEMANTIC ANALYSIS FIRST: Compare RETRIEVED FWD vs YOUR FWD (what's algorithmically different?)\n"
                 "2. UNDERSTAND PATTERN: How does retrieved BWD mirror its FWD structure?\n"
-                "3. APPLY PATTERN: Write BWD for YOUR FWD following the same backward-mirrors-forward principle\n"
+                "3. APPLY PATTERN: Write BWD for YOUR FWD following the backward-mirrors-forward principle\n"
                 "\n"
                 "Your goal is correctness (pass gradcheck), not optimization. The retrieved kernel is already optimized.\n"
                 "You will have multiple turns to refine the adaptation. Adhere to Phase-specific adaptation goals.\n"
@@ -326,24 +352,25 @@ class RAGAdaptationStrategy(BaseStrategy):
     #     return ""
 
     def rag_reference_section(self) -> str:
-        """Show RAG references only at Phase 2 entry (backward generation init).
-
-        Phase 1: PyTorch reference generation - no RAG content (returns empty)
-        Phase 2 entry: Show RAG FWD+BWD as pattern reference (only once)
-        Phase 2 fix iterations: Hide RAG, rely on conversation chaining from Phase 2 entry turn
+        """Show RAG references during reflection phase and when entering adaptation (only once).
+        Phase 0: PyTorch reference generation - no RAG content (returns empty)
+        Phase 1: reflection phase, show RAG FWD+BWD pairs
+        Phase 2 entry: Show RAG FWD+BWD pairs (only once)
+        later Phase 2 iterations: Hide RAG, rely on conversation chaining from Phase 2 entry turn
         """
-        # Phase 1: Hide RAG (don't show Triton kernels when generating PyTorch reference)
         if self.i == 0:
-            if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 1: generating PyTorch reference)")
+            if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 0: generating PyTorch reference)")
             return ""
 
-        # Phase 2 entry: Show RAG FWD+BWD once when transitioning
-        if self.phase_just_advanced and self.rag_refs:
-            if VERBOSE: print(f"[kernel-agent] RAG reference shown (Phase 2 entry: generating backward kernel)")
+        if self.i == 1:
+            if VERBOSE: print("[kernel-agent] RAG reference shown (Phase 1: reflection)")
             return self._build_rag_reference_section()
 
-        # Phase 2 fix iterations: Hide RAG, rely on conversation chaining
-        if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 2 fix iteration: relying on conversation chaining)")
+        if self.i == 2 and self.phase_just_advanced:
+            if VERBOSE: print("[kernel-agent] RAG reference shown (Phase 2 entry: adapting backward)")
+            return self._build_rag_reference_section()
+
+        if VERBOSE: print("[kernel-agent] RAG reference hidden (Phase 2 fix iteration: rely on reflection notes)")
         return ""
 
     def _build_rag_reference_section(self) -> str:
@@ -449,6 +476,19 @@ END REFERENCE SECTION
                 "\n"
                 "The reference should be TRUSTED, SIMPLE, and OBVIOUSLY CORRECT.\n"
                 "Tolerances (atol=1e-2) handle minor numerical differences from tiling.\n"
+            )
+        elif self.i == 1:
+            return (
+                "You are in the reflection phase.\n"
+                "Focus on documenting analysis, not editing kernels.\n"
+                "Maintain a comment block bounded by '# === RAG REFLECTION ===' and '# === END RAG REFLECTION ==='.\n"
+                "Populate the required sections inside that block:\n"
+                "- reference_summary: bullet per retrieved reference (path, similarity, key match/diff).\n"
+                "- chosen_anchor: which reference you will follow and why it matches best.\n"
+                "- forward_differences: list of semantic differences between MY forward and the chosen reference.\n"
+                "- backward_implications: list of how each difference changes gradients, saved tensors, or recomputations.\n"
+                "Do not modify Triton kernels, stub signatures, or benchmark code during reflection.\n"
+                "Only edit comments or lightweight scaffolding needed to hold the reflection notes.\n"
             )
         else:
             # Phase 2: Backward kernel generation
@@ -557,6 +597,26 @@ END REFERENCE SECTION
                 "It's OK if the reference OOMs on large shapes - we validate on smaller shapes first.\n"
             )
             return header, 0.1  # Low temperature for deterministic reference
+        elif self.i == 1:
+            header = (
+                "Phase = Reflect on RAG Examples\n"
+                "Goal: fully understand how retrieved kernels relate to MY forward before implementing MY backward.\n"
+                "\n"
+                "Required reflection block (in-file):\n"
+                f"- Keep a block bounded by '{_REFLECTION_BLOCK_START}' and '{_REFLECTION_BLOCK_END}'.\n"
+                "- Update it every turn; it is the source of truth for your plan.\n"
+                "\n"
+                "Reflection checklist:\n"
+                "1. reference_summary → bullet per retrieved reference (similarity, semantic match/mismatch).\n"
+                "2. chosen_anchor → name the reference you will follow and justify the choice.\n"
+                "3. forward_differences → enumerate how MY forward differs mathematically from that anchor.\n"
+                "4. backward_implications → map each forward difference to gradients/intermediates (saved vs recompute vs upstream).\n"
+                "\n"
+                "Do not edit the Triton kernel or stub signatures in this phase. Capture analysis only.\n"
+                "Call out missing tensors you must save later, reductions that change scaling, normalization constants, etc.\n"
+                "Terminate reflection only after the block is complete and grounded in the retrieved examples.\n"
+            )
+            return header, 0.2
         else:
             # Phase 2: Generate backward kernel
             temp = 0.25 if not parity_ok else 0.5
@@ -683,26 +743,47 @@ END REFERENCE SECTION
             )
             return header + semantic_preamble, temp
 
-    def maybe_advance(self, bwd_fp, payload_gradcheck) -> None:
-        """Advance from Phase 0 to Phase 1 after PyTorch reference is validated.
-
+    def maybe_advance(self, bwd_fp) -> None:
+        """Advance between phases when guardrails are satisfied.
         Note: phase_just_advanced is reset to False by orchestrator at start of each iteration.
         We redundantly set it to False here for clarity.
         """
         self.phase_just_advanced = False
+
+        # Advance from reference generation to backward generation
         if self.i == 0 and self.pytorch_reference_validated:
-            # Advance from reference generation to backward generation
             self.i = 1
-            self.phase_just_advanced = True  # Mark that we just advanced (will be reset next iteration)
-            if VERBOSE: print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference to backward generation")
-        # Phase 1 doesn't advance (stays at backward generation)
+            self.phase_just_advanced = True
+            if VERBOSE: print("[kernel-agent] RAGAdaptationStrategy: Advancing from PyTorch reference generation (Phase 0) to reflection (Phase 1)")
+
+        elif self.i == 1 and self._reflection_block_present(bwd_fp):
+            self.i = 2
+            self.phase_just_advanced = True
+            if VERBOSE: print("[kernel-agent] RAGAdaptationStrategy: Reflection block detected -> advancing from reflection (Phase 1) to backward adaptation (Phase 2)")
+
+    def _reflection_block_present(self, bwd_fp: str) -> bool:
+        try:
+            text = Path(bwd_fp).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+
+        if (_REFLECTION_BLOCK_START not in text) or (_REFLECTION_BLOCK_END not in text):
+            return False
+
+        block = text.split(_REFLECTION_BLOCK_START, 1)[1]
+        block = block.split(_REFLECTION_BLOCK_END, 1)[0]
+        lowered = block.lower()
+        # todo: enforce non-empty semantic details (forward equations, gradient list, etc) so
+        # empty placeholders like "reference_summary: TODO" cannot unlock Phase 2;
+        # currently this is a very weak check
+        return all(key in lowered for key in _REFLECTION_REQUIRED_KEYS)
 
     def exception_fix_header(self) -> str:
         """Return phase-appropriate header for exception fixing.
 
         Uses self.i (phase index) to determine appropriate guidance.
-        Phase 1 requires semantic analysis to avoid tactical fix loops,
-        while Phase 0 just needs correct PyTorch implementation.
+        Phase 0 needs PyTorch fixes, Phase 1 enforces reflection completeness,
+        and Phase 2 requires semantic analysis before tactical fixes.
         """
         if self.i == 0:
             # Phase 0: PyTorch reference generation
@@ -715,9 +796,18 @@ END REFERENCE SECTION
                 "Just implement the math directly with basic PyTorch operations.\n"
                 "\n"
             )
+        elif self.i == 1:
+            # Phase 1: Reflection
+            return (
+                "Phase = fix. Reflection incomplete.\n"
+                "Fill the '# === RAG REFLECTION ===' block instead of editing kernels.\n"
+                "Ensure it lists reference_summary, chosen_anchor, forward_differences, backward_implications.\n"
+                "Use the retrieved examples shown below to ground each bullet.\n"
+                "Do not touch Triton kernels or stub signatures until the reflection block is complete.\n"
+                "\n"
+            )
         else:
-            # Phase 1: Backward kernel (self.i == 1)
-            # Semantic analysis critical to avoid tactical loops (evidenced by LOGS/3_out.txt)
+            # Phase 2: Backward kernel adaptation
             return (
                 "Phase = fix. Fix the exception below.\n"
                 "\n"
@@ -734,11 +824,15 @@ END REFERENCE SECTION
 
     def set_phase_index(self, i: int) -> None:
         """Set phase index for rollback compatibility."""
-        assert i in [0, 1], "RAGAdaptationStrategy has only two phases"
+        assert i in [0, 1, 2], "RAGAdaptationStrategy has three phases"
         self.i = i
         self.phase_just_advanced = False  # Reset flag when manually setting phase
         if VERBOSE:
-            phase_name = "PyTorch reference" if i == 0 else "Backward generation"
+            phase_name = {
+                0: "PyTorch reference",
+                1: "Reflection",
+                2: "Backward generation",
+            }[i]
             print(f"[kernel-agent] RAGAdaptationStrategy phase set to {i} ({phase_name})")
 
 
@@ -751,46 +845,3 @@ def make_strategy(mode: str, default_temp: float = 0.7) -> BaseStrategy:
         return RAGAdaptationStrategy(excluded_substrings=exclusions)  # Use new reference-based strategy
     else:
         return RegularStrategy(default_temp)
-
-
-
-# Phase-specific guardrail checks
-
-# todo-now: the guarrails for this should be "gradcheck passes on single shape". And actaully gradrails for phase 1 is also IMPLCITILY assuuming passing all the shapes -- but currently this logic is hidden in the loop strcuture
-#   ==> i think better to refactor and paass gradcheck stats here to the gurarails check as well -- so that guradrails_ checks below can decdie wearther ot  incrrmer or not based on weather that e.g. 1 shaep passeed; or all shaeps passed
-# todo: assert no change in counts of tl.load, tl.store, tl.atomic_, and forbid edits to stub/kernel signatures
-def guardrails_check_phase0(generated_fp: str) -> bool:
-    try:
-        with open(generated_fp, "r", encoding="utf-8", errors="ignore") as f:
-            for ln in f:
-                s = ln.lstrip()
-                if not s or s.startswith("#"):
-                    continue
-                # Forbid introducing new loops in Phase-0 (readability only)
-                if (s.startswith("for ") or s.startswith("while ")) and s.rstrip().endswith(":") and (len(ln) - len(s) > 0):
-                    return False
-        return True
-    except OSError:
-        return False
-
-def guardrails_check_phase1(generated_fp: str) -> bool:
-    """
-    Phase-1 (Refactor only) guardrail: return True if the current backward
-    kernel contains at least one Python 'for' loop (heuristic: a line starting
-    with 'for ' after indentation and ending with ':', ignoring comments).
-
-    Rationale: only allow advancing to Phase 2 after loops were reintroduced.
-    """
-    try:
-        with open(generated_fp, "r", encoding="utf-8", errors="ignore") as f:
-            for ln in f:
-                s = ln.lstrip()
-                if not s or s.startswith("#"):
-                    continue
-                # Looks like an indented loop inside a function
-                if s.startswith("for ") and s.rstrip().endswith(":") and (len(ln) - len(s) > 0):
-                    return True
-        return False
-    except OSError:
-        # Hold at Phase 1 if we can't verify
-        return False
