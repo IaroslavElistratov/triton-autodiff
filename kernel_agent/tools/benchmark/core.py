@@ -61,6 +61,9 @@ def bench_op(
     make_args_fn = sidecar.get("make_args")
     if not callable(make_args_fn):
         raise RuntimeError("sidecar['make_args'] must be callable")
+    flops_fn = sidecar.get("flops")
+    if flops_fn is not None and not callable(flops_fn):
+        raise RuntimeError("sidecar['flops'] must be callable when provided")
 
     def _ensure_requires_grad(x: Any) -> Any:
         # try:
@@ -102,7 +105,6 @@ def bench_op(
                 torch.autograd.backward(ys, ups, retain_graph=True)
 
         ms = float(tt.do_bench(run))
-        flops_fn = sidecar.get("flops")
         flop = float(flops_fn(dims, mode)) if callable(flops_fn) else None
         tflops = flop * 1e-12 / (ms * 1e-3) if flop is not None else None
         results.append(BenchRecord(dims=dict(dims), time_ms=ms, tflops=tflops))
@@ -178,4 +180,3 @@ def _reduce_bench(records: Sequence[BenchRecord]) -> Dict[str, Any]:
         per_shape[k] = entry
 
     return {"per_shape": per_shape, "order": order, "peak_tflops": peak}
-

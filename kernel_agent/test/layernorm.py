@@ -109,13 +109,14 @@ def make_args(dims, device="cuda", dtype=torch.float32):
     # forward_layernorm signature includes normalized_shape metadata and explicit eps
     return (x, normalized_shape, weight, bias, eps), {}
 
-def flops(dims, mode):
-    """optional, for benchmarking"""
-    if mode == "bwd":
-        # forward: mean+var+norm+affine ~6*M*N ops, backward doubles it -> 12*M*N
-        M, N = dims["M"], dims["N"]
-        return 12.0 * M * N
-    raise ValueError(f"flops only implemented for backward mode; got {mode}")
+# temporarily disable no bwd-file flop reference to validate it
+# def flops(dims, mode):
+#     """optional, for benchmarking"""
+#     if mode == "bwd":
+#         # forward: mean+var+norm+affine ~6*M*N ops, backward doubles it -> 12*M*N
+#         M, N = dims["M"], dims["N"]
+#         return 12.0 * M * N
+#     raise ValueError(f"flops only implemented for backward mode; got {mode}")
 
 
 def setup():
