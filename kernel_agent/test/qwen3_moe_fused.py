@@ -126,12 +126,11 @@ def get_autotune_keys() -> list[str]:
 # y[m, n] = sum_k w[s[m], n, k] * x[m, k]
 
 
-# todo-now: support .autotune and .heuristics
-# @triton.autotune(
-#     configs=get_autotune_configs(),
-#     prune_configs_by={"early_config_prune": prune_configs},
-#     key=get_autotune_keys(),
-# )
+@triton.autotune(
+    configs=get_autotune_configs(),
+    prune_configs_by={"early_config_prune": prune_configs},
+    key=get_autotune_keys(),
+)
 @triton.jit
 def _grouped_gemm_forward_kernel(
     # Pointers

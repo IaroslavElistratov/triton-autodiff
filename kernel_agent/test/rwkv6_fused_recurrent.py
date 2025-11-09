@@ -37,20 +37,19 @@ exp = tl.exp
 
 
 
-# todo-now: support .autotune and .heuristics
-# @triton.heuristics({
-#     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
-#     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-#     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
-# })
-# @triton.autotune(
-#     configs=[
-#         triton.Config({}, num_warps=num_warps)
-#         for num_warps in [1, 2, 4, 8, 16]
-#     ],
-#     key=['BK', 'BV'],
-#     **autotune_cache_kwargs
-# )
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+    'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4, 8, 16]
+    ],
+    key=['BK', 'BV'],
+    **autotune_cache_kwargs
+)
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv6_fwd_kernel(
     q,  # query [B, H, T, K]/[B, T, H, K]
