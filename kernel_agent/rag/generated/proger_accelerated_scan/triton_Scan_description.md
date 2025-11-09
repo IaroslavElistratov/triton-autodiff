@@ -1,0 +1,3 @@
+- kernel family: scan (parallel prefix recurrence)
+- concise summary: Packs token and gate pairs into 64-bit tuples, runs a Triton associative scan along the time axis to accumulate the recurrent state for each `(batch, channel)` slice, and writes the prefix results back to the output tensor.
+- detailed summary: The forward kernel treats each sequence independently, loading contiguous `tokens` and `gates`, combining them via a custom `first_order_op`, and invoking `tl.associative_scan` to perform the cumulative recurrent update entirely on the device. After unpacking the tuple, it stores only the updated tokens (the recurrent state) into `states`, yielding a prefix-scan RNN implemented as a fused Triton kernel.

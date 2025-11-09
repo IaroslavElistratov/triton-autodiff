@@ -1,0 +1,3 @@
+- kernel family: chunked cross entropy via matmul^T
+- concise summary: A "thinboy" recomputation flavor that fixes the tile shape but keeps memory light by storing only block losses and per-row log-sum-exp values while deferring logits to later regeneration.
+- detailed summary: The forward kernel walks the vocabulary in 256-element tiles, forms logits by multiplying full-H slices of X with the corresponding columns of A^T, keeps running maxima and exponent sums, subtracts the masked target logit, and writes both per-block losses and row-level log-sum-exp values. The host code enforces that V, N, and H are multiples of 256/64, launches the kernel (printing its configuration), retains the inputs and statistics needed downstream, and returns the summed loss.

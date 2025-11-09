@@ -1,0 +1,3 @@
+- kernel family: activation (Swish = x·σ(x))
+- concise summary: The forward kernel flattens the tensor, evaluates the sigmoid gate for each element in fp32, multiplies by the original value, and stores the swish activation in the output buffer.
+- detailed summary: Autotuning sweeps block sizes 512–8192 and assigns each program a contiguous window of `B` elements. Within that window it loads `x`, computes `σ(x) = 1/(1+exp(-x))`, multiplies by `x`, and writes the result back in the original dtype. The Python wrapper derives `T = x.numel()`, allocates the result tensor, launches the kernel to cover all elements, and saves the input so the backward kernel can reuse it for derivative evaluation.

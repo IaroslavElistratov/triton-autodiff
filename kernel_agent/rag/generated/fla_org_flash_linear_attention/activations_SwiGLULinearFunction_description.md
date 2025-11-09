@@ -1,0 +1,3 @@
+- kernel family: activation + projection (SwiGLU followed by linear)
+- concise summary: The forward stage computes the elementwise `swish(x)·y` with the Triton SwiGLU kernel, then feeds the result into a dense linear layer while discarding the intermediate activation for memory savings.
+- detailed summary: Autotuned `swiglu_fwd` tiles the flattened tensors in blocks of 512–8192 elements, loads corresponding `x` and `y` segments, forms the sigmoid gate in fp32, and writes `x·σ(x)·y` to a temporary buffer. The wrapper immediately applies `F.linear` with the provided weight/bias to produce the final output and records `x`, `y`, and the weight so the backward pass can rebuild gradients; the intermediate SwiGLU tensor is not stored between passes, reducing activation memory.

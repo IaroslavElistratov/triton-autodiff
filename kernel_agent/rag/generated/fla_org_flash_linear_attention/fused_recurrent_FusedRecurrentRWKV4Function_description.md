@@ -1,0 +1,3 @@
+- kernel family: recurrent sequence modeling (RWKV4 time-mix)
+- concise summary: For each channel it evolves RWKV’s α/β/ε caches, computes the weighted value wkv = (exp(ε)·α + exp(u+k)·v)/(exp(ε)·β + exp(u+k)), and updates the caches with decay w.
+- detailed summary: fused_recurrent_rwkv4_forward_kernel is tiled over (batch, channel block). It loads the initial α, β, ε, weights w, and bias u, then for every timestep reads k and v, forms numerically-stable exponentials by subtracting a shared pivot τ, emits the wkv output, and updates α/β by blending the new value with decayed histories. Final state slices are stored in state_out, which concatenates the pre-step state so the forward caller can hand the tail state to the next chunk.

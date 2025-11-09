@@ -1,0 +1,3 @@
+- kernel family: normalization (layer norm + gate + linear head)
+- concise summary: Reuses the gated layer-norm pipeline to normalize and gate activations, then immediately projects them with a linear weight/bias in the requested autocast dtype.
+- detailed summary: The forward flattens batch/time into rows, calls layer_norm_gated_fwd to produce the gated output along with mean/rstd/residual history, reshapes back, and casts to the active autocast dtype before invoking F.linear. The Triton kernels mirror the ones used by the pure layer norm case, ensuring BT/BD tiling matches hidden size, and only the normalized activations feed the matrix multiply; residual outputs are retained when prenorm is requested.

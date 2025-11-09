@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 7)
+- concise summary: Evaluates the fifteen seventh-order real spherical harmonics from explicit polynomial expansions of the coordinate powers.
+- detailed summary: Per block of points, the kernel builds the required odd-degree monomials, combines them with stored constants to obtain the 15 components, and stores them consecutively in the output tensor with stride-aware addressing. The host helper creates an output of shape [..., 15] if needed and computes the block count from block_size.

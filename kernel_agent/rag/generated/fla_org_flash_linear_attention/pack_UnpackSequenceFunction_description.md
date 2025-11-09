@@ -1,0 +1,3 @@
+- kernel family: data layout (sequence unpacking)
+- concise summary: Inverse of packing: scatters a compact token buffer back into a padded [B, S, …] tensor using the stored cu_seqlens and padding convention.
+- detailed summary: unpack_sequence_fwdbwd drives the same Triton kernel with PACK=False, so each program copies contiguous tokens out to the padded slots while zeroing unused positions. The forward helper validates desired_shape when given, stores the bookkeeping, and keeps backward untouched; a mirror helper uses PACK=True to repack gradients during backward passes.

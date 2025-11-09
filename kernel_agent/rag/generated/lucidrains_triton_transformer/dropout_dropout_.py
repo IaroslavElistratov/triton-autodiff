@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/lucidrains/triton-transformer
+# Source-Files: triton_transformer/dropout.py
+# See: THIRD_PARTY_LICENSES.md (license text + NOTICE)
+#
+# Extracted autograd.Function from /var/folders/wf/5ynhbbrn49z46nwvn4vy2pkw0000gn/T/TRITON_EXTRACT_vi04zpqd/triton-transformer-main/triton_transformer/dropout.py
+import torch
+import torch.nn.functional as F
+from torch.autograd import Function
+
+import triton
+import triton.language as tl
+
+# ============================================================
+# SHARED HELPERS (Used by both forward and backward)
+# ============================================================
+
+# These helpers are called by both forward() and backward() methods
+
+# Common helper imports
+from random import randrange
+
+@triton.jit
+def _seeded_dropout(x_ptr, output_ptr, n_elements, p, seed, **meta):
+    BLOCK_SIZE = meta['BLOCK_SIZE']
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE * 4
+    off0 = block_start + BLOCK_SIZE * 0 + tl.arange(0, BLOCK_SIZE)
+    off1 = block_start + BLOCK_SIZE * 1 + tl.arange(0, BLOCK_SIZE)
+    off2 = block_start + BLOCK_SIZE * 2 + tl.arange(0, BLOCK_SIZE)
+    off3 = block_start + BLOCK_SIZE * 3 + tl.arange(0, BLOCK_SIZE)
+    mask0 = off0 < n_elements
+    mask1 = off1 < n_elements
+    mask2 = off2 < n_elements
+    mask3 = off3 < n_elements
+    x0 = tl.load(x_ptr + off0, mask=mask0)
+    x1 = tl.load(x_ptr + off1, mask=mask1)
+    x2 = tl.load(x_ptr + off2, mask=mask2)
+    x3 = tl.load(x_ptr + off3, mask=mask3)
+    r0, r1, r2, r3 = tl.random.rand4x(seed, off0)
+    keep0, keep1, keep2, keep3 = r0 > p, r1 > p, r2 > p, r3 > p
+    o0 = tl.where(keep0, x0 / (1 - p), 0.0)
+    o1 = tl.where(keep1, x1 / (1 - p), 0.0)
+    o2 = tl.where(keep2, x2 / (1 - p), 0.0)
+    o3 = tl.where(keep3, x3 / (1 - p), 0.0)
+    tl.store(output_ptr + off0, o0, mask=mask0)
+    tl.store(output_ptr + off1, o1, mask=mask1)
+    tl.store(output_ptr + off2, o2, mask=mask2)
+    tl.store(output_ptr + off3, o3, mask=mask3)
+
+
+def seeded_dropout(x, p, seed):
+    output = torch.empty_like(x)
+    n_elements = x.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE'] * 4),)
+    _seeded_dropout[grid](x, output, n_elements, p, seed, BLOCK_SIZE=BLOCK_SIZE
+        )
+    return output
+
+
+# ============================================================
+# FORWARD Triton Kernels
+# ============================================================
+
+# Kernels called (directly or transitively) from forward() method
+
+# Forward method (kernel launch code)
+def _dropout__forward(cls, ctx, x, p):
+    seed = randrange(int(1000000.0))
+    ctx.p = p
+    ctx.seed = seed
+    return seeded_dropout(x, p, seed)
+
+
+# ============================================================
+# BACKWARD Triton Kernels
+# ============================================================
+
+# Kernels called (directly or transitively) from backward() method
+
+# Backward method (kernel launch code)
+def _dropout__backward(cls, ctx, dy):
+    p = ctx.p
+    seed = ctx.seed
+    return seeded_dropout(dy, p, seed), None
+
+
+# ============================================================
+# autograd.Function Class Definition
+# ============================================================
+
+class dropout_(autograd.Function):
+
+    @classmethod
+    def forward(cls, ctx, x, p):
+        seed = randrange(int(1000000.0))
+        ctx.p = p
+        ctx.seed = seed
+        return seeded_dropout(x, p, seed)
+
+    @classmethod
+    def backward(cls, ctx, dy):
+        p = ctx.p
+        seed = ctx.seed
+        return seeded_dropout(dy, p, seed), None

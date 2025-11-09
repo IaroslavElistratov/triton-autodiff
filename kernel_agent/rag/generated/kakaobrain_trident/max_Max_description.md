@@ -1,0 +1,3 @@
+- kernel family: reduction (row-wise maximum with arg index)
+- concise summary: Assigns one program per reduction row, scans the row to find the maximal element and its index, and stores both the max value and argmax for downstream use.
+- detailed summary: The kernel builds a block pointer over the row (`x_block_size` columns) using the provided strides, loads the tile with boundary checks, and applies `tl.argmax` along the feature axis to obtain the winner column. It then gathers the actual maximum value from the source tensor via the original strides to avoid precision loss, and writes the value to the output vector and the index to the argmax buffer (as int64). This compact reduction leaves the full argmax map in registers for the backward scatter.

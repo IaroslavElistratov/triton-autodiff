@@ -1,0 +1,3 @@
+- kernel family: data layout (sequence packing)
+- concise summary: Packs padded [B, S, …] sequences into a compact [total_tokens, …] buffer using cu_seqlens, respecting left or right padding.
+- detailed summary: pack_sequence_fwdbwd configures packunpack_sequence_kernel with dimension tiles (BD) and grid (feature block, padded length, batch); inside, each program computes the source index based on padding_side and writes contiguous tokens for valid timesteps. The forward wrapper just caches cu_seqlens/padding metadata for later unpacking; no gradients are touched here.

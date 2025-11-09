@@ -1,0 +1,3 @@
+- kernel family: normalization (layer norm / RMS norm with optional residual)
+- concise summary: Applies grouped layer normalization or RMS normalization, optionally adds a residual stream, and stores the statistics for later use.
+- detailed summary: Depending on feature width, it picks layer_norm_fwd_kernel (BT-tiled, NB-scheduled) or layer_norm_fwd_kernel1 (single-row) to load X (plus residual), compute per-token means/variances or RMS, write mean/rstd, and apply weight/bias if provided. Residual sums can be emitted to res_out when the caller needs them, and the implementation supports multiple groups by indexing the weight/bias per group slice. Everything runs purely in forward mode, caching the normalization scalars without invoking any backward kernels.

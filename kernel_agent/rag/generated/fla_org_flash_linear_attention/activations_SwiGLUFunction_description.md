@@ -1,0 +1,3 @@
+- kernel family: activation (SwiGLU = swish gate times linear branch)
+- concise summary: The forward Triton kernel iterates over the flattened tensor, forms the swish gate `x·σ(x)` in fp32, multiplies by the paired `y` chunk, and writes the result back in-place.
+- detailed summary: Autotuning selects a 1-D block size `B` from 512–8192 so each program handles `B` contiguous positions. It loads the corresponding `x` and `y` elements, evaluates the sigmoid gate, and stores `x*σ(x)*y` to the output tensor. The wrapper flattens the inputs (`T = x.numel()`), allocates the destination buffer, launches the kernel with a grid covering all tiles, and saves both inputs so the fused forward/backward kernel can reuse them when computing gradients.

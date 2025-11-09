@@ -1,0 +1,3 @@
+- kernel family: reduction (variance over specified dimension)
+- concise summary: For each reduction row it leverages a fused helper to compute both the mean and the sum of squared deviations, applies the requested Bessel correction, and writes the variance scalar.
+- detailed summary: Program ids map to non-reduced indices; for each one the kernel calls `language.VarMean.forward`, which streams through the row in `x_block_size` fragments (with boundary masking when needed), accumulates the mean and second moment in fp32, and returns the unbiased variance scaled by `(x_size - correction)`. The outer kernel simply stores the resulting variance value, while the companion mean is kept only transiently, letting backward reconstruct gradients using the same helper routines.

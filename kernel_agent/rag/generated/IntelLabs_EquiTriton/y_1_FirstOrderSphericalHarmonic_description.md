@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 1)
+- concise summary: Evaluates the three first-order real spherical harmonic components by scaling the x, y, and z coordinates with sqrt(3).
+- detailed summary: Each kernel instance loads block_size coordinate triples, multiplies each axis by sqrt(3) to obtain Y_{1m}, and stores the three outputs per point while honouring any column offset. The host wrapper allocates or reuses an output tensor of shape [..., 3], computes the grid from block_size, and launches the kernel without extra temporary buffers.

@@ -1,0 +1,3 @@
+- kernel family: layer normalization with swish gating
+- concise summary: Normalizes each row, applies affine scale/bias, runs a sigmoid, and gates the original activations (`sigmoid(affine) * x`) to produce a swish-style layer-norm output while recording per-row statistics.
+- detailed summary: The kernel loads BLOCK_N×BLOCK_D tiles of the input, computes the mean/variance, stores mean and rstd when training, normalizes `(x-mean)*rstd`, multiplies by the learnable weights/biases, and then replaces the affine result with `sigmoid(affine) * x_block`. The wrapper handles contiguity, allocates the output plus mean/rstd buffers, picks a power-of-two BLOCK_D, and launches a grid over the row dimension so the swish-gated layer norm is applied to every token.

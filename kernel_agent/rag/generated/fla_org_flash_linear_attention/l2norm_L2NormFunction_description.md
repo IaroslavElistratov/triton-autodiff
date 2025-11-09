@@ -1,0 +1,3 @@
+- kernel family: normalization (L2 vector normalization)
+- concise summary: Normalizes each row of the input to unit L2 norm, producing both the scaled tensor and the per-row inverse norm for reuse.
+- detailed summary: For D ≤ 512, l2norm_fwd_kernel tiles tokens into BT rows and BD columns, loads the tile, computes the row-wise sum of squares, writes y = x / sqrt(||x||² + eps), and stores rstd. Larger dimensions fall back to the 1D l2norm_fwd_kernel1, which does the same work with a single block. The host reshapes inputs to 2D, enforces power-of-two BD, and raises if the feature dimension exceeds the shared-memory-friendly limit, leaving backward untouched.

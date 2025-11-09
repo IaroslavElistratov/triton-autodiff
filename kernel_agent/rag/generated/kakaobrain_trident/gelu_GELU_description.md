@@ -1,0 +1,3 @@
+- kernel family: elementwise activation (GELU implemented in Triton)
+- concise summary: The forward kernel scans the flattened tensor in configurable tiles, applies the GELU nonlinearity from the shared `language.math` utilities, and writes the result back in the original dtype.
+- detailed summary: `GELU.__forward` flattens the input, allocates an output buffer, and launches `kernel.GELU.forward` with grid size `ceil(x_size/x_block_size)` selected by `gelu_configs`. Each program loads an `x_block_size` slice (with boundary checks when the length isn’t divisible), computes `GELU(x)` via `language.math.GELU.forward`, and stores the activation; no intermediate tensors are kept beyond the saved input for backward. The entire forward pass is this single Triton loop.

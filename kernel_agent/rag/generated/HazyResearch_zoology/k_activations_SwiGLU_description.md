@@ -1,0 +1,3 @@
+- kernel family: activation (SwiGLU)
+- concise summary: Splits the last dimension into two halves, applies the SiLU gate to the first half, multiplies by the second, and writes the gated output using tiled column blocks.
+- detailed summary: `_swiglu_fwd_kernel` launches over rows and BLOCK_N-sized column tiles; it loads matching slices from the `x` and `y` halves of the input, computes `x * sigmoid(x) * y` in FP32, and stores the result back to the output tensor with masking for tail columns. The Python wrapper reshapes arbitrary leading dimensions into a 2D matrix, dispatches the kernel with an autotuned block size, and reshapes the activation back to the original batch layout.

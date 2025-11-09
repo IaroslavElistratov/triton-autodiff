@@ -1,0 +1,3 @@
+- kernel family: recurrent post-processing (gated RWKV7 output correction)
+- concise summary: For every timestep and head it adds a corrective term derived from the read vector r, key k, and head-specific R·K weights, then applies the final gate g to the precomputed output.
+- detailed summary: gate_output_correction_fwd_kernel tiles over batches, sequence blocks (BT), and heads. It loads the base output o, gating signal g, read vectors r, keys k, static projection r_k, and values v, computes a scalar correction ⟨r ⊙ k ⊙ r_k⟩ per row, multiplies it with v, and adds the result to o before multiplying by g. The forward host loops over the sequence in 65k-sized segments to reuse the kernel configuration while keeping everything in forward memory only.

@@ -1,0 +1,3 @@
+- kernel family: activation (elementwise sigmoid)
+- concise summary: The autotuned Triton kernel flattens the input tensor and computes `1 / (1 + exp(-x))` in fp32 for each element, writing the result back in the original dtype.
+- detailed summary: For each block of `B` elements (with `B` chosen from 512–8192 via autotuning), a single program loads the slice, performs the sigmoid transform in fp32 to avoid precision loss, and stores the casted output. The Python wrapper derives the total element count `T`, allocates the output tensor, launches the kernel with a 1-D grid covering all blocks, and saves the input for the backward pass.

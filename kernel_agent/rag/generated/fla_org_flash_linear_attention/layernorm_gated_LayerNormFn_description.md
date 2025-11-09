@@ -1,0 +1,3 @@
+- kernel family: normalization (gated/grouped layer norm with optional pre/post gating)
+- concise summary: Performs per-group normalization and multiplies by weights/biases, optionally combining with a gating tensor z either before or after normalization via a SiLU gate.
+- detailed summary: layer_norm_fwd_kernel operates over (row, group) tiles, loading the group slice, optionally pre-multiplying by z·sigmoid(z) when norm_before_gate=False, computing mean/variance (or RMS), scaling by W/B, and finally applying the gate when norm_before_gate=True. The helper respects configurable group_size, produces per-group mean/rstd buffers, and leaves the normalized result in the caller-provided tensor out, all strictly within the forward pass.

@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 0)
+- concise summary: Emits the zeroth-order real spherical harmonic (a constant 1) for each coordinate regardless of input direction.
+- detailed summary: Each kernel tile ignores the coordinate values, computes the destination offsets using the supplied column offset and stride, and stores ones into the appropriate column of the output tensor; when no output buffer is provided the wrapper first allocates a tensor filled with ones. The grid size is derived from calculate_lastdim_num_blocks(coords, block_size).

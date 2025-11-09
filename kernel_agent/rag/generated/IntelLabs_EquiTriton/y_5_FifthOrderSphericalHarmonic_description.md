@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 5)
+- concise summary: Emits the eleven fifth-order real spherical harmonics through direct evaluation of quintic polynomials built from the coordinate components.
+- detailed summary: Each kernel tile loads x, y, z, prepares repeated powers up to degree five plus cross terms, applies the stored constants to compute all 11 Y_{5m} values, and stores them sequentially into the output tensor with optional column offsetting. The launcher allocates an output of shape [..., 11] if absent and sizes the grid via calculate_lastdim_num_blocks.

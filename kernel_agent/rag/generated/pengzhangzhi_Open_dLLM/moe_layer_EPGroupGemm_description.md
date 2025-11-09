@@ -1,0 +1,3 @@
+- kernel family: mixture-of-experts (grouped GEMM block)
+- concise summary: Takes tokens already grouped by expert, applies two grouped matmuls to form a SiLU×linear activation, and feeds that into a final grouped matmul that returns per-expert outputs.
+- detailed summary: The forward pass uses `group_gemm_same_nk` three times: first and second load tiled token chunks for each expert to compute the two FC1 projections, multiplies the SiLU of the first with the second to form the gated activation, and then multiplies by `fc2_weight` to produce expert outputs. Cumulative expert offsets (`cumsum`) drive the grouped GEMM so each tile processes only the rows belonging to that expert.

@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 3)
+- concise summary: Generates the seven third-order real spherical harmonics by evaluating cubic polynomials of the coordinate direction cosines.
+- detailed summary: The kernel loads x, y, z for each point in the block, precomputes x^3, y^3, z^3, their squares, and cross products, applies the predefined constants to form the seven Y_{3m} components, and stores them sequentially with respect to col_offset and output_stride. The driver allocates an output of shape [..., 7] when needed and uses calculate_lastdim_num_blocks to determine the launch grid.

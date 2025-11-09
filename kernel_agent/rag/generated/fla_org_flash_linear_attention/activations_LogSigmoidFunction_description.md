@@ -1,0 +1,3 @@
+- kernel family: activation (elementwise log-sigmoid with temperature scaling)
+- concise summary: The forward kernel vectorizes over the flattened tensor, computing a numerically stable `log(sigmoid(x/temperature))` by separating the negative part and using `1 + exp(-|x|)` to avoid overflow.
+- detailed summary: An autotuned launch picks a block size `B` (512–8192) and assigns each program a contiguous span of elements. It loads the slice in fp32, forms `b_m = min(0, x)` and `b_z = 1 + exp(-|x|)`, and writes `(b_m - log(b_z)) / temperature` back to the output buffer. The Python wrapper flattens `x` (`T = x.numel()`), allocates the result tensor, invokes the tuned kernel, and saves the input for the derivative.

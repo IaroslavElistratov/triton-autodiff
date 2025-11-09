@@ -1,0 +1,3 @@
+- kernel family: activation (elementwise leaky ReLU)
+- concise summary: Streams the flattened tensor through a tile-wise kernel that applies `max(x, 0) + negative_slope * min(x, 0)` per element and writes results in the original dtype.
+- detailed summary: Program ids stride across contiguous `x_block_size` slices, loading inputs with boundary checks and invoking `language.math.LeakyReLU.forward` to apply the slope-conditioned branch without divergence. Because the computation is purely elementwise, no shared state or reduction is needed; each tile is immediately written back, producing a fused activation that is ready for backward masking reuse.

@@ -1,0 +1,3 @@
+- kernel family: chunked cross entropy via matmul^T
+- concise summary: Fixed-configuration recomputation kernel tuned for the "final story" variant, capturing per-row log-sum-exp values and per-block losses while leaving logits to be regenerated on demand.
+- detailed summary: Using the fixed tile shape (256,64,64), the kernel loops over vocab tiles, accumulates the streaming max/sum while subtracting the target column, and emits both the per-row lse values and the block-level loss slice. The host code enforces the divisibility constraints, prints the chosen configuration, preserves the tensors and statistics required downstream, and returns the scalar loss obtained by summing the block contributions.

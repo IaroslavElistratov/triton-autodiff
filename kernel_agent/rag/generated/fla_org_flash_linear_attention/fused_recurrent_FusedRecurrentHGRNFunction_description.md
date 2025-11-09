@@ -1,0 +1,3 @@
+- kernel family: recurrent sequence modeling (HGRN gating)
+- concise summary: Evolves a per-feature hidden vector with the recurrence h = exp(g)·h + x across time, optionally with initial/final states and ragged sequences.
+- detailed summary: fused_recurrent_hgrn_fwd_kernel assigns each program a block of features (BD) for one batch item, computes start/end offsets from cu_seqlens when provided, and then streams through time loading x and g tiles. The kernel multiplies the hidden state by exp(g) and adds the new input, writing both the running state (the output) and, if requested, the final state, storing everything in registers to avoid backward references.

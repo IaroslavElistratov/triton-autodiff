@@ -1,0 +1,3 @@
+- kernel family: gated activation (SiLU × linear branch)
+- concise summary: The forward kernel applies the SiLU nonlinearity to tensor `a` and multiplies it elementwise with tensor `b`, producing the SwiGLU output in a single Triton loop.
+- detailed summary: `swiglu_forward` flattens the inputs, selects a tile size, and launches `_swiglu_forward_kernel`. Each program loads the `a`/`b` slice for one row, computes `silu(a) = a·sigmoid(a)` in fp32 for stability, casts back to the destination dtype, multiplies by `b`, and stores the result. The autograd function caches the flattened copies so the backward kernel can reuse them to derive gradients; only the forward computation is summarized here.

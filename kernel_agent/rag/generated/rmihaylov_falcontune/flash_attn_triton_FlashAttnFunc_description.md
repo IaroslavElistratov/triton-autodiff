@@ -1,0 +1,3 @@
+- kernel family: attention (FlashAttention-style streaming softmax)
+- concise summary: Tiles queries across the sequence/head dimension, streams through key/value blocks with optional bias and causal masking, maintains running log-sum-exp normalization, and writes the fused attention outputs plus the log-sum-exp buffer.
+- detailed summary: The forward kernel loads a `BLOCK_M × HEAD_DIM` query tile, iterates over key blocks (`BLOCK_N`) up to the causal boundary, forms scaled dot products, applies bias if provided, and updates per-row maxima and sums for numerical stability. After accumulating `p·V` contributions for all blocks, it rescales by the stored normalization factor and stores both the output tile and `lse_i` (log-sum-exp) for backward reuse.

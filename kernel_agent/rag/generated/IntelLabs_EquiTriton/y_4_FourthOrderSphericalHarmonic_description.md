@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 4)
+- concise summary: Evaluates the nine fourth-order real spherical harmonics using explicit quartic polynomials of x, y, and z.
+- detailed summary: For each group of points, the kernel constructs the necessary powers up to degree four, assembles the 2l+1=9 harmonics via the tabulated coefficients, and writes them contiguously into the output buffer obeying the provided column offset and stride. The wrapper shapes the output to [..., 9] and launches the kernel over calculate_lastdim_num_blocks(coords, block_size) blocks.

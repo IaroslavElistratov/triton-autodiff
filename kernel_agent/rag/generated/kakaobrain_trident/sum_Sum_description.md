@@ -1,0 +1,3 @@
+- kernel family: reduction (sum over specified dimension)
+- concise summary: Delegates each reduction row to a Triton helper that walks the row in blocks, accumulates the fp32 sum, and stores the scalar total for that index.
+- detailed summary: For each `y_offset` the kernel calls `language.Sum.forward`, which constructs block pointers over the target axis using the provided strides, iterates through the row in `x_block_size` chunks with optional boundary masking, accumulates the partial sums, and returns the final scalar in the requested dtype. The outer kernel simply writes this scalar into the 1D output buffer, enabling backward to expand the contribution uniformly across the reduced dimension.

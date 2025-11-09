@@ -1,0 +1,3 @@
+- kernel family: layer normalization + linear projection
+- concise summary: Applies the simpler layernorm variant and immediately follows it with a dense linear projection, honouring autocast and prenorm residual outputs.
+- detailed summary: Inputs are flattened per row, optional residual tensors are made contiguous, and _layer_norm_fwd produces normalized activations plus per-row statistics. The code then casts weights (and bias) to the current GPU autocast dtype, applies F.linear to the normalized view, restores the original tensor shape, and optionally returns the residual tensor when prenorm mode expects dual outputs.

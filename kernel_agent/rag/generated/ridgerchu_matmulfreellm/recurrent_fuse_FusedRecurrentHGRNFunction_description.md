@@ -1,0 +1,3 @@
+- kernel family: recurrent (fused gated HGRN scan)
+- concise summary: For each `(batch, head)` sequence, iteratively updates a hidden state using `h_t = g_t * h_{t-1} + x_t`, optionally seeding with an initial state, writes the per-step states to the output tensor, and can stash the final state.
+- detailed summary: The Triton kernel tiles the hidden dimension (`BD`) and loops over the time dimension `T`, loading slices of the input `x` and gating tensor `g`, keeping the running hidden state in registers, and storing it after every update. Optional flags control whether an initial state is loaded at `t=0` and whether the last state is written to a separate buffer.

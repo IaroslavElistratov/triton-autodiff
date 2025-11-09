@@ -1,0 +1,3 @@
+- kernel family: layer normalization + linear projection
+- concise summary: Reuses the fused layernorm kernel to normalize each row (with optional residual handling) and immediately feeds the result into a dense linear layer under autocast-aware dtype management.
+- detailed summary: The forward wrapper flattens and makes inputs contiguous, invokes _layer_norm_fwd to compute the normalized activations plus row statistics/residual copies, then casts the normalization output to the current autocast dtype, converts the projection weights and bias, and applies F.linear to produce the final embedding. Prenorm-mode requests return the saved residual alongside the linear output, while other auxiliary buffers are staged only so later steps can reuse them.

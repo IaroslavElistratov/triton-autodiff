@@ -1,0 +1,3 @@
+- kernel family: activation (elementwise ReLU)
+- concise summary: Flattens the tensor into tiles, applies a simple max-with-zero per element using the Triton math helper, and stores the rectified outputs.
+- detailed summary: Each program visits a contiguous `x_block_size` slice, loading the values with boundary checks, forwarding them through `language.math.ReLU.forward` to replace negatives by zero, and writing the results in the original dtype. The operation is purely elementwise, so no synchronization or shared state is needed; the kernel simply streams through memory to realize the ReLU activation efficiently.

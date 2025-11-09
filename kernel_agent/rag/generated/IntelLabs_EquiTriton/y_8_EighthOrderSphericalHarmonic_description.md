@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 8)
+- concise summary: Produces the seventeen eighth-order real spherical harmonics by evaluating even-degree polynomials of x, y, and z.
+- detailed summary: The Triton kernel precomputes degree-eight monomials and cross terms, applies the embedded coefficients to form the 17 Y_{8m} values, and stores them sequentially in the output buffer with respect to the column offset. The wrapper sizes the output to [..., 17], determines the grid via calculate_lastdim_num_blocks, and launches without auxiliary reductions.

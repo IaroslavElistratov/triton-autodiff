@@ -1,0 +1,3 @@
+- kernel family: recurrent attention (impulse low-rank delta rule)
+- concise summary: Maintains a BV×BK hidden panel that is driven by low-rank factors a and b, accumulates key-value outer products, and projects the result with Q to produce outputs and auxiliary activations.
+- detailed summary: fused_recurrent_fwd_kernel (this variant) iterates over BT tiles, loads Q/K/V along with the low-rank vectors, computes tmp = (hidden · a), updates the state via tmp⊗b + K⊗V, and writes both the output scores and the scalar tmp track (ha) for later use. It honors optional initial/final states, cu_seqlens-driven raggedness, and stores everything chunk-by-chunk without involving backward tensors.

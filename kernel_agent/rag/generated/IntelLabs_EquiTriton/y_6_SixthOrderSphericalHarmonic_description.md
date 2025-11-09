@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 6)
+- concise summary: Calculates the thirteen sixth-order real spherical harmonic components by unrolling the required degree-six polynomials within the kernel.
+- detailed summary: The kernel produces all necessary monomials of x, y, z up to degree six, uses the predefined coefficients to assemble the 13 Y_{6m} entries, and writes them into the destination buffer starting at col_offset. The Python wrapper allocates an output of shape [..., 13], determines the launch grid from block_size, and fires the kernel without auxiliary reductions.

@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 9)
+- concise summary: Computes the nineteen ninth-order real spherical harmonics through explicit polynomial evaluation of the coordinate powers.
+- detailed summary: For each tile, the kernel constructs the required degree-nine monomials, plugs them into the precomputed linear combinations to generate all 19 basis functions, and stores them into the output tensor starting at the optional column offset. The host helper provides an output of shape [..., 19], infers the launch grid from block_size, and calls the kernel directly.

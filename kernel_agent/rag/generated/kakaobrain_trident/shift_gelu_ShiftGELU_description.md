@@ -1,0 +1,3 @@
+- kernel family: activation (bias-shifted GELU)
+- concise summary: Splits the tensor into row tiles, adds the broadcast bias to form a shifted activation, evaluates GELU on the shifted values, and stores both the activated output and the intermediate shift buffer.
+- detailed summary: Program ids map to `(row, column block)` pairs; for each tile the kernel loads input and the matching slice of the bias vector with boundary checks, forms `shift = input + bias`, and feeds it into `language.math.GELU.forward`. The resulting GELU outputs are written back in the original dtype, while the per-element `shift` tensor is saved to support backward differentiation without recomputing the pre-activation sums.

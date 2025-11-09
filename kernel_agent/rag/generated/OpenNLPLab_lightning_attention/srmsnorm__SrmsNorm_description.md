@@ -1,0 +1,3 @@
+- kernel family: RMS normalization (streaming row-wise, Triton)
+- concise summary: Reshapes the tensor into rows, launches a Triton kernel that normalizes each row by its root-mean-square while caching the per-row inverse std for reuse.
+- detailed summary: Before launch it flattens batch dims, ensures contiguous storage, and selects a power-of-two block size bounded by the 64 KB feature limit and warp heuristics. The Triton kernel assigns one program instance per row, loads that row in float32 tiles, computes the mean square, derives the reciprocal sqrt with epsilon clamping (especially for fp16 inputs), multiplies the row by this factor, and writes both the normalized output and the per-row rstd buffer for later stages.

@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (orders 0–2 fused)
+- concise summary: Evaluates the l=0, l=1, and l=2 real spherical harmonic basis functions for each input coordinate triplet within a single Triton kernel.
+- detailed summary: With each program handling block_size points, the kernel loads contiguous x/y/z triples, computes the necessary linear and quadratic combinations using precomputed constants, and writes nine outputs per point (constant term plus three first-order and five second-order harmonics) to the output tensor. The Python wrapper allocates an output of shape [..., 9], determines the number of blocks with calculate_lastdim_num_blocks, and launches the kernel without additional synchronization.

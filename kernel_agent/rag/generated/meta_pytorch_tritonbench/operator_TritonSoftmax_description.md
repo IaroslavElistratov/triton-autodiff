@@ -1,0 +1,3 @@
+- kernel family: softmax (row-wise normalization)
+- concise summary: Launches one Triton program per input row to compute a numerically stable softmax by subtracting the row maximum, exponentiating, and normalizing within a BLOCK_SIZE tile.
+- detailed summary: For each row the kernel loads the contiguous BLOCK_SIZE slice (padding with −inf past n_cols), subtracts tl.max to avoid overflow, exponentiates, sums the numerators, and writes the normalized probabilities back to the matching position in the output. The forward wrapper picks the next power-of-two tile width, scales the warp count for large feature sizes, allocates the output tensor, and dispatches n_rows programs while caching the result for the backward pass.

@@ -1,0 +1,3 @@
+- kernel family: RMS normalization (affine variant)
+- concise summary: Computes the root-mean-square normalization per row, multiplies by a learnable weight vector, and stores the result along with the per-row inverse standard deviation.
+- detailed summary: Each program loads a BLOCK_D slice of a row, accumulates the squared activations to estimate the RMS value, stores the resulting `rstd`, scales the inputs by `rstd`, applies the weight vector (biasless), and writes the normalized output. The host ensures contiguous input, allocates the output and `rstd` buffers, chooses the largest power-of-two tile under the 64 KiB cap, and launches one program per row with an appropriate warp count.

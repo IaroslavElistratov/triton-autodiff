@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 10)
+- concise summary: Computes the 21 real spherical harmonic components for l = 10 by explicitly evaluating high-order polynomials of the input direction cosines within a single Triton launch.
+- detailed summary: For each block of block_size points, the kernel loads x, y, z, builds repeated powers and cross terms up to degree five, combines them with the large table of precomputed constants to form the 2l+1 basis functions Y_{10,m}, and stores the results sequentially starting at col_offset with the provided output_stride. The wrapper allocates an output of shape [..., 21] when needed, determines the block count via calculate_lastdim_num_blocks, and submits the kernel without further reductions.

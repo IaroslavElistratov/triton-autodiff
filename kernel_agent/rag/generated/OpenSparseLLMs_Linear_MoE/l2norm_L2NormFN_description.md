@@ -1,0 +1,3 @@
+- kernel family: normalization (vector L2 normalization across last axis)
+- concise summary: A row-wise Triton kernel computes the inverse sqrt of each row’s squared sum and scales the entire row in a single pass, supporting arbitrary batch shapes via flattening.
+- detailed summary: The forward helper reshapes tensors to `(M, N)`, ensures contiguous feature access, and selects a BLOCK_N tile under the 64KB cap before launching `_l2_norm_fwd_1pass_kernel`. Each program reads BLOCK_N elements in FP32, accumulates their squared norm with masking, forms `rstd = 1/sqrt(||x||² + eps)`, and writes the scaled vector back to the same stride, after which the result is reshaped to the original layout.

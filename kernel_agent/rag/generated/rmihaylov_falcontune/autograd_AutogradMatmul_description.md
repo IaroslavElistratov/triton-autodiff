@@ -1,0 +1,3 @@
+- kernel family: matrix multiply (group-wise quantized matmul 2/4/8 bits)
+- concise summary: Dequantizes group-packed weight blocks on the fly using per-group scales/zeros and index mapping, multiplies them with the float16 activation tile, and accumulates into fp32 before writing the fp16 output.
+- detailed summary: The forward kernel iterates over K in `BLOCK_SIZE_K` slices; within each slice it loads activation tiles (`float16`), reads packed weight ints, unpacks the proper bit-width using `g_idx` and per-group scales/zeros, converts back to fp16, and performs `tl.dot`. The wrapped function reshapes inputs to 2D, launches the autotuned kernel, and reshapes the fp16 result back to the original batch dimensions.

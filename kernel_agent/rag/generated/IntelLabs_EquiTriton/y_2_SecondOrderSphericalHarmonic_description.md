@@ -1,0 +1,3 @@
+- kernel family: spherical harmonics (order 2)
+- concise summary: Produces the five second-order real spherical harmonics via quadratic combinations of x, y, and z.
+- detailed summary: For each tile of points, the kernel computes xy, xz, yz, and the squared terms, blends them with the precomputed constants to obtain Y_{2m}, and writes the five values per point into the output tensor respecting any column offset. The wrapper ensures the output has shape [..., 5], derives the grid from block_size, and launches the kernel without additional synchronization.

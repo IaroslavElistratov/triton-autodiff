@@ -1,0 +1,3 @@
+- kernel family: layer normalization (grouped LN with optional residual and RMS variant)
+- concise summary: A Triton row kernel fuses residual addition, mean/variance (or RMS) reduction, and affine scaling/bias into a single pass before reshaping back to the original tensor layout.
+- detailed summary: The forward wrapper flattens grouped channels so each program normalizes one row of width N, optionally mixing in a residual tensor and writing it out for prenorm paths. Within `_layer_norm_fwd_1pass_kernel` the row is loaded in FP32 tiles sized by BLOCK_N, mean/rstd are computed (skipping the mean subtraction for RMS mode), and per-group weight/bias vectors are applied under masks, emitting the normalized row plus cached mean/rstd buffers for downstream use.

@@ -1,0 +1,3 @@
+- kernel family: activation (elementwise SiLU / swish)
+- concise summary: Tiles the flattened tensor, evaluates the sigmoid using a fast exponential approximation, multiplies by the original input, and writes the smooth activation result.
+- detailed summary: Each program processes a contiguous `x_block_size` slice, loading values with optional tail predicates. It computes `sigma = 1 / (1 + exp(-x))` in fp32 via `fast_expf`, forms `x * sigma`, and stores the product back in the source dtype. Because the computation is purely elementwise, the kernel just streams data through the SiLU nonlinearity, making it ready for reuse in the backward pass without extra buffers.

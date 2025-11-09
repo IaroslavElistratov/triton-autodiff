@@ -1,0 +1,3 @@
+- kernel family: chunked cross entropy via matmul^T
+- concise summary: Autotunes over several tile shapes while recomputing logits only when necessary, retaining compact statistics instead of the full vocabulary activations.
+- detailed summary: The forward kernel enforces that N, H, and V are integer multiples of the chosen block sizes, performs the tile-wise dot-product sweep, maintains numerically stable running maxima/sums, subtracts the target logits, and stores both the per-block loss and the row-wise log-sum-exp. The wrapper accepts contiguous inputs, ensures the divisibility prerequisites, launches the autotuned configuration, keeps the relevant tensors and statistics for later use, and returns the sum of recorded losses.

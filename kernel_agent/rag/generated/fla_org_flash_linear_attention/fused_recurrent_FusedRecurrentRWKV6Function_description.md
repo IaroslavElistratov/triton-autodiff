@@ -1,0 +1,3 @@
+- kernel family: recurrent attention (RWKV6 time-mix)
+- concise summary: Extends the RWKV recurrence by maintaining a K×V state, applying per-key decay exp(w), injecting both the raw K⊗V and an extra term scaled by u, and returning Q projections of the combined state.
+- detailed summary: fused_recurrent_rwkv6_fwd_kernel tiles (NV, NK, N·H); each program holds a K×V panel b_h, optional initial state, and the per-key bias u. For each timestep it loads Q/K/V/W, forms b_kv = K⊗V, computes the output sum((b_h + b_kv·u) · Q), then updates the hidden state via b_h = exp(w)·b_h + b_kv. Reverse traversal and cu_seqlens are handled by flipping pointer strides as needed, so forward emits both the activations and optional tail state tensors.

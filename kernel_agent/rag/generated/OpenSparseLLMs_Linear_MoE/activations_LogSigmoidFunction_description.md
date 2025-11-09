@@ -1,0 +1,3 @@
+- kernel family: elementwise activation (log-sigmoid, Triton autotuned)
+- concise summary: Flattens the input, then launches an autotuned Triton kernel that applies a numerically stable log-sigmoid to every element while keeping layout contiguous.
+- detailed summary: The forward launcher computes total elements T and feature stride D, allocates an output clone, and dispatches an autotuned 1D kernel whose grid divides T by D. Each program processes a tile of BT values, loads them in float32, clamps negatives to avoid overflow, evaluates log-sigmoid via min/abs/exp for stability, and stores the result back in the original dtype. The decorator enforces contiguous operands so the elemental sweep can stream over memory without extra address arithmetic.
