@@ -65,7 +65,7 @@ def _layer_norm_fwd_fused(
         tl.store(Y + cols, y, mask=mask)
 
 
-@autodiff(idxs_buffers=(0, 2, 3))
+@autodiff(inputs_require_grad=(0, 2, 3))
 def forward_layernorm(x, normalized_shape, weight, bias, eps):
     # allocate output
     y = torch.empty_like(x)

@@ -11,10 +11,10 @@ def autodiff(*args, **kwargs):
     Only records metadata (no runtime hook integration).
     """
 
-    if 'idxs_buffers' not in kwargs:
-        raise TypeError("autodiff() missing required keyword argument 'idxs_buffers'")
+    if 'inputs_require_grad' not in kwargs:
+        raise TypeError("autodiff() missing required keyword argument 'inputs_require_grad'")
 
-    idxs = kwargs.pop('idxs_buffers')
+    idxs = kwargs.pop('inputs_require_grad')
     if kwargs:
         raise TypeError(f"Unexpected keyword arguments: {list(kwargs)}")
 

@@ -65,7 +65,7 @@ def _swiglu_forward_kernel(a_ptr, b_ptr, c_ptr, stride, n_cols: tl.constexpr, BL
     tl.store(c_ptr + col_offsets, c_row, mask=mask)
 
 
-@autodiff(idxs_buffers=(0, 1))
+@autodiff(inputs_require_grad=(0, 1))
 def swiglu_forward(a, b):
     ori_shape = a.shape
 

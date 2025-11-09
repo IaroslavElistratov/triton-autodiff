@@ -257,7 +257,7 @@ def liger_cross_entropy_kernel(
 
 
 
-@autodiff(idxs_buffers=(0, 1))
+@autodiff(inputs_require_grad=(0, 1))
 def fused_linear_cross_entropy_forward(
     _input,
     weight,

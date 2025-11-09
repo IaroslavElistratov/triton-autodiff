@@ -221,7 +221,7 @@ def is_int_tensor(x: torch.Tensor) -> bool:
     }
 
 
-@autodiff(idxs_buffers=(0, 1))
+@autodiff(inputs_require_grad=(0, 1))
 def grouped_gemm_forward(
     x: torch.Tensor, w: torch.Tensor, m_sizes: torch.Tensor, dtype: Optional[torch.dtype] = None
 ) -> torch.Tensor:

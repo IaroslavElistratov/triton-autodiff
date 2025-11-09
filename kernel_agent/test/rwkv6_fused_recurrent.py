@@ -119,7 +119,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
 
 # todo-now: add grad dh0?
-@autodiff(idxs_buffers=(0, 1, 2, 3, 4))
+@autodiff(inputs_require_grad=(0, 1, 2, 3, 4))
 def fused_recurrent_rwkv6_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
