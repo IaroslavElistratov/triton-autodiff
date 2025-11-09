@@ -1,3 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/fla-org/flash-linear-attention
+# Source-Files: fla/ops/rwkv6/fused_recurrent.py
+# See: THIRD_PARTY_LICENSES.md (license text + NOTICE)
+
+
 import os
 import contextlib
 import functools

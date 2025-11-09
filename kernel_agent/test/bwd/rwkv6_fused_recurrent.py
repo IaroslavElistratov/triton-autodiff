@@ -1,9 +1,13 @@
-# Credits: fla_org_flash_linear_attention/flash-linear-attention-main/fla/ops/rwkv6/fused_recurrent.py
-# python -m kernel_agent.test.bwd.rwkv6_fused_recurrent
-
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/fla-org/flash-linear-attention
+# Source-Files: fla/ops/rwkv6/fused_recurrent.py
+# See: THIRD_PARTY_LICENSES.md (license text + NOTICE)
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+
+# python -m kernel_agent.test.bwd.rwkv6_fused_recurrent
 
 # Performance:
 #         T  fused_recurrent_rwkv6  fused_recurrent_rwkv6_bwd

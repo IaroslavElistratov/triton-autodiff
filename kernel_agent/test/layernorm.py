@@ -1,3 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/triton-lang/triton
+# Source-Files: https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/05-layer-norm.py
+
+
 import torch
 
 import triton
@@ -10,7 +16,6 @@ from kernel_agent.autodiff import autodiff
 # DEVICE = torch.device("cuda:0")
 
 
-# NOTE: copied from official triton tutorial -- https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html#sphx-glr-getting-started-tutorials-05-layer-norm-py
 
 
 

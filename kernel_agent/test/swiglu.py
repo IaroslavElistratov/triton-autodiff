@@ -1,4 +1,8 @@
-# credits: linkedin_Liger_Kernel/Liger-Kernel-main/src/liger_kernel/ops/swiglu.py
+# SPDX-License-Identifier: BSD-2-Clause
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/linkedin/Liger-Kernel
+# Source-Files: src/liger_kernel/ops/swiglu.py
+# See: THIRD_PARTY_LICENSES.md (license text + NOTICE)
 
 
 import torch

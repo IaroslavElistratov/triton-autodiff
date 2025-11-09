@@ -1,4 +1,10 @@
-# CREDIT: /woct0rdho_transformers_qwen3_moe_fused/transformers-qwen3-moe-fused-master/qwen3_moe_fused/grouped_gemm/interface.py
+# SPDX-License-Identifier: Apache-2.0
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/woct0rdho/transformers-qwen3-moe-fused
+# Source-Files: qwen3_moe_fused/grouped_gemm/interface.py
+# See: THIRD_PARTY_LICENSES.md (license text + NOTICE)
+
+
 
 # python -m kernel_agent.test.bwd.qwen3_moe_fused
 # moe_fused_linear_all:

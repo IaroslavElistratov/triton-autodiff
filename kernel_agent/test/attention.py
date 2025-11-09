@@ -1,6 +1,8 @@
-# %%
-# Copied from official triton tutorial (before blackwell support):
-# https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/triton-lang/triton
+# Source-Files: https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
+# Copied from official triton tutorial (before blackwell support)
 # Credits: OpenAI kernel team
 # Extra Credits:
 # * Original flash attention paper (https://arxiv.org/abs/2205.14135)

@@ -1,3 +1,15 @@
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/triton-lang/triton
+# Source-Files: https://github.com/triton-lang/triton/blob/105cb56487cd8a433b8fbfe9cc63c1f1c04a4b2a/python/tutorials/06-fused-attention.py
+# Copied from official triton tutorial (before blackwell support)
+# Credits: OpenAI kernel team
+# Extra Credits:
+# * Original flash attention paper (https://arxiv.org/abs/2205.14135)
+# * Rabe and Staats (https://arxiv.org/pdf/2112.05682v2.pdf)
+
+
+
 #  python -m kernel_agent.test.bwd.attention
 
 """
@@ -11,21 +23,6 @@ fused-attention-batch4-head32-d64-bwd-causal=True:
 4  16384.0      41.676693     41.492543
 """
 
-
-"""
-Fused Attention
-===============
-
-This is a Triton implementation of the Flash Attention v2 algorithm from Tri Dao (https://tridao.me/publications/flash2/flash2.pdf)
-
-Credits: OpenAI kernel team
-
-Extra Credits:
-
-* Original flash attention paper (https://arxiv.org/abs/2205.14135)
-* Rabe and Staats (https://arxiv.org/pdf/2112.05682v2.pdf)
-
-"""
 
 import pytest
 import torch

@@ -1,3 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Modified: extracted and consolidated transitive functions; adjusted imports/names/formatting.
+# Source-Repo: https://github.com/triton-lang/triton
+# Source-Files: https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html#sphx-glr-getting-started-tutorials-03-matrix-multiplication-py
+
+
 import os
 os.environ['TRITON_ALWAYS_COMPILE']='1'
 
@@ -11,7 +17,6 @@ from kernel_agent.autodiff import autodiff
 torch.manual_seed(0)
 DEVICE = torch.device("cuda:0")
 
-# Copied from official triton tutorial: https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html#sphx-glr-getting-started-tutorials-03-matrix-multiplication-py
 # removed
 #   - masks
 #   - % M, % N
