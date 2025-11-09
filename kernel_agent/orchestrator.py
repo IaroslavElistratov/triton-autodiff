@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import os, re, json, sys
-import hashlib
+import secrets
 from pathlib import Path
 
 import torch
@@ -318,8 +318,9 @@ class KernelOptimizer:
                 print(f"  [{idx}] {path} (similarity={sim:.3f}, fwd_lines={fwd_lines}, bwd_lines={bwd_lines})")
 
         # Set backward file path (write_initial_backward seeds the scaffold immediately)
-        digest = hashlib.sha256(redacted_fwd.encode()).hexdigest()[:10]
-        gen_dir = f"generated/{digest}"
+        run_token = secrets.token_hex(8)
+        # do this because deterministic digests reused directories and clobbered runs; random ids isolate each generated backward
+        gen_dir = f"generated/{run_token}"
         os.makedirs(gen_dir, exist_ok=True)
         generated_fp = f"{gen_dir}/raised.py"
 
