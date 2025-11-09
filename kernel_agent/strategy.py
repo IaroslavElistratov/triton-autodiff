@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
 from .utils import _env_truthy
-from .rag import _load_index, _embed_query, _cosine
+from .rag import _load_index, _embed_query, _cosine, _strip_reference_scaffold
 
 
 # Default verbose ON unless explicitly disabled
@@ -241,8 +241,10 @@ class RAGAdaptationStrategy(BaseStrategy):
         for fp, sim in candidate_scores:
             if sim < min_sim:
                 continue
-            bwd = backward_docs.get(fp, "")
-            fwd = documents.get(fp, "")
+            bwd_raw = backward_docs.get(fp, "")
+            fwd_raw = documents.get(fp, "")
+            bwd = _strip_reference_scaffold(bwd_raw)
+            fwd = _strip_reference_scaffold(fwd_raw)
             assert (bwd and fwd), "unreachable"
             references.append({
                 "forward": fwd,
@@ -429,22 +431,20 @@ DO NOT copy-paste this reference code. Instead:
         for idx, ref in enumerate(self.rag_refs, 1):
             match_path = ref["match_path"]
             sim = ref["similarity"]
-            rag_fwd = _truncate(ref["forward"])
-            rag_bwd = _truncate(ref["backward"])
+            rag_fwd = _truncate(ref["forward"]).strip()
+            rag_bwd = _truncate(ref["backward"]).strip()
 
+            # Keep a thin separator around each reference header so logs stay scannable without wrapping the snippet itself
             sections.append(
 f"""{_SEP_MINOR}
 REFERENCE #{idx}: {match_path} (similarity={sim:.3f})
 {_SEP_MINOR}
 
-RETRIEVED FORWARD (this is what the retrieved backward was written for):
-{_SEP_MINOR}
+~~~~~~~ RETRIEVED FORWARD (this is what the retrieved backward was written for) ~~~~~~~
 
 {rag_fwd}
 
-{_SEP_MINOR}
-RETRIEVED BACKWARD (pattern reference - shows how backward mirrors forward):
-{_SEP_MINOR}
+~~~~~~~ RETRIEVED BACKWARD (pattern reference - shows how backward mirrors forward) ~~~~~~~
 
 {rag_bwd}
 """

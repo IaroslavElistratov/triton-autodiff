@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import pickle
 import hashlib
+import re
 from typing import Any, List, Tuple
 
 
@@ -71,6 +72,55 @@ def _load_index(index_path: str):
     file_list = data["file_list"]             # list[str]
     openai_model = data.get("openai_model", "text-embedding-3-large")
     return embeddings, documents, backward_docs, file_list, openai_model
+
+
+_SEP_LINE_RE = re.compile(r"^(#\s*)?={60}\s*$")
+
+
+def _strip_reference_scaffold(text: str) -> str:
+    """Remove dataset banner scaffolding (# ====, uppercase titles) from snippets.
+
+    Assumes harvested repos follow the normalized format where every section uses a
+    60-character '=' banner (optionally prefixed by '#') plus optional '# TITLE'
+    comments. For each separator run we drop: the banner line itself, one immediate
+    uppercase title line, any duplicate banner rows, and trailing blank padding—then
+    resume copying real code. If the dataset layout changes, update the regex/logic
+    here accordingly.
+    """
+    lines = text.splitlines()
+    cleaned: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if _SEP_LINE_RE.match(stripped):
+            j = i + 1
+            if j < n:
+                title = lines[j].strip()
+                if title.startswith("#"):
+                    body = title.lstrip("# ").strip()
+                    if not body or body.isupper():
+                        j += 1
+            while j < n and _SEP_LINE_RE.match(lines[j].strip()):
+                j += 1
+            while j < n and not lines[j].strip():
+                j += 1
+            i = j
+            continue
+        cleaned.append(line)
+        i += 1
+    dedup: list[str] = []
+    for line in cleaned:
+        if not line.strip():
+            if dedup and not dedup[-1].strip():
+                continue
+        dedup.append(line)
+    while dedup and not dedup[0].strip():
+        dedup.pop(0)
+    while dedup and not dedup[-1].strip():
+        dedup.pop()
+    return "\n".join(dedup)
 
 
 def _embed_query(query_text: str, model: str = "text-embedding-3-large"):
