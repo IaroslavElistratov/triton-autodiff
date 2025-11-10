@@ -263,6 +263,7 @@ class MinimalLLMPatchProvider:
         else:
             # Phase 2+ (i>=1): Generating backward kernel - filter out pytorch_reference_impl and test helpers
             working_file_snippet = redact_torch_fn(generated_fp, self.snippet_max_lines)
+            # working_file_snippet = _read_snippet(generated_fp, self.snippet_max_lines)
 
         # RAG reference block
         # Strategy stores retrieved references internally.

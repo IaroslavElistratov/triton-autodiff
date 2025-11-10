@@ -290,7 +290,7 @@ def main() -> int:
     from .utils import redact_torch_fn
 
     # Compute default index path (invariant to cwd)
-    default_index = str(Path(__file__).parent / "kernel_embeddings.pkl")
+    default_index = str(Path(__file__).parent / "rag" / "kernel_embeddings.pkl")
 
     ap = argparse.ArgumentParser(
         "kernel_agent.rag",

@@ -221,7 +221,7 @@ class RAGAdaptationStrategy(BaseStrategy):
 
     def retrieve_references(self, redacted_forward: str) -> dict:
         """Retrieve reference forward/backward code snippets via embeddings."""
-        index_path = Path(__file__).parent / "kernel_embeddings.pkl"
+        index_path = Path(__file__).parent / "rag" / "kernel_embeddings.pkl"
         min_sim = float(os.environ.get("KERNEL_AGENT_RAG_MIN_SIM", "0.75"))
 
         try:

@@ -1,13 +1,12 @@
 # python -m pip install -e kernel_agent
 
 # Example usage:
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/attention.py --min-sim 0.7 --topk 4 --rag-exclude tritonbench,fa2_original__attention > kernel_agent/LOGS/atten.txt
-
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/layernorm.py --min-sim 0.7 --topk 4 --rag-exclude tritonbench > kernel_agent/LOGS/layernorm.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --min-sim 0.6 --topk 4 --rag-exclude tutorial,fa2_original__attention > kernel_agent/LOGS/atten.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/layernorm.py --min-sim 0.7 --topk 4 --rag-exclude tutorial,layer_norm_triton,fused_triton_LayerNorm,chengzeyi_stable_fast > kernel_agent/LOGS/layernorm.txt
 
 # kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/qwen3_moe_fused.py --min-sim 0.5 --topk 4 --rag-exclude woct0rdho > kernel_agent/LOGS/moe.txt
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/swiglu.py --min-sim 0.7 --topk 4 --rag-exclude Liger > kernel_agent/LOGS/swiglu.txt
-# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/rwkv6_fused_recurrent.py --min-sim 0.7 --topk 4 --rag-exclude fla_org > kernel_agent/LOGS/rwkv.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/swiglu.py --min-sim 0.7 --topk 4 --rag-exclude todo: > kernel_agent/LOGS/swiglu.txt
+# kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/rwkv6_fused_recurrent.py --min-sim 0.7 --topk 4 --rag-exclude todo: > kernel_agent/LOGS/rwkv.txt
 
 # CUDA_VISIBLE_DEVICES=
 
@@ -27,7 +26,7 @@ from .llm import MinimalLLMPatchProvider
 
 def main() -> None:
     ap = argparse.ArgumentParser("kernel-agent")
-    ap.add_argument("--max-iters", type=int, default=15)
+    ap.add_argument("--max-iters", type=int, default=12)
     ap.add_argument("--patience_perf_stop", type=int, default=4)
     ap.add_argument("--patience_parity_restore", type=int, default=4)
     ap.add_argument("--min-rel-impr", type=float, default=0.10)
