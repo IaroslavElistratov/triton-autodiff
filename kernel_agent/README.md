@@ -4,9 +4,6 @@
 
 <!-- Not production ready yet, but I think the core ideas are valid, so will keep improving robustness. -->
 
-
-# Motivation
-
 This repo aims to take in an arbitrary triton forward stub and generate efficient backward kernels for it.
 
 <!-- Given a triton stub:
@@ -23,7 +20,7 @@ The project aims to support arbitrary triton kernels. -->
 
 # Implementation details
 
-Collected dataset of 500 fwd-bwd triton stub pairs (and all the kernels they call) from github (among repos with permissive licenses).
+Includes a new dataset of [500 fwd-bwd triton stub pairs](/kernel_agent/rag/generated) and all the kernels they call (collected from github repos with permissive licenses).
 See `kernel_agent/rag/generated`.
 
 Since each of 500 entries in the dataset is a pair of (fwd, bwd) kernels:
@@ -43,11 +40,33 @@ Overall, the project implements the following features (so far):
 - ... (much more to come!)
 
 
+# Motivation
+
+i’ve been trying to implement triton autodiff for few months on the MLIR level. In my understanding it’s not feasible: there are 2 parts to a kernel -- math and schedule (how to parallelize);
+while you very easily can differentiate the former (with simple derivative rules), extremely hard to automatically generate the latter (which we gonna need if we want efficient backward)
+so i switched to this new completely different approach explained above.
+
+
+to motivate why new schedule is often needed for efficient backward:
+please see my drawing https://x.com/iaro_e (also attached below)
+for this [forward kernel](https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#sphx-glr-getting-started-tutorials-06-fused-attention-py).
+
+<img src="/assets/my-flash-atten-fwd.jpeg" alt="Diagram" width="1000">
+
+In this example, forward is parallelized such that each kernel instance (1) gets a tile of Q, (then splits K and V by BLOCK_SIZE_N), and (2) loops over all resulting tiles of K, and V (red loop).
+
+So in backward if we just differentiate math directly (without changing loop structure / schedule) we’d need to do atomic store for each red tile of K and V (because each of these K, V tiles was used multiple times during forward — once from each Q tile — so in backward, we’d need to accumulate grad into them; and because same K and V tile is used multiple times — once from each Q tile and we're  parallelizing over Q — we’d need to use atomics and not just regular stores).  Which would result in a very slow backward because of synchronization introduced by atomics.
+
+To solve this, one can change backward parallelization (so it’s different from forward parallelization). For grad K and V, instead of making each kernel instance own a tile of Q, and loop over all tiles of K, and V (our forward schedule). Instead we can make each kernel instance own a single tile of K and a single tile of V, and loop over all tiles of Q, this way — because each kernel instance sees all grad contributions, from all the Q tiles, it can accumulate all the grads locally (for the K and V tile it owns) and write resulting grad only once. Resulting in regular stores (not atomics) and thus in much faster backward.
+
+But this required changing parallelization (very hard to do generically in a compiler)
+
+
 # Setup
 
 
 ```shell
-git clone --depth 1 https://github.com/IaroslavElistratov/triton-autodiff
+git clone --depth 1 https://github.com/IaroslavElistratov/triton-autodiff && cd triton-autodiff
 python -m pip install -e kernel_agent
 ```
 
@@ -59,9 +78,11 @@ python kernel_agent/rag/rag_kernel_embedder.py --output kernel_agent/rag/kernel_
 
 # Examples of usage
 
-🔥 see examples of full traces in `kernel_agent/test/LOGS`.
+🔥 see examples of full traces in [`kernel_agent/test/LOGS`](/kernel_agent/test/LOGS).
 
 see usage examples in `kernel_agent/test`.
+
+the code (which the llm will iterate on) will be written to `generated`, logs will be written to `kernel_agent/test/LOGS/`.
 
 ```shell
 kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --min-sim 0.6 --topk 4 --rag-exclude tutorial,fa2_original__attention > kernel_agent/LOGS/atten.txt
