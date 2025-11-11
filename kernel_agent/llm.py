@@ -33,6 +33,8 @@ from .rag import build_rag_block
 
 VERBOSE = _env_truthy("KERNEL_AGENT_VERBOSE", "1")
 KERNEL_AGENT_STREAM = _env_truthy("KERNEL_AGENT_STREAM", "1")
+# allow disabling reasoning summaries
+SHOW_REASONING_SUMMARY = _env_truthy("REASONING_SUMMARY", "1")
 
 BEGIN_PATCH = "*** Begin Patch"
 END_PATCH = "*** End Patch"
@@ -713,16 +715,17 @@ def call_openai_api(sampler, system_text: str, user_text: str, message_list: lis
     # Build request input applying inline tool-acknowledge if pending exists
     input_payload, prev_kw, used_inline_ack = sampler._chain.build_input(user_text)
 
+    reasoning_payload = {"effort": sampler.reasoning_effort}
+    if SHOW_REASONING_SUMMARY:
+        reasoning_payload["summary"] = "auto"  # "detailed"
+
     resp = client.responses.create(
         model=model,
         instructions=system_text,
         input=input_payload,
         tools=tools,
         tool_choice="required",
-        reasoning={
-            "effort": sampler.reasoning_effort,
-            "summary": "auto", # "detailed"
-        },
+        reasoning=reasoning_payload,
         max_output_tokens=sampler.max_tokens,
         **temperature_kw,
         **prev_kw,
@@ -778,7 +781,7 @@ def call_openai_api(sampler, system_text: str, user_text: str, message_list: lis
 
     if VERBOSE:
 
-        if reasoning_summary:
+        if SHOW_REASONING_SUMMARY and reasoning_summary:
             print("=== Reasoning summary ===\n" + reasoning_summary + "\n")
 
         usage_dict = resp.model_dump()["usage"]

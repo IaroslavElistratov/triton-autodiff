@@ -85,8 +85,10 @@ see usage examples in `kernel_agent/test`.
 the code (which the llm will iterate on) will be written to `generated`, logs will be written to `kernel_agent/test/LOGS/`.
 
 ```shell
-kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --min-sim 0.6 --topk 4 --rag-exclude tutorial,fa2_original__attention > kernel_agent/LOGS/atten.txt
-kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/layernorm.py --min-sim 0.7 --topk 4 --rag-exclude tutorial,layer_norm_triton,fused_triton_LayerNorm,chengzeyi_stable_fast > kernel_agent/LOGS/layernorm.txt
+# set this flag to zero if your account is not verified with openai
+# export REASONING_SUMMARY=0
+kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/attention.py --min-sim 0.6 --topk 4 --rag-exclude tutorial,fa2_original__attention > kernel_agent/test/LOGS/atten.txt
+kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort medium --file-path kernel_agent/test/layernorm.py --min-sim 0.7 --topk 4 --rag-exclude tutorial,layer_norm_triton,fused_triton_LayerNorm,chengzeyi_stable_fast > kernel_agent/test/LOGS/layernorm.txt
 
 # WIP:
 # kernel-agent --backend openai --openai-model gpt-5 --reasoning-effort low --file-path kernel_agent/test/swiglu.py --min-sim 0.7 --topk 4 --rag-exclude liger_kernel/ops/swiglu > kernel_agent/LOGS/swiglu.txt
